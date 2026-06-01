@@ -150,36 +150,78 @@ function drawScatter(points) {
 
 function drawGuideOverlay(status) {
   const ctx = guideOverlay.getContext("2d");
-  const w = guideOverlay.width;
-  const h = guideOverlay.height;
-  ctx.clearRect(0, 0, w, h);
+  const rect = guideOverlay.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = Math.max(1, rect.width);
+  const cssH = Math.max(1, rect.height);
+  const pixelW = Math.round(cssW * dpr);
+  const pixelH = Math.round(cssH * dpr);
+  if (guideOverlay.width !== pixelW || guideOverlay.height !== pixelH) {
+    guideOverlay.width = pixelW;
+    guideOverlay.height = pixelH;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
   const checkpoints = status.guide?.checkpoints || [];
   if (!checkpoints.length) return;
-  ctx.lineWidth = 4;
-  ctx.strokeStyle = "rgba(255, 211, 105, 0.9)";
-  ctx.beginPath();
-  checkpoints.forEach((point, index) => {
-    const x = point.x * w;
-    const y = point.y * h;
-    if (index === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-  for (const point of checkpoints) {
-    const x = point.x * w;
-    const y = point.y * h;
-    const radius = point.current ? 12 : 7;
-    ctx.fillStyle = point.complete ? "#53d769" : point.current ? "#ffcc4d" : "#6bb6ff";
+
+  const naturalW = preview.naturalWidth || status.image_size?.[0] || cssW;
+  const naturalH = preview.naturalHeight || status.image_size?.[1] || cssH;
+  const scale = Math.min(cssW / naturalW, cssH / naturalH);
+  const imageW = naturalW * scale;
+  const imageH = naturalH * scale;
+  const offsetX = (cssW - imageW) / 2;
+  const offsetY = (cssH - imageH) / 2;
+
+  function px(x) {
+    return offsetX + x * imageW;
+  }
+
+  function py(y) {
+    return offsetY + y * imageH;
+  }
+
+  function drawTarget(point, color, radius) {
+    const x = px(point.x);
+    const y = py(point.y);
+    ctx.fillStyle = color;
     ctx.beginPath();
     ctx.arc(x, y, radius, 0, Math.PI * 2);
     ctx.fill();
   }
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(255, 211, 105, 0.95)";
+  ctx.lineWidth = 4;
+  ctx.setLineDash([14, 10]);
+  ctx.strokeRect(px(0.2), py(0.2), imageW * 0.6, imageH * 0.6);
+  ctx.setLineDash([]);
+  ctx.strokeStyle = "rgba(255, 211, 105, 0.35)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(px(0.5), py(0.5));
+  ctx.lineTo(px(0.2), py(0.5));
+  ctx.moveTo(px(0.5), py(0.5));
+  ctx.lineTo(px(0.8), py(0.5));
+  ctx.moveTo(px(0.5), py(0.5));
+  ctx.lineTo(px(0.5), py(0.2));
+  ctx.moveTo(px(0.5), py(0.5));
+  ctx.lineTo(px(0.5), py(0.8));
+  ctx.stroke();
+  ctx.restore();
+
+  for (const point of checkpoints) {
+    const radius = point.current ? 12 : 7;
+    const color = point.complete ? "#53d769" : point.current ? "#ffcc4d" : "#6bb6ff";
+    drawTarget(point, color, radius);
+  }
+
   const current = status.guide?.current;
   if (current) {
-    const boxW = Math.max(80, current.size * w);
-    const boxH = Math.max(50, current.size * h);
-    const x = current.x * w - boxW / 2;
-    const y = current.y * h - boxH / 2;
+    const boxW = Math.max(80, current.size * imageW);
+    const boxH = Math.max(50, current.size * imageH);
+    const x = px(current.x) - boxW / 2;
+    const y = py(current.y) - boxH / 2;
     ctx.strokeStyle = current.live_match ? "#53d769" : "#ffcc4d";
     ctx.lineWidth = 5;
     ctx.strokeRect(x, y, boxW, boxH);
@@ -188,7 +230,7 @@ function drawGuideOverlay(status) {
   if (pose) {
     ctx.fillStyle = "#ff4f64";
     ctx.beginPath();
-    ctx.arc(pose.x * w, pose.y * h, 10, 0, Math.PI * 2);
+    ctx.arc(px(pose.x), py(pose.y), 10, 0, Math.PI * 2);
     ctx.fill();
   }
 }
@@ -197,7 +239,7 @@ function guideText(status) {
   const guide = status.guide;
   if (!guide?.current) return "Follow the guide line with the board center.";
   const current = guide.current;
-  const base = `${guide.complete_count}/${guide.total_count}: ${current.label}`;
+  const base = `Route ${guide.complete_count}/${guide.total_count}: ${current.label}`;
   if (current.live_match) return `${base} - hold still`;
   return `${base} - move board center to the highlighted point and match the box size`;
 }

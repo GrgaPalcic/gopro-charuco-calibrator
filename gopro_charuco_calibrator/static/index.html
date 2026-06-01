@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GoPro ChArUco Calibrator</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=3">
 </head>
 <body>
   <main class="shell">
@@ -85,10 +85,10 @@
         </div>
         <div class="guidePrompt" id="guidePrompt">Open preview to start.</div>
         <div class="stats">
-          <div><strong id="captureCount">0/0</strong><span>captures</span></div>
+          <div><strong id="captureCount">0/0</strong><span>frames saved</span></div>
           <div><strong id="markerCount">0</strong><span>markers</span></div>
           <div><strong id="coverageOverall">0%</strong><span>coverage</span></div>
-          <div><strong id="guideCount">0/0</strong><span>guide</span></div>
+          <div><strong id="guideCount">0/0</strong><span>route targets</span></div>
         </div>
         <div class="coverage">
           <div class="bar"><span>X</span><meter id="barX" min="0" max="1" value="0"></meter></div>
@@ -101,6 +101,6 @@
       </section>
     </section>
   </main>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=3"></script>
 </body>
 </html>
