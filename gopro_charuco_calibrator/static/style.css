@@ -86,7 +86,7 @@ button:disabled {
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  grid-template-columns: minmax(300px, 430px) minmax(0, 1fr);
   gap: 16px;
   padding-top: 16px;
 }
@@ -137,13 +137,42 @@ select {
   gap: 12px;
 }
 
-#preview {
+.previewWrap {
+  position: relative;
   width: 100%;
   aspect-ratio: 16 / 9;
-  object-fit: contain;
   background: #050607;
   border: 1px solid #2e343c;
   border-radius: 6px;
+  overflow: hidden;
+}
+
+#preview,
+#guideOverlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+#preview {
+  object-fit: contain;
+}
+
+#guideOverlay {
+  pointer-events: none;
+}
+
+.guidePrompt {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid #5e5234;
+  border-radius: 6px;
+  background: #211d14;
+  color: #ffdd85;
+  font-weight: 650;
 }
 
 .stats {

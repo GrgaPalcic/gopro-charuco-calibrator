@@ -8,9 +8,12 @@ The app preserves the SO-101 field calibration behavior:
 
 - editable caib.io board specs instead of a fixed board
 - live detection overlay from a USB/V4L2 camera
+- back-to-back camera runs without restarting the web app
+- optional Open GoPro HTTP setup for webcam FOV/lens and video settings
 - auto-capture of stable, diverse board poses
 - manual capture from the browser
 - x/y/size/skew coverage feedback, including an x/y target band of `0.2..0.8`
+- a live guide line and target-size box that the board holder can trace
 - all-frame and selected-frame solves for `plumb_bob` and `rational_polynomial`
 - ROS `camera_info` YAML output, JSON summaries, CSV diagnostics, frames, and overlays
 
@@ -48,10 +51,35 @@ For a remote robot or camera host, replace `localhost` with the host IP.
    - square and marker sizes are in millimeters in the UI
    - dictionary should match the print, for example `DICT_5X5_100`
    - start ID and marker count should match the generated caib.io board
-5. Click `Start Capture`.
-6. Move the board through the image while watching x/y/size/skew coverage.
-7. Use `Capture` for important poses if auto-capture does not take them.
-8. Click `Solve` after the capture target is reached or enough coverage is available.
+5. Click `Open Preview`.
+6. Click `Start New Run`.
+7. Move the board center along the yellow route and match the highlighted box size.
+8. Use `Capture` for important poses if auto-capture does not take them.
+9. Click `Solve` after the capture target is reached or enough coverage is available.
+
+For the next GoPro, update the camera name/device if needed and click
+`Next Camera`, then `Start New Run`. The server keeps running; only the camera
+stream is reopened when the V4L2 device, resolution, FourCC, or ArUco
+dictionary changes.
+
+## Optional GoPro Control
+
+The GoPro panel uses the official Open GoPro HTTP API. Enable it only when the
+camera is reachable over the GoPro USB/Wi-Fi HTTP endpoint.
+
+Important controls:
+
+- Webcam resolution: `7=720p`, `12=1080p`
+- Webcam FOV: `0=Wide`, `2=Narrow`, `3=SuperView`, `4=Linear`
+- Webcam digital lens setting `43`
+- Video lens setting `121`, including HyperView and Ultra lens options on HERO13
+- Video resolution setting `2`
+- FPS setting `3`
+- Video framing/aspect, bitrate, profile, system video mode, and Max Lens Mod
+
+Every attempted GoPro HTTP step is recorded in the run `config.json` and final
+summary. If GoPro setup fails, disable GoPro control and use the already exposed
+V4L2 device directly.
 
 Outputs are written under:
 

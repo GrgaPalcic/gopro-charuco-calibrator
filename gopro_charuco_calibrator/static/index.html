@@ -14,9 +14,13 @@
         <p id="statusLine">Loading defaults...</p>
       </div>
       <div class="actions">
-        <button id="startBtn">Start Capture</button>
+        <button id="previewBtn">Open Preview</button>
+        <button id="startRunBtn">Start New Run</button>
+        <button id="pauseBtn" disabled>Pause</button>
+        <button id="resumeBtn" disabled>Resume</button>
         <button id="captureBtn" disabled>Capture</button>
         <button id="solveBtn" disabled>Solve</button>
+        <button id="nextCameraBtn">Next Camera</button>
         <button id="stopBtn" disabled>Stop</button>
       </div>
     </section>
@@ -31,6 +35,24 @@
           <label>Height <input name="camera.height" type="number"></label>
           <label>FPS <input name="camera.fps" type="number" step="0.1"></label>
           <label>FourCC <input name="camera.fourcc"></label>
+        </div>
+
+        <h2>GoPro</h2>
+        <label class="check"><input name="gopro.enabled" type="checkbox"> Apply GoPro settings</label>
+        <label>Open GoPro URL <input name="gopro.base_url" placeholder="http://172.x.x.51:8080"></label>
+        <div class="grid2">
+          <label>Webcam res <select name="gopro.webcam_resolution" data-gopro-options="webcam_resolution"></select></label>
+          <label>Webcam FOV <select name="gopro.webcam_fov" data-gopro-options="webcam_fov"></select></label>
+          <label>Webcam lens <select name="gopro.webcam_digital_lens" data-gopro-options="webcam_digital_lens" data-optional="true"></select></label>
+          <label>Video lens <select name="gopro.video_lens" data-gopro-options="video_lens" data-optional="true"></select></label>
+          <label>Video res <select name="gopro.video_resolution" data-gopro-options="video_resolution" data-optional="true"></select></label>
+          <label>Video FPS <select name="gopro.video_fps" data-gopro-options="video_fps" data-optional="true"></select></label>
+          <label>Framing <select name="gopro.video_framing" data-gopro-options="video_framing" data-optional="true"></select></label>
+          <label>Max lens mod <select name="gopro.max_lens_mod" data-gopro-options="max_lens_mod" data-optional="true"></select></label>
+        </div>
+        <div class="grid2">
+          <label class="check"><input name="gopro.stop_webcam_first" type="checkbox"> Stop first</label>
+          <label class="check"><input name="gopro.start_webcam" type="checkbox"> Start webcam</label>
         </div>
 
         <h2>Board</h2>
@@ -50,17 +72,23 @@
           <label>Min markers <input name="capture.min_markers" type="number"></label>
           <label>Max motion px <input name="capture.max_motion_px" type="number" step="0.1"></label>
           <label>Pose distance <input name="capture.min_param_dist" type="number" step="0.01"></label>
+          <label>Solver min frames <input name="solver.min_frames" type="number"></label>
+          <label>Solver min markers <input name="solver.min_markers" type="number"></label>
         </div>
         <label class="check"><input name="capture.auto_capture" type="checkbox"> Auto capture</label>
       </form>
 
       <section class="viewer">
-        <img id="preview" alt="Latest detection preview">
+        <div class="previewWrap">
+          <img id="preview" alt="Latest detection preview">
+          <canvas id="guideOverlay" width="1280" height="720"></canvas>
+        </div>
+        <div class="guidePrompt" id="guidePrompt">Open preview to start.</div>
         <div class="stats">
           <div><strong id="captureCount">0/0</strong><span>captures</span></div>
           <div><strong id="markerCount">0</strong><span>markers</span></div>
           <div><strong id="coverageOverall">0%</strong><span>coverage</span></div>
-          <div><strong id="poseText">-</strong><span>x y size skew</span></div>
+          <div><strong id="guideCount">0/0</strong><span>guide</span></div>
         </div>
         <div class="coverage">
           <div class="bar"><span>X</span><meter id="barX" min="0" max="1" value="0"></meter></div>

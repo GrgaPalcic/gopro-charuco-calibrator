@@ -67,6 +67,33 @@ class CameraConfig(BaseModel):
         return safe.strip("_") or "camera"
 
 
+class GoProSettingsConfig(BaseModel):
+    enabled: bool = False
+    base_url: str = ""
+    apply_on_preview: bool = True
+    stop_webcam_first: bool = True
+    start_webcam: bool = True
+    webcam_resolution: int = Field(default=7, ge=0)
+    webcam_fov: int = Field(default=3, ge=0)
+    webcam_port: int = Field(default=8554, ge=1, le=65535)
+    webcam_protocol: Literal["RTSP", "TS"] = "RTSP"
+    webcam_digital_lens: int | None = 3
+    video_lens: int | None = None
+    video_resolution: int | None = None
+    video_fps: int | None = None
+    video_aspect_ratio: int | None = None
+    video_framing: int | None = None
+    system_video_mode: int | None = None
+    video_bit_rate: int | None = None
+    profile: int | None = None
+    max_lens_mod: int | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def clean_base_url(cls, value: str) -> str:
+        return value.strip().rstrip("/")
+
+
 class CaptureConfig(BaseModel):
     target_samples: int = Field(default=90, ge=1, le=500)
     min_markers: int = Field(default=8, ge=1)
@@ -111,6 +138,7 @@ class CoverageTargets(BaseModel):
 
 class AppConfig(BaseModel):
     camera: CameraConfig = Field(default_factory=CameraConfig)
+    gopro: GoProSettingsConfig = Field(default_factory=GoProSettingsConfig)
     board: BoardConfig = Field(default_factory=BoardConfig)
     capture: CaptureConfig = Field(default_factory=CaptureConfig)
     solver: SolverConfig = Field(default_factory=SolverConfig)

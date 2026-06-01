@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .capture import CaptureSession, default_runs_dir
+from .gopro import gopro_options_for_ui
 from .models import AppConfig, SolveFramesRequest, StartRequest
 from .solver import solve_from_frames
 
@@ -19,7 +20,7 @@ app = FastAPI(title="GoPro ChArUco Calibrator")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 _session_lock = threading.Lock()
-_session: CaptureSession | None = None
+_session = CaptureSession()
 
 
 @app.get("/")
@@ -32,6 +33,7 @@ def defaults():
     return {
         "config": AppConfig().model_dump(),
         "runs_dir": str(default_runs_dir()),
+        "gopro_options": gopro_options_for_ui(),
         "aruco_dictionaries": [
             "DICT_4X4_50",
             "DICT_4X4_100",
@@ -47,59 +49,81 @@ def defaults():
 
 @app.post("/api/session/start")
 def start_session(request: StartRequest):
-    global _session
+    """Compatibility shortcut: open preview and immediately start a new run."""
     with _session_lock:
-        if _session is not None:
-            _session.stop()
-        _session = CaptureSession(request.config, request.runs_dir)
-        _session.start()
-        return _session.status()
+        if request.runs_dir is not None:
+            _session.runs_dir = request.runs_dir
+        return _session.start_run(request.config)
+
+
+@app.post("/api/session/preview")
+def open_preview(request: StartRequest):
+    with _session_lock:
+        if request.runs_dir is not None:
+            _session.runs_dir = request.runs_dir
+        return _session.open_preview(request.config)
+
+
+@app.post("/api/session/run")
+def start_run(request: StartRequest):
+    with _session_lock:
+        if request.runs_dir is not None:
+            _session.runs_dir = request.runs_dir
+        return _session.start_run(request.config)
+
+
+@app.post("/api/session/pause")
+def pause_session():
+    with _session_lock:
+        return _session.pause()
+
+
+@app.post("/api/session/resume")
+def resume_session():
+    with _session_lock:
+        return _session.resume()
+
+
+@app.post("/api/session/next-camera")
+def next_camera(request: StartRequest):
+    with _session_lock:
+        if request.runs_dir is not None:
+            _session.runs_dir = request.runs_dir
+        return _session.next_camera(request.config)
 
 
 @app.post("/api/session/stop")
 def stop_session():
-    global _session
     with _session_lock:
-        if _session is None:
-            raise HTTPException(status_code=404, detail="No active capture session")
-        _session.stop()
-        status = _session.status()
-        _session = None
-        return status
+        return _session.close()
 
 
 @app.get("/api/session/status")
 def session_status():
     with _session_lock:
-        if _session is None:
-            return {"state": "idle", "message": "no active session"}
         return _session.status()
 
 
 @app.post("/api/session/capture")
 def manual_capture():
     with _session_lock:
-        if _session is None:
-            raise HTTPException(status_code=404, detail="No active capture session")
-        _session.request_capture()
-        return _session.status()
+        return _session.request_capture()
 
 
 @app.post("/api/session/solve")
 def solve_session():
     with _session_lock:
-        if _session is None:
-            raise HTTPException(status_code=404, detail="No active capture session")
         session = _session
-    return session.solve()
+    try:
+        return session.solve()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/session/latest.jpg")
 def latest_detection():
     with _session_lock:
-        if _session is None:
-            raise HTTPException(status_code=404, detail="No active capture session")
-        path = _session.output_dir / "latest_detection.jpg"
+        path = _session.latest_detection_path
     if not path.exists():
         raise HTTPException(status_code=404, detail="No preview frame yet")
     return FileResponse(path, media_type="image/jpeg")
