@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GoPro ChArUco Calibrator</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="toolbar">
+      <div>
+        <h1>GoPro ChArUco Calibrator</h1>
+        <p id="statusLine">Loading defaults...</p>
+      </div>
+      <div class="actions">
+        <button id="startBtn">Start Capture</button>
+        <button id="captureBtn" disabled>Capture</button>
+        <button id="solveBtn" disabled>Solve</button>
+        <button id="stopBtn" disabled>Stop</button>
+      </div>
+    </section>
+
+    <section class="layout">
+      <form id="configForm" class="panel">
+        <h2>Camera</h2>
+        <label>Camera name <input name="camera.camera_name"></label>
+        <label>Device <input name="camera.device"></label>
+        <div class="grid2">
+          <label>Width <input name="camera.width" type="number"></label>
+          <label>Height <input name="camera.height" type="number"></label>
+          <label>FPS <input name="camera.fps" type="number" step="0.1"></label>
+          <label>FourCC <input name="camera.fourcc"></label>
+        </div>
+
+        <h2>Board</h2>
+        <div class="grid2">
+          <label>Columns <input name="board.cols" type="number"></label>
+          <label>Rows <input name="board.rows" type="number"></label>
+          <label>Square mm <input name="board.square_m" type="number" step="0.1" data-mm="true"></label>
+          <label>Marker mm <input name="board.marker_m" type="number" step="0.1" data-mm="true"></label>
+          <label>Start ID <input name="board.start_id" type="number"></label>
+          <label>Marker count <input name="board.marker_count" type="number"></label>
+        </div>
+        <label>Dictionary <select name="board.aruco_dict"></select></label>
+
+        <h2>Capture</h2>
+        <div class="grid2">
+          <label>Target samples <input name="capture.target_samples" type="number"></label>
+          <label>Min markers <input name="capture.min_markers" type="number"></label>
+          <label>Max motion px <input name="capture.max_motion_px" type="number" step="0.1"></label>
+          <label>Pose distance <input name="capture.min_param_dist" type="number" step="0.01"></label>
+        </div>
+        <label class="check"><input name="capture.auto_capture" type="checkbox"> Auto capture</label>
+      </form>
+
+      <section class="viewer">
+        <img id="preview" alt="Latest detection preview">
+        <div class="stats">
+          <div><strong id="captureCount">0/0</strong><span>captures</span></div>
+          <div><strong id="markerCount">0</strong><span>markers</span></div>
+          <div><strong id="coverageOverall">0%</strong><span>coverage</span></div>
+          <div><strong id="poseText">-</strong><span>x y size skew</span></div>
+        </div>
+        <div class="coverage">
+          <div class="bar"><span>X</span><meter id="barX" min="0" max="1" value="0"></meter></div>
+          <div class="bar"><span>Y</span><meter id="barY" min="0" max="1" value="0"></meter></div>
+          <div class="bar"><span>Size</span><meter id="barSize" min="0" max="1" value="0"></meter></div>
+          <div class="bar"><span>Skew</span><meter id="barSkew" min="0" max="1" value="0"></meter></div>
+        </div>
+        <canvas id="scatter" width="640" height="360"></canvas>
+        <pre id="results"></pre>
+      </section>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
