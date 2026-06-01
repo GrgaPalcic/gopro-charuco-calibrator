@@ -9,6 +9,7 @@ from typing import Any
 import cv2
 
 from .boards import detector_params, resolve_dictionary
+from .bridge import ensure_gopro_video_bridge
 from .coverage import PoseParams, coverage_summary, pose_distance
 from .detection import detect_markers, draw_detection, marker_motion
 from .gopro import apply_gopro_settings
@@ -57,6 +58,7 @@ class CaptureSession:
         self._run_start_time = 0.0
         self._state = "idle"
         self._last_gopro_result: dict[str, Any] | None = None
+        self._last_bridge_result: dict[str, Any] | None = None
         self._status: dict[str, Any] = self._base_status("idle", "no active preview")
 
     def open_preview(self, config: AppConfig | None = None) -> dict[str, Any]:
@@ -177,6 +179,7 @@ class CaptureSession:
             coverage_targets=self.config.coverage_targets,
         )
         summary["gopro"] = self._last_gopro_result
+        summary["video_bridge"] = self._last_bridge_result
         summary_path = self.output_dir / "caib_marker_board_calibration_summary.json"
         with summary_path.open("w", encoding="utf-8") as stream:
             json.dump(summary, stream, indent=2)
@@ -195,6 +198,7 @@ class CaptureSession:
         payload = {
             "config": self.config.model_dump(),
             "gopro_apply_result": self._last_gopro_result,
+            "video_bridge_result": self._last_bridge_result,
         }
         with (self.output_dir / "config.json").open("w", encoding="utf-8") as stream:
             json.dump(payload, stream, indent=2)
@@ -212,6 +216,7 @@ class CaptureSession:
             "run_dir": "" if self.output_dir is None else str(self.output_dir),
             "preview_dir": str(self.preview_dir),
             "gopro": self._last_gopro_result,
+            "video_bridge": self._last_bridge_result,
         }
 
     def _set_status(self, **updates) -> None:
@@ -223,15 +228,31 @@ class CaptureSession:
         board = self.config.board
         dictionary = resolve_dictionary(board.aruco_dict)
         params = detector_params()
-        cap = cv2.VideoCapture(camera.device, cv2.CAP_V4L2)
-        if camera.fourcc:
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*camera.fourcc[:4]))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, camera.width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, camera.height)
-        cap.set(cv2.CAP_PROP_FPS, camera.fps)
+        self._last_bridge_result = ensure_gopro_video_bridge(self.config, self._last_gopro_result)
+        if not self._last_bridge_result.get("ok", False):
+            self._state = "error"
+            self._set_status(
+                state="error",
+                message=str(self._last_bridge_result.get("error", "GoPro video bridge failed")),
+                gopro=self._last_gopro_result,
+                video_bridge=self._last_bridge_result,
+            )
+            return
+
+        cap = self._open_capture()
         if not cap.isOpened():
             self._state = "error"
-            self._set_status(state="error", message=f"failed to open {camera.device}")
+            message = f"failed to open {camera.device}"
+            if self._last_bridge_result and self._last_bridge_result.get("enabled"):
+                message += (
+                    "; GoPro HTTP setup ran, but the V4L2 bridge is not producing a usable device"
+                )
+            self._set_status(
+                state="error",
+                message=message,
+                gopro=self._last_gopro_result,
+                video_bridge=self._last_bridge_result,
+            )
             return
 
         image_size = (
@@ -254,6 +275,29 @@ class CaptureSession:
                 self._process_frame(frame, image_size, dictionary, params)
         finally:
             cap.release()
+
+    def _open_capture(self):
+        camera = self.config.camera
+        deadline = time.monotonic() + (8.0 if self.config.gopro.enabled else 0.0)
+        while True:
+            cap = cv2.VideoCapture(camera.device, cv2.CAP_V4L2)
+            if camera.fourcc:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*camera.fourcc[:4]))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, camera.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, camera.height)
+            cap.set(cv2.CAP_PROP_FPS, camera.fps)
+            if cap.isOpened():
+                return cap
+            if time.monotonic() >= deadline:
+                return cap
+            cap.release()
+            self._set_status(
+                state=self._state,
+                message=f"waiting for {camera.device}",
+                gopro=self._last_gopro_result,
+                video_bridge=self._last_bridge_result,
+            )
+            time.sleep(0.5)
 
     def _process_frame(self, frame, image_size, dictionary, params) -> None:
         capture = self.config.capture
@@ -359,6 +403,7 @@ class CaptureSession:
             run_dir="" if self.output_dir is None else str(self.output_dir),
             preview_dir=str(self.preview_dir),
             gopro=self._last_gopro_result,
+            video_bridge=self._last_bridge_result,
         )
 
     def _save_capture(self, frame, overlay, pose: PoseParams, reason: str) -> None:

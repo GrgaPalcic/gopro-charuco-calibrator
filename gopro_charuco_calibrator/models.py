@@ -73,11 +73,12 @@ class GoProSettingsConfig(BaseModel):
     apply_on_preview: bool = True
     stop_webcam_first: bool = True
     start_webcam: bool = True
+    start_video_bridge: bool = True
     webcam_resolution: int = Field(default=7, ge=0)
     webcam_fov: int = Field(default=3, ge=0)
     webcam_port: int = Field(default=8554, ge=1, le=65535)
-    webcam_protocol: Literal["RTSP", "TS"] = "RTSP"
-    webcam_digital_lens: int | None = 3
+    webcam_protocol: Literal["RTSP", "TS"] = "TS"
+    webcam_digital_lens: int | None = None
     video_lens: int | None = None
     video_resolution: int | None = None
     video_fps: int | None = None

@@ -44,18 +44,21 @@ For a remote robot or camera host, replace `localhost` with the host IP.
 ## Typical GoPro 13 Flow
 
 1. Put the GoPro in the exact lens mode, resolution, and crop that runtime will use.
-2. Start the V4L2/webcam feed and confirm the device path, for example `/dev/video42`.
+2. Connect USB and confirm the device path, for example `/dev/video42`.
 3. Enter the camera name, device, resolution, FPS, and FourCC.
 4. Enter the caib.io board specs:
    - columns and rows are checkerboard square counts
    - square and marker sizes are in millimeters in the UI
    - dictionary should match the print, for example `DICT_5X5_100`
    - start ID and marker count should match the generated caib.io board
-5. Click `Open Preview`.
-6. Click `Start New Run`.
-7. Move the board center along the yellow route and match the highlighted box size.
-8. Use `Capture` for important poses if auto-capture does not take them.
-9. Click `Solve` after the capture target is reached or enough coverage is available.
+5. For USB GoPro capture, enable `Apply GoPro settings` and leave `Open GoPro URL`
+   blank. The app probes the usual GoPro USB `.51` address automatically.
+6. Keep `Stop first`, `Start webcam`, and `Repair /dev/video` enabled, then click
+   `Open Preview`.
+7. Click `Start New Run`.
+8. Move the board center along the yellow route and match the highlighted box size.
+9. Use `Capture` for important poses if auto-capture does not take them.
+10. Click `Solve` after the capture target is reached or enough coverage is available.
 
 For the next GoPro, update the camera name/device if needed and click
 `Next Camera`, then `Start New Run`. The server keeps running; only the camera
@@ -64,13 +67,24 @@ dictionary changes.
 
 ## Optional GoPro Control
 
-The GoPro panel uses the official Open GoPro HTTP API. Enable it only when the
-camera is reachable over the GoPro USB/Wi-Fi HTTP endpoint.
+The GoPro panel uses the camera HTTP API. When the URL is blank, the app probes
+the GoPro USB network convention where the host is usually `172.x.x.52` and the
+camera is `172.x.x.51`. For the Linux V4L2 path, it follows the old SO-101
+healer sequence: start GoPro webcam mode, verify a real frame from the loopback,
+restart the ffmpeg UDP-to-V4L2 bridge only if needed, then open OpenCV.
+If HTTP setup succeeds but no frame arrives, check the app's error details for
+the exact `ufw` allow command. A common local fix is:
+
+```bash
+sudo ufw allow in on <gopro-usb-interface> from <gopro-ip> to any port 8554 proto udp
+```
 
 Important controls:
 
 - Webcam resolution: `7=720p`, `12=1080p`
 - Webcam FOV: `0=Wide`, `2=Narrow`, `3=SuperView`, `4=Linear`
+- Repair `/dev/video`: restart the local ffmpeg bridge into the selected V4L2
+  loopback if no frame is arriving
 - Webcam digital lens setting `43`
 - Video lens setting `121`, including HyperView and Ultra lens options on HERO13
 - Video resolution setting `2`

@@ -39,7 +39,7 @@
 
         <h2>GoPro</h2>
         <label class="check"><input name="gopro.enabled" type="checkbox"> Apply GoPro settings</label>
-        <label>Open GoPro URL <input name="gopro.base_url" placeholder="http://172.x.x.51:8080"></label>
+        <label>Open GoPro URL <input name="gopro.base_url" placeholder="Auto-detect from USB"></label>
         <div class="grid2">
           <label>Webcam res <select name="gopro.webcam_resolution" data-gopro-options="webcam_resolution"></select></label>
           <label>Webcam FOV <select name="gopro.webcam_fov" data-gopro-options="webcam_fov"></select></label>
@@ -53,6 +53,7 @@
         <div class="grid2">
           <label class="check"><input name="gopro.stop_webcam_first" type="checkbox"> Stop first</label>
           <label class="check"><input name="gopro.start_webcam" type="checkbox"> Start webcam</label>
+          <label class="check"><input name="gopro.start_video_bridge" type="checkbox"> Repair /dev/video</label>
         </div>
 
         <h2>Board</h2>
@@ -101,6 +102,6 @@
       </section>
     </section>
   </main>
-  <script src="/static/app.js?v=3"></script>
+  <script src="/static/app.js?v=4"></script>
 </body>
 </html>

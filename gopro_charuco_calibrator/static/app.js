@@ -278,6 +278,9 @@ function updateStatus(status) {
   if (status.gopro && status.gopro.enabled && !status.gopro.ok) {
     results.textContent = JSON.stringify(status.gopro, null, 2);
   }
+  if (status.video_bridge && status.video_bridge.enabled && !status.video_bridge.ok) {
+    results.textContent = JSON.stringify(status.video_bridge, null, 2);
+  }
 }
 
 async function poll() {
