@@ -61,7 +61,16 @@ def _board_from_args(base: BoardConfig, args: argparse.Namespace) -> BoardConfig
 def cmd_serve(args: argparse.Namespace) -> int:
     if args.config:
         set_default_config(_load_config(args.config))
-    uvicorn.run(app, host=args.host, port=args.port, reload=args.reload)
+    # Bound the graceful shutdown so Ctrl-C exits promptly even while a browser
+    # holds the long-lived MJPEG preview stream open (otherwise uvicorn waits for
+    # that connection to close and appears to hang).
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        timeout_graceful_shutdown=4,
+    )
     return 0
 
 

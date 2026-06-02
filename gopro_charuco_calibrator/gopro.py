@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import URLError
@@ -240,6 +241,51 @@ def gopro_options_for_ui() -> dict[str, Any]:
     return SETTING_DEFS
 
 
+def _setting_label(field: str, value: Any) -> Any:
+    if value is None:
+        return None
+    options = SETTING_DEFS.get(field, {}).get("options", {})
+    label = options.get(value)
+    return f"{label} ({value})" if label else value
+
+
+def describe_acquisition_mode(config: Any) -> dict[str, Any]:
+    """Human-readable record of the exact capture mode, for reproducible datasets.
+
+    Intrinsics are only valid for the mode used during calibration, so this is
+    saved alongside the run config and the solve summary, and shown on solve, so
+    later dataset recording can use the identical lens, resolution, and stream.
+    """
+    camera = config.camera
+    gopro = config.gopro
+    mode: dict[str, Any] = {
+        "camera_name": camera.camera_name,
+        "frame_size": f"{int(camera.width)}x{int(camera.height)}",
+        "fps": camera.fps,
+        "fourcc": camera.fourcc,
+        "source": "gopro_webcam" if gopro.enabled else "v4l2_device",
+    }
+    if gopro.enabled:
+        mode["lens_fov"] = _setting_label("webcam_fov", gopro.webcam_fov)
+        mode["webcam_resolution"] = _setting_label("webcam_resolution", gopro.webcam_resolution)
+        mode["protocol"] = gopro.webcam_protocol
+        mode["port"] = gopro.webcam_port
+        for field in (
+            "webcam_digital_lens",
+            "video_lens",
+            "video_resolution",
+            "video_fps",
+            "video_framing",
+            "max_lens_mod",
+        ):
+            value = getattr(gopro, field)
+            if value is not None:
+                mode[field] = _setting_label(field, value)
+    else:
+        mode["device"] = camera.device
+    return mode
+
+
 def _candidate_gopro_ips() -> list[str]:
     ips: list[str] = []
     env_ip = os.environ.get("GOPRO_IP", "").strip()
@@ -339,15 +385,22 @@ def apply_gopro_settings(config: GoProSettingsConfig) -> dict[str, Any]:
     setting_api_style = "open_gopro"
     webcam_api_style = "legacy_gpwebcam" if config.start_video_bridge else "open_gopro"
     if not base_url:
-        discovery = discover_gopro_base_url()
-        if discovery["ok"]:
-            base_url = discovery["base_url"]
-            open_base_url = discovery.get("open_base_url") or ""
-            legacy_base_url = discovery.get("legacy_base_url") or ""
-            if not open_base_url and discovery.get("api_style") == "open_gopro":
-                open_base_url = base_url
-            if not legacy_base_url and discovery.get("api_style") == "legacy_gpwebcam":
-                legacy_base_url = base_url
+        # A freshly connected GoPro may not answer the first probe, so retry the
+        # discovery a few times before giving up (avoids a spurious first-click
+        # failure).
+        for attempt in range(4):
+            discovery = discover_gopro_base_url()
+            if discovery["ok"]:
+                base_url = discovery["base_url"]
+                open_base_url = discovery.get("open_base_url") or ""
+                legacy_base_url = discovery.get("legacy_base_url") or ""
+                if not open_base_url and discovery.get("api_style") == "open_gopro":
+                    open_base_url = base_url
+                if not legacy_base_url and discovery.get("api_style") == "legacy_gpwebcam":
+                    legacy_base_url = base_url
+                break
+            if attempt < 3:
+                time.sleep(0.5)
     if not base_url:
         return {
             "enabled": True,
@@ -425,6 +478,37 @@ def apply_gopro_settings(config: GoProSettingsConfig) -> dict[str, Any]:
         "ok": all(step["ok"] for step in steps),
         "steps": steps,
     }
+
+
+def restart_gopro_webcam(
+    config: GoProSettingsConfig,
+    gopro_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Re-issue the webcam start to nudge a GoPro that has not begun streaming.
+
+    Used during preview startup when no UDP frame has arrived yet. It does not
+    stop the webcam first, so it will not tear down a stream that is coming up.
+    """
+    if not gopro_result or not gopro_result.get("enabled"):
+        return {"ok": False, "skipped": True}
+    legacy = gopro_result.get("legacy_base_url") or ""
+    open_url = gopro_result.get("open_base_url") or ""
+    base = gopro_result.get("base_url") or ""
+    if gopro_result.get("webcam_api_style") == "legacy_gpwebcam" and (legacy or base):
+        client: GoProClient = LegacyGoProClient(legacy or base)
+    elif open_url or base:
+        client = GoProClient(open_url or base)
+    else:
+        return {"ok": False, "error": "no GoPro base URL to start webcam"}
+    result = client.start_webcam(
+        resolution=config.webcam_resolution,
+        fov=config.webcam_fov,
+        port=config.webcam_port,
+        protocol=config.webcam_protocol,
+    )
+    if isinstance(client, LegacyGoProClient):
+        client.set_webcam_fov(config.webcam_fov)
+    return result.as_dict()
 
 
 def stop_gopro_webcam(gopro_result: dict[str, Any] | None) -> dict[str, Any]:

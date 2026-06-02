@@ -386,7 +386,18 @@ function coverageReasons(cov) {
   return reasons;
 }
 
-function renderResults(modelResults, coverage) {
+function modeSummary(mode) {
+  if (!mode) return "";
+  const parts = [];
+  if (mode.lens_fov) parts.push(`lens ${mode.lens_fov}`);
+  if (mode.webcam_resolution) parts.push(`res ${mode.webcam_resolution}`);
+  if (mode.frame_size) parts.push(mode.frame_size);
+  if (mode.fps) parts.push(`${mode.fps} fps`);
+  if (mode.protocol) parts.push(mode.protocol);
+  return parts.join(", ");
+}
+
+function renderResults(modelResults, coverage, mode) {
   if (!modelResults || !modelResults.length) {
     resultsPanel.hidden = true;
     return;
@@ -421,14 +432,17 @@ function renderResults(modelResults, coverage) {
     verdictReasons.append(li);
   }
 
-  const rows = [
+  const rows = [];
+  const modeStr = modeSummary(mode);
+  if (modeStr) rows.push(["Acquisition mode", `${modeStr} (record datasets in this exact mode)`]);
+  rows.push(
     ["Recommended model", String(rec.model)],
     ["Reprojection error", `median ${num(rec.median_view_error_px)} px, worst ${num(rec.worst_view_error_px)} px`],
     ["RMS", `${num(rec.rms)} px`],
     ["Focal length", `fx ${num(fx, 1)}, fy ${num(fy, 1)}`],
     ["Principal point", `cx ${num(cx, 1)}, cy ${num(cy, 1)}`],
     ["Frames used", `${used ?? "n/a"} / ${total ?? "n/a"}`],
-  ];
+  );
   const other = modelResults.find((r) => r !== rec);
   if (other) {
     rows.push([
@@ -466,10 +480,12 @@ function updateStatus(status) {
   const state = status.state || "idle";
   const capturing = state === "capturing";
   const paused = state === "paused";
-  const previewOpen = !["idle", "error"].includes(state);
-  previewBtn.disabled = previewOpen;
-  startRunBtn.disabled = state === "capturing" || state === "solving";
-  stopBtn.disabled = state === "idle";
+  const solving = state === "solving";
+  const live = !["idle", "error"].includes(state);
+  previewBtn.disabled = live;                 // open only when nothing is live
+  stopBtn.disabled = !live;                    // stop only when something is live
+  startRunBtn.disabled = capturing || solving; // start/restart a run otherwise
+  nextCameraBtn.disabled = !live || solving;   // switch only from a live session
   pauseResumeBtn.disabled = !(capturing || paused);
   pauseResumeBtn.textContent = paused ? "Resume" : "Pause";
   pauseResumeBtn.setAttribute("aria-pressed", String(paused));
@@ -484,7 +500,7 @@ function updateStatus(status) {
   renderFirewall(bridge, fwCmd);
 
   if (status.results && status.results.length) {
-    renderResults(status.results, status.coverage);
+    renderResults(status.results, status.coverage, status.acquisition_mode);
     results.textContent = "";
   } else {
     resultsPanel.hidden = true;
@@ -501,8 +517,9 @@ function updateStatus(status) {
 async function poll() {
   try {
     updateStatus(await api("/api/session/status"));
-  } catch (err) {
-    statusLine.textContent = String(err);
+  } catch {
+    statusLine.textContent = "server not reachable (is it still running?)";
+    setStreamStatus("error", "server offline");
   }
 }
 
@@ -599,18 +616,17 @@ solveBtn.addEventListener("click", async () => {
 });
 
 nextCameraBtn.addEventListener("click", async () => {
+  // Cleanly stop the current camera and go idle; the operator swaps the camera,
+  // edits the camera name if needed, then clicks Open Preview for the new one.
   firewallDismissed = false;
-  const config = readForm();
-  config.camera.camera_name = `${config.camera.camera_name}_next`;
-  setFormValue("camera.camera_name", config.camera.camera_name);
   results.textContent = "";
   resultsPanel.hidden = true;
-  startStream();
   updateStatus(await api("/api/session/next-camera", {
     method: "POST",
-    body: JSON.stringify({config}),
+    body: JSON.stringify({config: readForm()}),
   }));
-  startPolling();
+  stopStream();
+  clearInterval(pollTimer);
 });
 
 presetLoad.addEventListener("click", () => applyPreset(presetSelect.value));

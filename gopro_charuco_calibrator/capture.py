@@ -21,7 +21,12 @@ from .bridge import (
 )
 from .coverage import PoseParams, coverage_summary, pose_distance
 from .detection import detect_markers, draw_detection, marker_motion
-from .gopro import apply_gopro_settings, stop_gopro_webcam
+from .gopro import (
+    apply_gopro_settings,
+    describe_acquisition_mode,
+    restart_gopro_webcam,
+    stop_gopro_webcam,
+)
 from .guide import guide_status
 from .models import AppConfig
 from .solver import solve_from_frames
@@ -160,16 +165,22 @@ class CaptureSession:
             self._set_status(state="capturing", message="capture resumed")
         return self.status()
 
-    def next_camera(self, config: AppConfig) -> dict[str, Any]:
-        self._capture_enabled = False
-        self._paused = False
+    def next_camera(self, config: AppConfig | None = None) -> dict[str, Any]:
+        # Cleanly end the current camera: stop the stream and exit webcam mode
+        # (close() joins the capture thread and kills ffmpeg), then reset the run
+        # and go idle so the operator can swap the camera and click Open Preview.
+        # This avoids reopening preview on a stale thread, which froze the frame.
+        self.close()
         self._captured_poses = []
         self._capture_count = 0
         self.run_id = None
         self.output_dir = None
         self.frames_dir = None
         self.overlays_dir = None
-        return self.open_preview(config)
+        if config is not None:
+            self.config = config
+        self._set_status(state="idle", message="stopped; ready for next camera")
+        return self.status()
 
     def close(self) -> dict[str, Any]:
         self._capture_enabled = False
@@ -223,6 +234,10 @@ class CaptureSession:
         with self._frame_cond:
             return self._latest_jpeg, self._jpeg_seq
 
+    def stopping(self) -> bool:
+        """True once the session has been stopped/closed (ends the MJPEG stream)."""
+        return self._stop.is_set()
+
     def status(self) -> dict[str, Any]:
         with self._lock:
             return dict(self._status)
@@ -244,6 +259,7 @@ class CaptureSession:
         )
         summary["gopro"] = self._last_gopro_result
         summary["video_bridge"] = self._last_bridge_result
+        summary["acquisition_mode"] = describe_acquisition_mode(self.config)
         summary_path = self.output_dir / "caib_marker_board_calibration_summary.json"
         with summary_path.open("w", encoding="utf-8") as stream:
             json.dump(summary, stream, indent=2)
@@ -253,6 +269,7 @@ class CaptureSession:
             message="calibration solve complete",
             summary_path=str(summary_path),
             results=summary["results"],
+            acquisition_mode=summary["acquisition_mode"],
         )
         return summary
 
@@ -261,6 +278,7 @@ class CaptureSession:
             return
         payload = {
             "config": self.config.model_dump(),
+            "acquisition_mode": describe_acquisition_mode(self.config),
             "gopro_apply_result": self._last_gopro_result,
             "video_bridge_result": self._last_bridge_result,
         }
@@ -371,8 +389,14 @@ class CaptureSession:
         reader.start()
 
         try:
-            # Phase 1: wait for the first frame, or surface a clear failure.
-            deadline = time.monotonic() + 10.0
+            # Phase 1: wait for the first frame. A GoPro can take several seconds
+            # to actually emit UDP after entering webcam mode, and sometimes the
+            # first start_webcam does not take, so we wait patiently and re-kick the
+            # webcam periodically. This is what makes a single Open Preview reliable
+            # instead of needing several clicks.
+            start = time.monotonic()
+            deadline = start + 25.0
+            next_rekick = start + 7.0
             while not self._stop.is_set():
                 with frame_cond:
                     if latest["seq"] == 0 and latest["alive"]:
@@ -390,15 +414,28 @@ class CaptureSession:
                 if not alive:
                     self._fail_stream(stream_error_result(
                         self.config, self._last_gopro_result, log_path,
-                        "No video frames received.",
+                        "Decoder ended before any frame arrived.",
                     ))
                     return
-                if time.monotonic() > deadline:
+                now = time.monotonic()
+                if now > deadline:
                     self._fail_stream(stream_error_result(
                         self.config, self._last_gopro_result, log_path,
-                        "No video frames received within 10s.",
+                        "No video frames after 25s. The camera may not have entered "
+                        "webcam mode, or a firewall is blocking the UDP video. If you "
+                        "already allowed the firewall, replug the GoPro and try again.",
                     ))
                     return
+                # Re-kick the webcam if it has not started streaming yet (GoPro only).
+                if proc is not None and now >= next_rekick:
+                    restart_gopro_webcam(self.config.gopro, self._last_gopro_result)
+                    next_rekick = now + 7.0
+                self._set_status(
+                    state=self._state,
+                    message=f"waiting for GoPro stream ({int(now - start)}s)",
+                    gopro=self._last_gopro_result,
+                    video_bridge=self._last_bridge_result,
+                )
             if self._stop.is_set():
                 return
 

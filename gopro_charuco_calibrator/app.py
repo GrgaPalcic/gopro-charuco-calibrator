@@ -186,7 +186,7 @@ async def _mjpeg_generator(session: CaptureSession):
         last_emit = time.monotonic()
         yield _mjpeg_chunk(jpeg)
     try:
-        while True:
+        while not session.stopping():
             jpeg, seq = await anyio.to_thread.run_sync(session.wait_for_jpeg, last_seq, 1.0)
             if jpeg is None or seq == last_seq:
                 continue
