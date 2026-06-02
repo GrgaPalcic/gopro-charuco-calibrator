@@ -226,7 +226,7 @@ function updateBars(coverage) {
   document.getElementById("barSkew").value = coverage?.skew?.progress || 0;
 }
 
-function drawScatter(points) {
+function drawScatter(points, rejected) {
   const ctx = scatter.getContext("2d");
   const w = scatter.width;
   const h = scatter.height;
@@ -256,6 +256,19 @@ function drawScatter(points) {
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fill();
+  }
+  // Discarded-for-high-error frames (from the latest solve): repeat these areas.
+  for (const point of rejected || []) {
+    const x = point.x * w;
+    const y = point.y * h;
+    const r = 4 + 8 * Math.min(point.size || 0, 0.7);
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255, 79, 100, 0.9)";
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#ffffff";
+    ctx.stroke();
   }
 }
 
@@ -479,7 +492,7 @@ function updateStatus(status) {
     `${status.guide?.complete_count || 0}/${status.guide?.total_count || 0}`;
   guidePrompt.textContent = guideText(status);
   updateBars(status.coverage || {});
-  drawScatter(status.coverage?.points || []);
+  drawScatter(status.coverage?.points || [], status.rejected_points || []);
   drawGuideOverlay(status);
 
   const state = status.state || "idle";

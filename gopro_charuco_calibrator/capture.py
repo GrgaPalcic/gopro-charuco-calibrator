@@ -32,6 +32,45 @@ from .models import AppConfig
 from .solver import solve_from_frames
 
 
+def _high_error_points(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    """Board positions of frames the recommended solve discarded for high error.
+
+    Surplus/capping discards are intentionally excluded so the red dots are a true
+    "repeat this area" signal. Maps each discarded frame name to its pose via the
+    summary frame list.
+    """
+    results = summary.get("results") or []
+    if not results:
+        return []
+    recommended = min(
+        results,
+        key=lambda r: r.get("median_view_error_px", r.get("rms", 1e9)) or 1e9,
+    )
+    rejected = (recommended.get("selected") or {}).get("rejected_frames") or []
+    pose_by_name = {
+        frame["name"]: frame
+        for frame in (summary.get("frames") or [])
+        if "name" in frame
+    }
+    points: list[dict[str, Any]] = []
+    for entry in rejected:
+        if not str(entry.get("reason", "")).startswith("view_error_px"):
+            continue  # skip surplus (over_max_selected_frames) and other non-error drops
+        frame = pose_by_name.get(entry.get("name"))
+        if frame is None:
+            continue
+        points.append(
+            {
+                "x": frame.get("x"),
+                "y": frame.get("y"),
+                "size": frame.get("size"),
+                "skew": frame.get("skew"),
+                "error": entry.get("all_view_error_px"),
+            }
+        )
+    return points
+
+
 def _read_exact(stream, nbytes: int) -> bytes | None:
     """Read exactly ``nbytes`` from a pipe, or None on EOF (producer died)."""
     chunks: list[bytes] = []
@@ -149,7 +188,7 @@ class CaptureSession:
         self._run_start_time = time.monotonic()
         self._state = "capturing"
         self._write_run_config()
-        self._set_status(state="capturing", message="new run started")
+        self._set_status(state="capturing", message="new run started", rejected_points=[])
         return self.status()
 
     def pause(self) -> dict[str, Any]:
@@ -265,6 +304,7 @@ class CaptureSession:
         summary["gopro"] = self._last_gopro_result
         summary["video_bridge"] = self._last_bridge_result
         summary["acquisition_mode"] = describe_acquisition_mode(self.config)
+        summary["rejected_points"] = _high_error_points(summary)
         summary_path = self.output_dir / "caib_marker_board_calibration_summary.json"
         with summary_path.open("w", encoding="utf-8") as stream:
             json.dump(summary, stream, indent=2)
@@ -275,6 +315,7 @@ class CaptureSession:
             summary_path=str(summary_path),
             results=summary["results"],
             acquisition_mode=summary["acquisition_mode"],
+            rejected_points=summary["rejected_points"],
         )
         return summary
 
@@ -304,6 +345,7 @@ class CaptureSession:
             "preview_dir": str(self.preview_dir),
             "gopro": self._last_gopro_result,
             "video_bridge": self._last_bridge_result,
+            "rejected_points": [],
         }
 
     def _set_status(self, **updates) -> None:
