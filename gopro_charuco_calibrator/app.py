@@ -32,7 +32,9 @@ async def _lifespan(_app: FastAPI):
     except Exception:  # noqa: BLE001 - never block startup on cleanup
         pass
     yield
-    # Shutdown: release the camera and exit GoPro webcam mode.
+    # Shutdown: end any open MJPEG stream so Ctrl-C does not hang, then release
+    # the camera and exit GoPro webcam mode.
+    _shutdown.set()
     try:
         with _session_lock:
             _session.close()
@@ -45,6 +47,10 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 _session_lock = threading.Lock()
 _session = CaptureSession()
+# Set only on server shutdown; ends the MJPEG generator. NOT the per-session stop
+# (a per-session stop is handled by the browser closing the stream connection),
+# so reopening a preview after Stop/Next Camera still streams.
+_shutdown = threading.Event()
 
 _STREAM_MAX_FPS = 30.0
 _STREAM_MIN_INTERVAL = 1.0 / _STREAM_MAX_FPS
@@ -186,7 +192,7 @@ async def _mjpeg_generator(session: CaptureSession):
         last_emit = time.monotonic()
         yield _mjpeg_chunk(jpeg)
     try:
-        while not session.stopping():
+        while not _shutdown.is_set():
             jpeg, seq = await anyio.to_thread.run_sync(session.wait_for_jpeg, last_seq, 1.0)
             if jpeg is None or seq == last_seq:
                 continue

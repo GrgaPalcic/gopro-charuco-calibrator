@@ -199,6 +199,12 @@ class CaptureSession:
                 stop_gopro_webcam(self._last_gopro_result)
             except Exception:  # noqa: BLE001 - close() must never raise
                 pass
+        # Drop the last frame so a reopened stream starts blank instead of showing
+        # the previous camera's still image until new frames arrive.
+        with self._frame_cond:
+            self._latest_jpeg = None
+            self._jpeg_seq += 1
+            self._frame_cond.notify_all()
         self._state = "idle"
         self._set_status(state="idle", message="preview closed")
         return self.status()
@@ -233,10 +239,6 @@ class CaptureSession:
     def latest_jpeg(self) -> tuple[bytes | None, int]:
         with self._frame_cond:
             return self._latest_jpeg, self._jpeg_seq
-
-    def stopping(self) -> bool:
-        """True once the session has been stopped/closed (ends the MJPEG stream)."""
-        return self._stop.is_set()
 
     def status(self) -> dict[str, Any]:
         with self._lock:
