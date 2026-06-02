@@ -600,9 +600,11 @@ pauseResumeBtn.addEventListener("click", async () => {
 });
 
 stopBtn.addEventListener("click", async () => {
-  updateStatus(await api("/api/session/stop", {method: "POST"}));
-  clearInterval(pollTimer);
+  // Tear the video down first so a final stream "load" cannot flip the dot back
+  // to green while the request is in flight.
   stopStream();
+  clearInterval(pollTimer);
+  updateStatus(await api("/api/session/stop", {method: "POST"}));
 });
 
 captureBtn.addEventListener("click", async () => {
@@ -621,12 +623,14 @@ nextCameraBtn.addEventListener("click", async () => {
   firewallDismissed = false;
   results.textContent = "";
   resultsPanel.hidden = true;
+  // Tear the video down first (before awaiting) so the dot does not flip back to
+  // green on the stream's final load while the camera is being stopped.
+  stopStream();
+  clearInterval(pollTimer);
   updateStatus(await api("/api/session/next-camera", {
     method: "POST",
     body: JSON.stringify({config: readForm()}),
   }));
-  stopStream();
-  clearInterval(pollTimer);
 });
 
 presetLoad.addEventListener("click", () => applyPreset(presetSelect.value));
