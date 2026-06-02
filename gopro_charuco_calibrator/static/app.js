@@ -47,6 +47,7 @@ let streamActive = false;
 let fallbackTimer = null;
 let firewallDismissed = false;
 let lastFirewallCmd = "";
+let autoSolved = false;
 
 function setDeep(obj, path, value) {
   const parts = path.split(".");
@@ -327,7 +328,7 @@ function drawGuideOverlay(status) {
   }
 
   const current = status.guide?.current;
-  if (current) {
+  if (current && !status.guide?.complete) {
     const boxW = Math.max(80, current.size * imageW);
     const boxH = Math.max(50, current.size * imageH);
     const x = px(current.x) - boxW / 2;
@@ -347,6 +348,10 @@ function drawGuideOverlay(status) {
 
 function guideText(status) {
   const guide = status.guide;
+  if (guide?.complete) {
+    return `Route complete (${guide.complete_count}/${guide.total_count}). Quality check below; `
+      + "Resume to add or repeat poses, then Solve again.";
+  }
   if (!guide?.current) return "Follow the guide line with the board center.";
   const current = guide.current;
   const base = `Route ${guide.complete_count}/${guide.total_count}: ${current.label}`;
@@ -482,15 +487,25 @@ function updateStatus(status) {
   const paused = state === "paused";
   const solving = state === "solving";
   const live = !["idle", "error"].includes(state);
+  const done = state === "complete" || state === "solved";
   previewBtn.disabled = live;                 // open only when nothing is live
   stopBtn.disabled = !live;                    // stop only when something is live
   startRunBtn.disabled = capturing || solving; // start/restart a run otherwise
   nextCameraBtn.disabled = !live || solving;   // switch only from a live session
-  pauseResumeBtn.disabled = !(capturing || paused);
-  pauseResumeBtn.textContent = paused ? "Resume" : "Pause";
+  // Resume re-enables capturing from paused or after the route completed/solved,
+  // so the operator can add or repeat poses on the same run.
+  pauseResumeBtn.disabled = !(capturing || paused || done);
+  pauseResumeBtn.textContent = capturing ? "Pause" : "Resume";
   pauseResumeBtn.setAttribute("aria-pressed", String(paused));
   captureBtn.disabled = !capturing;
   solveBtn.disabled = captures < Math.max(3, Number(form.elements["solver.min_frames"].value || 25));
+
+  // When the route first completes, run a checkpoint solve automatically so the
+  // operator gets an early quality readout (and can then Resume to fix weak areas).
+  if (state === "complete" && !autoSolved) {
+    autoSolved = true;
+    runSolve();
+  }
 
   syncStream(state);
 
@@ -574,6 +589,7 @@ async function savePreset() {
 
 previewBtn.addEventListener("click", async () => {
   firewallDismissed = false;
+  autoSolved = false;
   startStream();
   updateStatus(await api("/api/session/preview", {
     method: "POST",
@@ -584,6 +600,7 @@ previewBtn.addEventListener("click", async () => {
 
 startRunBtn.addEventListener("click", async () => {
   firewallDismissed = false;
+  autoSolved = false;
   results.textContent = "";
   resultsPanel.hidden = true;
   startStream();
@@ -611,16 +628,24 @@ captureBtn.addEventListener("click", async () => {
   updateStatus(await api("/api/session/capture", {method: "POST"}));
 });
 
-solveBtn.addEventListener("click", async () => {
+async function runSolve() {
   statusLine.textContent = "solving...";
-  await api("/api/session/solve", {method: "POST"});
+  try {
+    await api("/api/session/solve", {method: "POST"});
+  } catch (err) {
+    statusLine.textContent = `solve failed: ${err}`;
+    return;
+  }
   await poll(); // status now carries results -> updateStatus renders the panel
-});
+}
+
+solveBtn.addEventListener("click", runSolve);
 
 nextCameraBtn.addEventListener("click", async () => {
   // Cleanly stop the current camera and go idle; the operator swaps the camera,
   // edits the camera name if needed, then clicks Open Preview for the new one.
   firewallDismissed = false;
+  autoSolved = false;
   results.textContent = "";
   resultsPanel.hidden = true;
   // Tear the video down first (before awaiting) so the dot does not flip back to

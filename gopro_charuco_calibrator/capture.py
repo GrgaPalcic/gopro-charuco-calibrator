@@ -83,6 +83,7 @@ class CaptureSession:
         self._manual_capture = False
         self._capture_enabled = False
         self._paused = False
+        self._route_done = False
         self._prev_centers = None
         self._captured_poses: list[PoseParams] = []
         self._capture_count = 0
@@ -141,6 +142,7 @@ class CaptureSession:
         self._manual_capture = False
         self._paused = False
         self._capture_enabled = True
+        self._route_done = False
         self._prev_centers = None
         self._last_capture = 0.0
         self._last_preview = 0.0
@@ -173,6 +175,7 @@ class CaptureSession:
         self.close()
         self._captured_poses = []
         self._capture_count = 0
+        self._route_done = False
         self.run_id = None
         self.output_dir = None
         self.frames_dir = None
@@ -599,7 +602,11 @@ class CaptureSession:
         # would disable capture and freeze the guide before the last (tilt) poses.
         target_reached = self._capture_count >= capture.target_samples
         if self._state == "capturing":
-            if guide.get("complete"):
+            if guide.get("complete") and not self._route_done:
+                # First time the route is complete: stop and let the operator get a
+                # quality check (the UI auto-solves). _route_done means a later
+                # Resume can keep capturing extra/repeat poses without re-completing.
+                self._route_done = True
                 self._capture_enabled = False
                 self._state = "complete"
                 message = f"guide route complete with {self._capture_count} captures"
