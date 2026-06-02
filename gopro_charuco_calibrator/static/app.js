@@ -48,6 +48,7 @@ let fallbackTimer = null;
 let firewallDismissed = false;
 let lastFirewallCmd = "";
 let autoSolved = false;
+let currentState = "idle";
 
 function setDeep(obj, path, value) {
   const parts = path.split(".");
@@ -257,18 +258,25 @@ function drawScatter(points, rejected) {
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fill();
   }
-  // Discarded-for-high-error frames (from the latest solve): repeat these areas.
+  // Frames the latest solve discarded. Red (high error) = repeat that area;
+  // muted hollow (surplus, trimmed to the frame cap) = no action needed.
   for (const point of rejected || []) {
     const x = point.x * w;
     const y = point.y * h;
     const r = 4 + 8 * Math.min(point.size || 0, 0.7);
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(255, 79, 100, 0.9)";
-    ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = "#ffffff";
-    ctx.stroke();
+    if (point.kind === "surplus") {
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = "rgba(168, 177, 187, 0.8)";
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = "rgba(255, 79, 100, 0.9)";
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#ffffff";
+      ctx.stroke();
+    }
   }
 }
 
@@ -500,6 +508,7 @@ function updateStatus(status) {
   const paused = state === "paused";
   const solving = state === "solving";
   const live = !["idle", "error"].includes(state);
+  currentState = state;
   const done = state === "complete" || state === "solved";
   previewBtn.disabled = live;                 // open only when nothing is live
   stopBtn.disabled = !live;                    // stop only when something is live
@@ -644,6 +653,10 @@ captureBtn.addEventListener("click", async () => {
 async function runSolve() {
   statusLine.textContent = "solving...";
   try {
+    // Pause capture first so solving from an active run is a clean, explicit stop.
+    if (currentState === "capturing") {
+      await api("/api/session/pause", {method: "POST"});
+    }
     await api("/api/session/solve", {method: "POST"});
   } catch (err) {
     statusLine.textContent = `solve failed: ${err}`;

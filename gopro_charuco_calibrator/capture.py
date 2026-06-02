@@ -32,11 +32,12 @@ from .models import AppConfig
 from .solver import solve_from_frames
 
 
-def _high_error_points(summary: dict[str, Any]) -> list[dict[str, Any]]:
-    """Board positions of frames the recommended solve discarded for high error.
+def _discarded_points(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    """Board positions of frames the recommended solve did not use, with a kind.
 
-    Surplus/capping discards are intentionally excluded so the red dots are a true
-    "repeat this area" signal. Maps each discarded frame name to its pose via the
+    kind="error" means discarded for high reprojection error (repeat that area);
+    kind="surplus" means a good frame trimmed only because the selection cap was
+    reached (no action needed). Maps each discarded frame name to its pose via the
     summary frame list.
     """
     results = summary.get("results") or []
@@ -54,11 +55,11 @@ def _high_error_points(summary: dict[str, Any]) -> list[dict[str, Any]]:
     }
     points: list[dict[str, Any]] = []
     for entry in rejected:
-        if not str(entry.get("reason", "")).startswith("view_error_px"):
-            continue  # skip surplus (over_max_selected_frames) and other non-error drops
         frame = pose_by_name.get(entry.get("name"))
         if frame is None:
             continue
+        reason = str(entry.get("reason", ""))
+        kind = "error" if reason.startswith("view_error_px") else "surplus"
         points.append(
             {
                 "x": frame.get("x"),
@@ -66,6 +67,7 @@ def _high_error_points(summary: dict[str, Any]) -> list[dict[str, Any]]:
                 "size": frame.get("size"),
                 "skew": frame.get("skew"),
                 "error": entry.get("all_view_error_px"),
+                "kind": kind,
             }
         )
     return points
@@ -304,7 +306,7 @@ class CaptureSession:
         summary["gopro"] = self._last_gopro_result
         summary["video_bridge"] = self._last_bridge_result
         summary["acquisition_mode"] = describe_acquisition_mode(self.config)
-        summary["rejected_points"] = _high_error_points(summary)
+        summary["rejected_points"] = _discarded_points(summary)
         summary_path = self.output_dir / "caib_marker_board_calibration_summary.json"
         with summary_path.open("w", encoding="utf-8") as stream:
             json.dump(summary, stream, indent=2)

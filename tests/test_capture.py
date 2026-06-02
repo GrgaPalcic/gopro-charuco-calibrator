@@ -1,4 +1,4 @@
-from gopro_charuco_calibrator.capture import _high_error_points
+from gopro_charuco_calibrator.capture import _discarded_points
 
 
 def _summary():
@@ -36,16 +36,17 @@ def _summary():
     }
 
 
-def test_high_error_points_only_flags_high_error_discards():
-    points = _high_error_points(_summary())
-    # Only the high-error frame (capture_001), not the surplus-capped one (capture_002).
-    assert len(points) == 1
-    point = points[0]
-    assert point["x"] == 0.2
-    assert point["y"] == 0.3
-    assert point["error"] == 3.1
+def test_discarded_points_classifies_error_vs_surplus():
+    points = _discarded_points(_summary())
+    by_name = {(round(p["x"], 3), round(p["y"], 3)): p for p in points}
+    assert len(points) == 2
+    # capture_001 was discarded for high error.
+    assert by_name[(0.2, 0.3)]["kind"] == "error"
+    assert by_name[(0.2, 0.3)]["error"] == 3.1
+    # capture_002 was trimmed as surplus (over the selection cap).
+    assert by_name[(0.8, 0.7)]["kind"] == "surplus"
 
 
-def test_high_error_points_handles_empty():
-    assert _high_error_points({"frames": [], "results": []}) == []
-    assert _high_error_points({}) == []
+def test_discarded_points_handles_empty():
+    assert _discarded_points({"frames": [], "results": []}) == []
+    assert _discarded_points({}) == []
