@@ -1,21 +1,43 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
 import cv2
+import numpy as np
 
 from .boards import detector_params, resolve_dictionary
-from .bridge import ensure_gopro_video_bridge
+from .bridge import (
+    bridge_log_path,
+    start_decode,
+    stop_gopro_video_bridge,
+    stream_disabled_result,
+    stream_error_result,
+    stream_ok_result,
+)
 from .coverage import PoseParams, coverage_summary, pose_distance
 from .detection import detect_markers, draw_detection, marker_motion
-from .gopro import apply_gopro_settings
+from .gopro import apply_gopro_settings, stop_gopro_webcam
 from .guide import guide_status
 from .models import AppConfig
 from .solver import solve_from_frames
+
+
+def _read_exact(stream, nbytes: int) -> bytes | None:
+    """Read exactly ``nbytes`` from a pipe, or None on EOF (producer died)."""
+    chunks: list[bytes] = []
+    remaining = nbytes
+    while remaining > 0:
+        block = stream.read(remaining)
+        if not block:
+            return None
+        chunks.append(block)
+        remaining -= len(block)
+    return b"".join(chunks)
 
 
 def default_runs_dir() -> Path:
@@ -47,6 +69,12 @@ class CaptureSession:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        # Live MJPEG frame buffer. A dedicated condition (not self._lock) decouples
+        # frame delivery from status updates and keeps lock-hold times minimal.
+        self._frame_cond = threading.Condition()
+        self._latest_jpeg: bytes | None = None
+        self._jpeg_seq = 0
+        self._jpeg_quality = 82
         self._manual_capture = False
         self._capture_enabled = False
         self._paused = False
@@ -150,6 +178,16 @@ class CaptureSession:
         if self._thread is not None:
             self._thread.join(timeout=5.0)
         self._thread = None
+        # Leave a clean state: the capture thread has released the V4L2 device, so
+        # now stop the local ffmpeg bridge (frees /dev/video*, so the loopback can
+        # be removed and a reopen starts a fresh low-latency bridge) and tell the
+        # GoPro to exit webcam mode.
+        if self.config.gopro.enabled:
+            try:
+                stop_gopro_video_bridge(self.config)
+                stop_gopro_webcam(self._last_gopro_result)
+            except Exception:  # noqa: BLE001 - close() must never raise
+                pass
         self._state = "idle"
         self._set_status(state="idle", message="preview closed")
         return self.status()
@@ -158,6 +196,32 @@ class CaptureSession:
         with self._lock:
             self._manual_capture = True
         return self.status()
+
+    def _publish_jpeg(self, image) -> None:
+        """Encode a frame to JPEG in memory and wake any MJPEG stream consumers."""
+        ok, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality])
+        if not ok:
+            return
+        data = buf.tobytes()
+        with self._frame_cond:
+            self._latest_jpeg = data
+            self._jpeg_seq += 1
+            self._frame_cond.notify_all()
+
+    def wait_for_jpeg(self, last_seq: int, timeout: float) -> tuple[bytes | None, int]:
+        """Block until a frame newer than ``last_seq`` is available (or timeout).
+
+        Returns ``(jpeg_bytes, seq)``. The timeout lets a streaming generator
+        re-check client/stop state instead of blocking forever on a dead client.
+        """
+        with self._frame_cond:
+            if self._jpeg_seq == last_seq:
+                self._frame_cond.wait(timeout)
+            return self._latest_jpeg, self._jpeg_seq
+
+    def latest_jpeg(self) -> tuple[bytes | None, int]:
+        with self._frame_cond:
+            return self._latest_jpeg, self._jpeg_seq
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -223,58 +287,158 @@ class CaptureSession:
         with self._lock:
             self._status.update(updates)
 
+    def _fail_stream(self, result: dict[str, Any]) -> None:
+        self._last_bridge_result = result
+        self._state = "error"
+        self._set_status(
+            state="error",
+            message=str(result.get("error", "video stream failed")),
+            gopro=self._last_gopro_result,
+            video_bridge=result,
+        )
+
     def _run(self) -> None:
         camera = self.config.camera
         board = self.config.board
         dictionary = resolve_dictionary(board.aruco_dict)
         params = detector_params()
-        self._last_bridge_result = ensure_gopro_video_bridge(self.config, self._last_gopro_result)
-        if not self._last_bridge_result.get("ok", False):
-            self._state = "error"
-            self._set_status(
-                state="error",
-                message=str(self._last_bridge_result.get("error", "GoPro video bridge failed")),
-                gopro=self._last_gopro_result,
-                video_bridge=self._last_bridge_result,
-            )
-            return
+        width, height = int(camera.width), int(camera.height)
+        log_path = bridge_log_path(camera.device, self.config.gopro.webcam_port)
 
-        cap = self._open_capture()
-        if not cap.isOpened():
-            self._state = "error"
-            message = f"failed to open {camera.device}"
-            if self._last_bridge_result and self._last_bridge_result.get("enabled"):
-                message += (
-                    "; GoPro HTTP setup ran, but the V4L2 bridge is not producing a usable device"
+        # GoPro: decode the UDP stream with ffmpeg straight into a pipe (no
+        # v4l2loopback, no mux/demux hop). Otherwise open the V4L2 device directly.
+        proc = None
+        cap = None
+        if self.config.gopro.enabled:
+            started = start_decode(self.config, log_path)
+            if isinstance(started, str):
+                self._fail_stream(
+                    stream_error_result(self.config, self._last_gopro_result, log_path, started)
                 )
-            self._set_status(
-                state="error",
-                message=message,
-                gopro=self._last_gopro_result,
-                video_bridge=self._last_bridge_result,
-            )
-            return
+                return
+            proc = started
+            nbytes = width * height * 3
+            stdout = proc.stdout
 
-        image_size = (
-            int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or camera.width,
-            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or camera.height,
-        )
-        self._set_status(
-            state=self._state,
-            message=f"previewing {camera.device} at {image_size[0]}x{image_size[1]}",
-            image_size=list(image_size),
-        )
+            def read_one():
+                buf = _read_exact(stdout, nbytes)
+                if buf is None:
+                    return None
+                return np.frombuffer(buf, dtype=np.uint8).reshape((height, width, 3)).copy()
+        else:
+            cap = self._open_capture()
+            if not cap.isOpened():
+                self._fail_stream(
+                    stream_error_result(
+                        self.config, self._last_gopro_result, log_path,
+                        f"failed to open {camera.device}.",
+                    )
+                )
+                return
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or width
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or height
+            self._last_bridge_result = stream_disabled_result()
+
+            def read_one():
+                ok, frame = cap.read()
+                return frame if ok else None
+
+        image_size = (width, height)
+
+        # The reader thread keeps only the NEWEST frame; the processing loop (slower,
+        # because of ChArUco detection) consumes the latest and drops anything in
+        # between, so latency stays ~one frame instead of growing a backlog.
+        reader_stop = threading.Event()
+        frame_cond = threading.Condition()
+        latest: dict[str, Any] = {"frame": None, "seq": 0, "alive": True}
+
+        def _reader() -> None:
+            try:
+                while not reader_stop.is_set() and not self._stop.is_set():
+                    frame = read_one()
+                    if frame is None:
+                        break
+                    with frame_cond:
+                        latest["frame"] = frame
+                        latest["seq"] += 1
+                        frame_cond.notify_all()
+            finally:
+                with frame_cond:
+                    latest["alive"] = False
+                    frame_cond.notify_all()
+
+        reader = threading.Thread(target=_reader, name="gopro-charuco-reader", daemon=True)
+        reader.start()
 
         try:
+            # Phase 1: wait for the first frame, or surface a clear failure.
+            deadline = time.monotonic() + 10.0
             while not self._stop.is_set():
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    self._set_status(message="camera read failed")
-                    time.sleep(0.2)
-                    continue
-                self._process_frame(frame, image_size, dictionary, params)
+                with frame_cond:
+                    if latest["seq"] == 0 and latest["alive"]:
+                        frame_cond.wait(0.5)
+                    seq = latest["seq"]
+                    alive = latest["alive"]
+                if seq > 0:
+                    break
+                if proc is not None and proc.poll() is not None:
+                    self._fail_stream(stream_error_result(
+                        self.config, self._last_gopro_result, log_path,
+                        f"ffmpeg exited early (code {proc.returncode}).",
+                    ))
+                    return
+                if not alive:
+                    self._fail_stream(stream_error_result(
+                        self.config, self._last_gopro_result, log_path,
+                        "No video frames received.",
+                    ))
+                    return
+                if time.monotonic() > deadline:
+                    self._fail_stream(stream_error_result(
+                        self.config, self._last_gopro_result, log_path,
+                        "No video frames received within 10s.",
+                    ))
+                    return
+            if self._stop.is_set():
+                return
+
+            if proc is not None:
+                self._last_bridge_result = stream_ok_result(log_path)
+            self._set_status(
+                state=self._state,
+                message=f"previewing {width}x{height}",
+                image_size=[width, height],
+                video_bridge=self._last_bridge_result,
+            )
+
+            # Phase 2: process the freshest frame as fast as detection allows.
+            last_seq = 0
+            while not self._stop.is_set():
+                with frame_cond:
+                    if latest["seq"] == last_seq and latest["alive"]:
+                        frame_cond.wait(0.5)
+                    frame = latest["frame"]
+                    last_seq = latest["seq"]
+                    alive = latest["alive"]
+                if frame is not None:
+                    self._process_frame(frame, image_size, dictionary, params)
+                if not alive and latest["seq"] == last_seq:
+                    break
         finally:
-            cap.release()
+            reader_stop.set()
+            if proc is not None:
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+            reader.join(timeout=2.0)
+            if proc is not None:
+                try:
+                    proc.wait(timeout=2.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    proc.kill()
+            if cap is not None:
+                cap.release()
 
     def _open_capture(self):
         camera = self.config.camera
@@ -286,6 +450,8 @@ class CaptureSession:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, camera.width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, camera.height)
             cap.set(cv2.CAP_PROP_FPS, camera.fps)
+            # Keep only the most recent frame so the reader never serves stale ones.
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             if cap.isOpened():
                 return cap
             if time.monotonic() >= deadline:
@@ -367,26 +533,46 @@ class CaptureSession:
             self._save_capture(frame, overlay, pose, capture_reason)
             message = f"captured {self._capture_count:03d} ({capture_reason})"
 
+        # Publish every processed frame to the in-memory MJPEG stream (the smooth
+        # live video source). Disk JPEGs are only a low-rate fallback for
+        # /api/session/latest.jpg, so they stay throttled.
+        self._publish_jpeg(overlay)
         latest_dir = self.output_dir or self.preview_dir
         latest_dir.mkdir(parents=True, exist_ok=True)
         if now - self._last_preview >= 0.2:
             cv2.imwrite(
                 str(latest_dir / "latest_detection.jpg"),
                 overlay,
-                [cv2.IMWRITE_JPEG_QUALITY, 82],
+                [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality],
             )
             cv2.imwrite(
                 str(latest_dir / "latest_frame.jpg"),
                 frame,
-                [cv2.IMWRITE_JPEG_QUALITY, 82],
+                [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality],
             )
             self.latest_detection_path = latest_dir / "latest_detection.jpg"
             self._last_preview = now
 
-        if self._capture_count >= capture.target_samples and self._state == "capturing":
-            self._capture_enabled = False
-            self._state = "complete"
-            message = f"complete with {self._capture_count} captures"
+        guide = guide_status(self._captured_poses, pose, self.config.coverage_targets)
+        # A run finishes when the guide route is complete (capture and guide
+        # reinforce each other) or the safety cap is hit, NOT merely when the
+        # recommended sample target is reached -- otherwise hitting target_samples
+        # would disable capture and freeze the guide before the last (tilt) poses.
+        target_reached = self._capture_count >= capture.target_samples
+        if self._state == "capturing":
+            if guide.get("complete"):
+                self._capture_enabled = False
+                self._state = "complete"
+                message = f"guide route complete with {self._capture_count} captures"
+            elif self._capture_count >= capture.max_samples:
+                self._capture_enabled = False
+                self._state = "complete"
+                message = (
+                    f"capture limit ({capture.max_samples}) reached; guide route "
+                    "incomplete but coverage may be sufficient -- check results"
+                )
+            elif target_reached:
+                message = f"{message}; minimum reached, finish the guide or Solve"
 
         self._set_status(
             state=self._state,
@@ -394,12 +580,14 @@ class CaptureSession:
             run_id=self.run_id,
             captures=self._capture_count,
             target_samples=capture.target_samples,
+            max_samples=capture.max_samples,
+            target_reached=target_reached,
             markers=0 if detection is None else detection.marker_count,
             pose=None if pose is None else pose.as_dict(),
             motion_px=motion,
             manual_capture_pending=self._manual_capture,
             coverage=coverage_summary(self._captured_poses, self.config.coverage_targets),
-            guide=guide_status(self._captured_poses, pose, self.config.coverage_targets),
+            guide=guide,
             run_dir="" if self.output_dir is None else str(self.output_dir),
             preview_dir=str(self.preview_dir),
             gopro=self._last_gopro_result,

@@ -4,29 +4,49 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GoPro ChArUco Calibrator</title>
-  <link rel="stylesheet" href="/static/style.css?v=3">
+  <link rel="stylesheet" href="/static/style.css?v=7">
 </head>
 <body>
   <main class="shell">
     <section class="toolbar">
-      <div>
-        <h1>GoPro ChArUco Calibrator</h1>
-        <p id="statusLine">Loading defaults...</p>
+      <div class="toolbar-top">
+        <div class="toolbar-head">
+          <h1>GoPro ChArUco Calibrator</h1>
+          <div class="stream-status" id="streamStatus" data-state="none" role="status" aria-live="polite">
+            <span class="dot" aria-hidden="true"></span>
+            <span id="streamStatusText">no stream</span>
+          </div>
+        </div>
+        <div class="actions">
+          <div class="btn-group" role="group" aria-label="Connection">
+            <button id="previewBtn" class="btn btn-primary">Open Preview</button>
+            <button id="stopBtn" class="btn btn-danger" disabled>Stop</button>
+          </div>
+          <div class="btn-group" role="group" aria-label="Run">
+            <button id="startRunBtn" class="btn btn-secondary">Start New Run</button>
+            <button id="nextCameraBtn" class="btn btn-secondary">Next Camera</button>
+          </div>
+          <div class="btn-group" role="group" aria-label="Capture">
+            <button id="captureBtn" class="btn btn-secondary" disabled>Capture</button>
+            <button id="pauseResumeBtn" class="btn btn-secondary" disabled aria-pressed="false">Pause</button>
+            <button id="solveBtn" class="btn btn-secondary" disabled>Solve</button>
+          </div>
+        </div>
       </div>
-      <div class="actions">
-        <button id="previewBtn">Open Preview</button>
-        <button id="startRunBtn">Start New Run</button>
-        <button id="pauseBtn" disabled>Pause</button>
-        <button id="resumeBtn" disabled>Resume</button>
-        <button id="captureBtn" disabled>Capture</button>
-        <button id="solveBtn" disabled>Solve</button>
-        <button id="nextCameraBtn">Next Camera</button>
-        <button id="stopBtn" disabled>Stop</button>
-      </div>
+      <p id="statusLine">Loading defaults...</p>
     </section>
 
     <section class="layout">
       <form id="configForm" class="panel">
+        <div class="preset-bar">
+          <label class="preset-select">Preset
+            <select id="presetSelect"><option value="">none</option></select>
+          </label>
+          <button type="button" class="btn btn-secondary" id="presetLoad">Load</button>
+          <button type="button" class="btn btn-secondary" id="presetSave">Save as preset...</button>
+        </div>
+        <p id="presetMsg" class="note" aria-live="polite"></p>
+
         <h2>Camera</h2>
         <label>Camera name <input name="camera.camera_name"></label>
         <label>Device <input name="camera.device"></label>
@@ -38,22 +58,62 @@
         </div>
 
         <h2>GoPro</h2>
-        <label class="check"><input name="gopro.enabled" type="checkbox"> Apply GoPro settings</label>
-        <label>Open GoPro URL <input name="gopro.base_url" placeholder="Auto-detect from USB"></label>
-        <div class="grid2">
-          <label>Webcam res <select name="gopro.webcam_resolution" data-gopro-options="webcam_resolution"></select></label>
-          <label>Webcam FOV <select name="gopro.webcam_fov" data-gopro-options="webcam_fov"></select></label>
-          <label>Webcam lens <select name="gopro.webcam_digital_lens" data-gopro-options="webcam_digital_lens" data-optional="true"></select></label>
-          <label>Video lens <select name="gopro.video_lens" data-gopro-options="video_lens" data-optional="true"></select></label>
-          <label>Video res <select name="gopro.video_resolution" data-gopro-options="video_resolution" data-optional="true"></select></label>
-          <label>Video FPS <select name="gopro.video_fps" data-gopro-options="video_fps" data-optional="true"></select></label>
-          <label>Framing <select name="gopro.video_framing" data-gopro-options="video_framing" data-optional="true"></select></label>
-          <label>Max lens mod <select name="gopro.max_lens_mod" data-gopro-options="max_lens_mod" data-optional="true"></select></label>
-        </div>
-        <div class="grid2">
-          <label class="check"><input name="gopro.stop_webcam_first" type="checkbox"> Stop first</label>
-          <label class="check"><input name="gopro.start_webcam" type="checkbox"> Start webcam</label>
-          <label class="check"><input name="gopro.start_video_bridge" type="checkbox"> Repair /dev/video</label>
+        <label class="switch">
+          <input name="gopro.enabled" type="checkbox">
+          <span class="track" aria-hidden="true"></span>
+          <span>Use GoPro auto-setup</span>
+        </label>
+
+        <div id="goproControls">
+          <fieldset class="group">
+            <legend>Webcam stream</legend>
+            <p class="note">These define the calibrated camera model, keep them fixed across runs.</p>
+            <div class="grid2">
+              <label>Lens / FOV
+                <select name="gopro.webcam_fov" data-gopro-options="webcam_fov"></select>
+              </label>
+              <label>Resolution
+                <select name="gopro.webcam_resolution" data-gopro-options="webcam_resolution"></select>
+              </label>
+            </div>
+          </fieldset>
+
+          <details class="disclosure">
+            <summary>Advanced / Connection</summary>
+            <div class="disclosure-body">
+              <label>Open GoPro URL <input name="gopro.base_url" placeholder="Auto-detect from USB"></label>
+              <div class="grid2">
+                <label>Webcam port <input name="gopro.webcam_port" type="number" min="1" max="65535"></label>
+                <label>Protocol
+                  <select name="gopro.webcam_protocol">
+                    <option value="TS">TS (USB bridge)</option>
+                    <option value="RTSP">RTSP</option>
+                  </select>
+                </label>
+              </div>
+              <label class="switch"><input name="gopro.apply_on_preview" type="checkbox">
+                <span class="track" aria-hidden="true"></span><span>Apply settings when opening preview</span></label>
+              <label class="switch"><input name="gopro.stop_webcam_first" type="checkbox">
+                <span class="track" aria-hidden="true"></span><span>Stop webcam first</span></label>
+              <label class="switch"><input name="gopro.start_webcam" type="checkbox">
+                <span class="track" aria-hidden="true"></span><span>Start webcam</span></label>
+            </div>
+          </details>
+
+          <details class="disclosure">
+            <summary>Advanced recording settings (rarely needed)</summary>
+            <div class="disclosure-body">
+              <p class="note">These do NOT affect the webcam stream. Only change them if you also record on the camera.</p>
+              <div class="grid2">
+                <label>Webcam lens <select name="gopro.webcam_digital_lens" data-gopro-options="webcam_digital_lens" data-optional="true"></select></label>
+                <label>Video lens <select name="gopro.video_lens" data-gopro-options="video_lens" data-optional="true"></select></label>
+                <label>Video res <select name="gopro.video_resolution" data-gopro-options="video_resolution" data-optional="true"></select></label>
+                <label>Video FPS <select name="gopro.video_fps" data-gopro-options="video_fps" data-optional="true"></select></label>
+                <label>Framing <select name="gopro.video_framing" data-gopro-options="video_framing" data-optional="true"></select></label>
+                <label>Max lens mod <select name="gopro.max_lens_mod" data-gopro-options="max_lens_mod" data-optional="true"></select></label>
+              </div>
+            </div>
+          </details>
         </div>
 
         <h2>Board</h2>
@@ -76,7 +136,8 @@
           <label>Solver min frames <input name="solver.min_frames" type="number"></label>
           <label>Solver min markers <input name="solver.min_markers" type="number"></label>
         </div>
-        <label class="check"><input name="capture.auto_capture" type="checkbox"> Auto capture</label>
+        <label class="switch"><input name="capture.auto_capture" type="checkbox">
+          <span class="track" aria-hidden="true"></span><span>Auto capture</span></label>
       </form>
 
       <section class="viewer">
@@ -85,6 +146,31 @@
           <canvas id="guideOverlay" width="1280" height="720"></canvas>
         </div>
         <div class="guidePrompt" id="guidePrompt">Open preview to start.</div>
+
+        <div class="alert alert-firewall" id="firewallPanel" hidden role="alert">
+          <div class="alert-head">
+            <strong>GoPro video is blocked by the firewall</strong>
+            <button type="button" class="alert-close" id="firewallDismiss" aria-label="Dismiss">x</button>
+          </div>
+          <p id="firewallHint" class="alert-body"></p>
+          <pre class="code" id="firewallCmd"></pre>
+          <div class="alert-actions">
+            <button type="button" class="btn btn-secondary" id="firewallCopy">Copy command</button>
+            <span id="firewallCopyResult" class="note" aria-live="polite"></span>
+          </div>
+          <details class="disclosure">
+            <summary>Other firewalls &amp; raw details</summary>
+            <div class="disclosure-body">
+              <p class="note">firewalld:</p>
+              <pre class="code" id="firewallFirewalld"></pre>
+              <p class="note">iptables:</p>
+              <pre class="code" id="firewallIptables"></pre>
+              <p class="note">Bridge result:</p>
+              <pre class="code" id="firewallRaw"></pre>
+            </div>
+          </details>
+        </div>
+
         <div class="stats">
           <div><strong id="captureCount">0/0</strong><span>frames saved</span></div>
           <div><strong id="markerCount">0</strong><span>markers</span></div>
@@ -98,10 +184,24 @@
           <div class="bar"><span>Skew</span><meter id="barSkew" min="0" max="1" value="0"></meter></div>
         </div>
         <canvas id="scatter" width="640" height="360"></canvas>
+
+        <div class="results-panel" id="resultsPanel" hidden>
+          <div class="verdict" id="verdict">
+            <span class="verdict-badge" id="verdictBadge">n/a</span>
+            <span id="verdictText"></span>
+          </div>
+          <ul class="verdict-reasons" id="verdictReasons"></ul>
+          <dl class="result-grid" id="resultGrid"></dl>
+          <details class="disclosure">
+            <summary>Raw calibration JSON</summary>
+            <div class="disclosure-body"><pre class="code" id="resultsRaw"></pre></div>
+          </details>
+        </div>
+
         <pre id="results"></pre>
       </section>
     </section>
   </main>
-  <script src="/static/app.js?v=4"></script>
+  <script src="/static/app.js?v=10"></script>
 </body>
 </html>

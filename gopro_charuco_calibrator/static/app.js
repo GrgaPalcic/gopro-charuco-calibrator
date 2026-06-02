@@ -2,20 +2,51 @@ const form = document.getElementById("configForm");
 const previewBtn = document.getElementById("previewBtn");
 const startRunBtn = document.getElementById("startRunBtn");
 const stopBtn = document.getElementById("stopBtn");
-const pauseBtn = document.getElementById("pauseBtn");
-const resumeBtn = document.getElementById("resumeBtn");
+const pauseResumeBtn = document.getElementById("pauseResumeBtn");
 const nextCameraBtn = document.getElementById("nextCameraBtn");
 const captureBtn = document.getElementById("captureBtn");
 const solveBtn = document.getElementById("solveBtn");
 const statusLine = document.getElementById("statusLine");
 const preview = document.getElementById("preview");
 const results = document.getElementById("results");
+const resultsPanel = document.getElementById("resultsPanel");
+const verdictBox = document.getElementById("verdict");
+const verdictBadge = document.getElementById("verdictBadge");
+const verdictText = document.getElementById("verdictText");
+const verdictReasons = document.getElementById("verdictReasons");
+const resultGrid = document.getElementById("resultGrid");
+const resultsRaw = document.getElementById("resultsRaw");
 const scatter = document.getElementById("scatter");
 const guideOverlay = document.getElementById("guideOverlay");
 const guidePrompt = document.getElementById("guidePrompt");
+const streamStatus = document.getElementById("streamStatus");
+const streamStatusText = document.getElementById("streamStatusText");
+const goproControls = document.getElementById("goproControls");
+
+const presetSelect = document.getElementById("presetSelect");
+const presetLoad = document.getElementById("presetLoad");
+const presetSave = document.getElementById("presetSave");
+const presetMsg = document.getElementById("presetMsg");
+
+const firewallPanel = document.getElementById("firewallPanel");
+const firewallHint = document.getElementById("firewallHint");
+const firewallCmd = document.getElementById("firewallCmd");
+const firewallFirewalld = document.getElementById("firewallFirewalld");
+const firewallIptables = document.getElementById("firewallIptables");
+const firewallRaw = document.getElementById("firewallRaw");
+const firewallCopy = document.getElementById("firewallCopy");
+const firewallCopyResult = document.getElementById("firewallCopyResult");
+const firewallDismiss = document.getElementById("firewallDismiss");
+
+const STREAM_URL = "/api/session/stream.mjpg";
+const FALLBACK_URL = "/api/session/latest.jpg";
 
 let defaults = null;
 let pollTimer = null;
+let streamActive = false;
+let fallbackTimer = null;
+let firewallDismissed = false;
+let lastFirewallCmd = "";
 
 function setDeep(obj, path, value) {
   const parts = path.split(".");
@@ -39,6 +70,7 @@ function populateGoProOptions(options) {
   for (const select of form.querySelectorAll("[data-gopro-options]")) {
     const key = select.dataset.goproOptions;
     const def = options[key];
+    if (!def) continue;
     select.innerHTML = "";
     if (select.dataset.optional === "true") {
       select.append(new Option("Leave unchanged", ""));
@@ -74,6 +106,7 @@ function populateForm(config, dicts, goproOptions) {
     if (!input.name) continue;
     setFormValue(input.name, getDeep(config, input.name));
   }
+  syncGoproVisibility();
 }
 
 function readForm() {
@@ -92,6 +125,11 @@ function readForm() {
   return config;
 }
 
+function syncGoproVisibility() {
+  const enabled = form.elements["gopro.enabled"];
+  if (goproControls && enabled) goproControls.hidden = !enabled.checked;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: {"Content-Type": "application/json"},
@@ -106,6 +144,78 @@ async function api(path, options = {}) {
 
 function percent(value) {
   return `${Math.round((value || 0) * 100)}%`;
+}
+
+function setStreamStatus(state, text) {
+  streamStatus.dataset.state = state;
+  streamStatusText.textContent = text;
+}
+
+function startStream() {
+  if (streamActive) return;
+  streamActive = true;
+  clearInterval(fallbackTimer);
+  fallbackTimer = null;
+  setStreamStatus("connecting", "connecting...");
+  preview.src = STREAM_URL;
+}
+
+function stopStream() {
+  if (!streamActive && !fallbackTimer) {
+    setStreamStatus("none", "no stream");
+    return;
+  }
+  streamActive = false;
+  clearInterval(fallbackTimer);
+  fallbackTimer = null;
+  preview.removeAttribute("src");
+  setStreamStatus("none", "no stream");
+}
+
+function startFallback() {
+  if (fallbackTimer) return;
+  setStreamStatus("error", "stream error, using snapshots");
+  fallbackTimer = setInterval(() => {
+    preview.src = `${FALLBACK_URL}?t=${Date.now()}`;
+  }, 500);
+}
+
+function syncStream(state) {
+  const previewOpen = !["idle", "error"].includes(state);
+  if (previewOpen) startStream();
+  else stopStream();
+}
+
+preview.addEventListener("load", () => {
+  if (!streamActive) return;
+  if (fallbackTimer) setStreamStatus("error", "stream blocked, snapshots");
+  else setStreamStatus("streaming", "streaming");
+});
+
+preview.addEventListener("error", () => {
+  if (streamActive && !fallbackTimer) startFallback();
+});
+
+function extractUfwFromError(error) {
+  const match = /sudo ufw allow[^\n]*/.exec(error || "");
+  return match ? match[0] : "";
+}
+
+function renderFirewall(bridge, fwCmd) {
+  const blocked = bridge && bridge.enabled && bridge.ok === false && fwCmd && !firewallDismissed;
+  if (!blocked) {
+    firewallPanel.hidden = true;
+    return;
+  }
+  firewallPanel.hidden = false;
+  firewallHint.textContent =
+    bridge.firewall_hint ||
+    "HTTP control works but incoming GoPro UDP video is blocked. Allow it once with:";
+  firewallCmd.textContent = fwCmd;
+  lastFirewallCmd = fwCmd;
+  firewallFirewalld.textContent = bridge.firewalld_command || "(unavailable)";
+  firewallIptables.textContent = bridge.iptables_command || "(unavailable)";
+  firewallRaw.textContent = JSON.stringify(bridge, null, 2);
 }
 
 function updateBars(coverage) {
@@ -240,8 +350,103 @@ function guideText(status) {
   if (!guide?.current) return "Follow the guide line with the board center.";
   const current = guide.current;
   const base = `Route ${guide.complete_count}/${guide.total_count}: ${current.label}`;
-  if (current.live_match) return `${base} - hold still`;
-  return `${base} - move board center to the highlighted point and match the box size`;
+  if (current.live_match) return `${base}. Hold still`;
+  if ((current.skew || 0) > 0) {
+    return `${base}. Move to the point, then TILT the board until the box turns green`;
+  }
+  return `${base}. Move board center to the highlighted point and match the box size`;
+}
+
+function num(value, digits = 2) {
+  return value == null || Number.isNaN(value) ? "n/a" : Number(value).toFixed(digits);
+}
+
+function pickRecommended(results) {
+  // Lower median reprojection error wins (rational_polynomial usually wins on
+  // wide GoPro lenses); fall back to RMS.
+  return results.slice().sort((a, b) => {
+    const am = a.median_view_error_px ?? a.rms ?? 1e9;
+    const bm = b.median_view_error_px ?? b.rms ?? 1e9;
+    return am - bm;
+  })[0];
+}
+
+function coverageReasons(cov) {
+  const reasons = [];
+  if (!cov) return reasons;
+  if ((cov.overall ?? 0) < 0.8) {
+    reasons.push(`Coverage ${Math.round((cov.overall || 0) * 100)}%, aim for 80% or more`);
+  }
+  if (cov.x && !(cov.x.low_hit && cov.x.high_hit)) reasons.push("Push the board to the left & right edges");
+  if (cov.y && !(cov.y.low_hit && cov.y.high_hit)) reasons.push("Push the board to the top & bottom edges");
+  if (cov.size && !(cov.size.low_hit && cov.size.high_hit)) {
+    reasons.push("Add both near (large) and far (small) board views");
+  }
+  if (cov.skew && !cov.skew.hit) reasons.push("Add more tilted / skewed views");
+  return reasons;
+}
+
+function renderResults(modelResults, coverage) {
+  if (!modelResults || !modelResults.length) {
+    resultsPanel.hidden = true;
+    return;
+  }
+  resultsPanel.hidden = false;
+  const rec = pickRecommended(modelResults);
+  const cm = rec.camera_matrix || [[null, null, null], [null, null, null]];
+  const fx = cm[0]?.[0];
+  const fy = cm[1]?.[1];
+  const cx = cm[0]?.[2];
+  const cy = cm[1]?.[2];
+  const selected = rec.selected || rec;
+  const allFrames = rec.all_frames || {};
+  const used = selected.frame_count ?? allFrames.frame_count;
+  const total = allFrames.frame_count ?? used;
+
+  const reasons = coverageReasons(coverage);
+  if (rec.worst_view_error_px != null && rec.worst_view_error_px > 2.5) {
+    reasons.push(`Worst reprojection ${num(rec.worst_view_error_px)} px is high`);
+  }
+  const pass = reasons.length === 0;
+
+  verdictBox.className = `verdict ${pass ? "pass" : "retake"}`;
+  verdictBadge.textContent = pass ? "PASS" : "RETAKE";
+  verdictText.textContent = pass
+    ? "Coverage and reprojection look good."
+    : "Consider another pass to improve:";
+  verdictReasons.innerHTML = "";
+  for (const reason of reasons) {
+    const li = document.createElement("li");
+    li.textContent = reason;
+    verdictReasons.append(li);
+  }
+
+  const rows = [
+    ["Recommended model", String(rec.model)],
+    ["Reprojection error", `median ${num(rec.median_view_error_px)} px, worst ${num(rec.worst_view_error_px)} px`],
+    ["RMS", `${num(rec.rms)} px`],
+    ["Focal length", `fx ${num(fx, 1)}, fy ${num(fy, 1)}`],
+    ["Principal point", `cx ${num(cx, 1)}, cy ${num(cy, 1)}`],
+    ["Frames used", `${used ?? "n/a"} / ${total ?? "n/a"}`],
+  ];
+  const other = modelResults.find((r) => r !== rec);
+  if (other) {
+    rows.push([
+      `Alternate (${other.model})`,
+      `median ${num(other.median_view_error_px)} px, worst ${num(other.worst_view_error_px)} px`,
+    ]);
+  }
+  if (rec.yaml) rows.push(["Output YAML", rec.yaml]);
+
+  resultGrid.innerHTML = "";
+  for (const [key, value] of rows) {
+    const dt = document.createElement("dt");
+    dt.textContent = key;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    resultGrid.append(dt, dd);
+  }
+  resultsRaw.textContent = JSON.stringify(modelResults, null, 2);
 }
 
 function updateStatus(status) {
@@ -259,27 +464,37 @@ function updateStatus(status) {
   drawGuideOverlay(status);
 
   const state = status.state || "idle";
-  const previewOpen = !["idle", "error"].includes(state);
   const capturing = state === "capturing";
   const paused = state === "paused";
+  const previewOpen = !["idle", "error"].includes(state);
   previewBtn.disabled = previewOpen;
   startRunBtn.disabled = state === "capturing" || state === "solving";
   stopBtn.disabled = state === "idle";
-  pauseBtn.disabled = !capturing;
-  resumeBtn.disabled = !paused;
+  pauseResumeBtn.disabled = !(capturing || paused);
+  pauseResumeBtn.textContent = paused ? "Resume" : "Pause";
+  pauseResumeBtn.setAttribute("aria-pressed", String(paused));
   captureBtn.disabled = !capturing;
   solveBtn.disabled = captures < Math.max(3, Number(form.elements["solver.min_frames"].value || 25));
-  if (previewOpen || captures > 0) {
-    preview.src = `/api/session/latest.jpg?t=${Date.now()}`;
-  }
-  if (status.results) {
-    results.textContent = JSON.stringify(status.results, null, 2);
-  }
-  if (status.gopro && status.gopro.enabled && !status.gopro.ok) {
-    results.textContent = JSON.stringify(status.gopro, null, 2);
-  }
-  if (status.video_bridge && status.video_bridge.enabled && !status.video_bridge.ok) {
-    results.textContent = JSON.stringify(status.video_bridge, null, 2);
+
+  syncStream(state);
+
+  const gopro = status.gopro;
+  const bridge = status.video_bridge;
+  const fwCmd = bridge ? bridge.ufw_command || extractUfwFromError(bridge.error) : "";
+  renderFirewall(bridge, fwCmd);
+
+  if (status.results && status.results.length) {
+    renderResults(status.results, status.coverage);
+    results.textContent = "";
+  } else {
+    resultsPanel.hidden = true;
+    if (gopro && gopro.enabled && gopro.ok === false) {
+      results.textContent = JSON.stringify(gopro, null, 2);
+    } else if (bridge && bridge.enabled && bridge.ok === false && !fwCmd) {
+      results.textContent = JSON.stringify(bridge, null, 2);
+    } else {
+      results.textContent = "";
+    }
   }
 }
 
@@ -293,10 +508,56 @@ async function poll() {
 
 function startPolling() {
   clearInterval(pollTimer);
-  pollTimer = setInterval(poll, 500);
+  // Poll fast so the guide overlay (target box, dots, pose dot, green match)
+  // tracks the board closely. The video itself is a separate MJPEG stream; this
+  // only fetches the lightweight status JSON.
+  pollTimer = setInterval(poll, 150);
+}
+
+async function loadPresetList() {
+  try {
+    const data = await api("/api/presets");
+    presetSelect.innerHTML = '<option value="">none</option>';
+    for (const preset of data.presets || []) {
+      const label = preset.title ? `${preset.title}` : preset.name;
+      presetSelect.append(new Option(label, preset.name));
+    }
+  } catch {
+    // Presets endpoint unavailable; leave the bar inert.
+  }
+}
+
+async function applyPreset(name) {
+  if (!name) return;
+  try {
+    const preset = await api(`/api/presets/${encodeURIComponent(name)}`);
+    const cfg = preset.config || preset;
+    populateForm(cfg, defaults.aruco_dictionaries, defaults.gopro_options);
+    presetMsg.textContent = `Loaded preset "${preset.title || name}"`;
+  } catch (err) {
+    presetMsg.textContent = `Could not load preset: ${err}`;
+  }
+}
+
+async function savePreset() {
+  const name = prompt("Save current settings as preset name:");
+  if (!name) return;
+  try {
+    await api(`/api/presets/${encodeURIComponent(name)}`, {
+      method: "POST",
+      body: JSON.stringify({config: readForm()}),
+    });
+    presetMsg.textContent = `Saved preset "${name}"`;
+    await loadPresetList();
+    presetSelect.value = name;
+  } catch (err) {
+    presetMsg.textContent = `Could not save preset: ${err}`;
+  }
 }
 
 previewBtn.addEventListener("click", async () => {
+  firewallDismissed = false;
+  startStream();
   updateStatus(await api("/api/session/preview", {
     method: "POST",
     body: JSON.stringify({config: readForm()}),
@@ -305,7 +566,10 @@ previewBtn.addEventListener("click", async () => {
 });
 
 startRunBtn.addEventListener("click", async () => {
+  firewallDismissed = false;
   results.textContent = "";
+  resultsPanel.hidden = true;
+  startStream();
   updateStatus(await api("/api/session/run", {
     method: "POST",
     body: JSON.stringify({config: readForm()}),
@@ -313,17 +577,15 @@ startRunBtn.addEventListener("click", async () => {
   startPolling();
 });
 
-pauseBtn.addEventListener("click", async () => {
-  updateStatus(await api("/api/session/pause", {method: "POST"}));
-});
-
-resumeBtn.addEventListener("click", async () => {
-  updateStatus(await api("/api/session/resume", {method: "POST"}));
+pauseResumeBtn.addEventListener("click", async () => {
+  const action = pauseResumeBtn.textContent === "Resume" ? "resume" : "pause";
+  updateStatus(await api(`/api/session/${action}`, {method: "POST"}));
 });
 
 stopBtn.addEventListener("click", async () => {
   updateStatus(await api("/api/session/stop", {method: "POST"}));
   clearInterval(pollTimer);
+  stopStream();
 });
 
 captureBtn.addEventListener("click", async () => {
@@ -332,16 +594,18 @@ captureBtn.addEventListener("click", async () => {
 
 solveBtn.addEventListener("click", async () => {
   statusLine.textContent = "solving...";
-  const summary = await api("/api/session/solve", {method: "POST"});
-  results.textContent = JSON.stringify(summary.results, null, 2);
-  await poll();
+  await api("/api/session/solve", {method: "POST"});
+  await poll(); // status now carries results -> updateStatus renders the panel
 });
 
 nextCameraBtn.addEventListener("click", async () => {
+  firewallDismissed = false;
   const config = readForm();
   config.camera.camera_name = `${config.camera.camera_name}_next`;
   setFormValue("camera.camera_name", config.camera.camera_name);
   results.textContent = "";
+  resultsPanel.hidden = true;
+  startStream();
   updateStatus(await api("/api/session/next-camera", {
     method: "POST",
     body: JSON.stringify({config}),
@@ -349,9 +613,34 @@ nextCameraBtn.addEventListener("click", async () => {
   startPolling();
 });
 
+presetLoad.addEventListener("click", () => applyPreset(presetSelect.value));
+presetSave.addEventListener("click", savePreset);
+
+form.elements["gopro.enabled"].addEventListener("change", syncGoproVisibility);
+
+firewallCopy.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(lastFirewallCmd);
+    firewallCopyResult.textContent = "Copied";
+  } catch {
+    const range = document.createRange();
+    range.selectNodeContents(firewallCmd);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    firewallCopyResult.textContent = "Press Ctrl+C to copy";
+  }
+});
+
+firewallDismiss.addEventListener("click", () => {
+  firewallDismissed = true;
+  firewallPanel.hidden = true;
+});
+
 async function init() {
   defaults = await api("/api/defaults");
   populateForm(defaults.config, defaults.aruco_dictionaries, defaults.gopro_options);
+  await loadPresetList();
   statusLine.textContent = "Ready";
   drawScatter([]);
   await poll();

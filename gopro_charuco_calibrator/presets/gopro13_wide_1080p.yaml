@@ -1,0 +1,24 @@
+title: "GoPro HERO13 Wide 1080p"
+# Default acquisition mode. The webcam stream lens (Wide) and resolution (1080p)
+# define the calibrated camera model, so keep them fixed across every run.
+camera:
+  camera_name: gopro13_wide_1080p
+  device: /dev/video42
+  width: 1920
+  height: 1080
+  fps: 30.0
+  fourcc: YUYV
+gopro:
+  enabled: true
+  webcam_fov: 0          # 0 = Wide
+  webcam_resolution: 12  # 12 = 1080p
+  webcam_port: 8554
+  webcam_protocol: TS
+board:
+  cols: 11
+  rows: 8
+  square_m: 0.034
+  marker_m: 0.025
+  aruco_dict: DICT_5X5_100
+  start_id: 2
+  marker_count: 44

@@ -1,101 +1,112 @@
 # GoPro ChArUco Calibrator
 
-Local web app for calibrating GoPro 13 intrinsics from a V4L2 webcam feed and a
-caib.io-style ChArUco marker board. It is ROS-free and is intended for repeated
-field calibration of cameras that will later be used by a robotics stack.
+Local web app for calibrating GoPro HERO11 and HERO13 intrinsics over USB webcam
+mode, using a caib.io style ChArUco marker board. It does not require ROS and is
+meant for repeated field calibration of cameras that a robotics stack will later
+use. ffmpeg decodes the camera stream directly into the app, so there is no
+v4l2loopback device to create.
 
-The app preserves the SO-101 field calibration behavior:
+Features:
 
 - editable caib.io board specs instead of a fixed board
-- live detection overlay from a USB/V4L2 camera
-- back-to-back camera runs without restarting the web app
-- optional Open GoPro HTTP setup for webcam FOV/lens and video settings
-- auto-capture of stable, diverse board poses
-- manual capture from the browser
-- x/y/size/skew coverage feedback, including an x/y target band of `0.2..0.8`
-- a live guide line and target-size box that the board holder can trace
-- all-frame and selected-frame solves for `plumb_bob` and `rational_polynomial`
-- ROS `camera_info` YAML output, JSON summaries, CSV diagnostics, frames, and overlays
+- low latency live preview with a guide route to trace
+- direct ffmpeg decode of the GoPro USB stream (no v4l2loopback, no modprobe)
+- auto capture of stable, diverse board poses, plus manual capture
+- x/y/size/skew coverage feedback and a pass or retake verdict after solving
+- camera presets you can load and save so the camera mode stays consistent
+- plumb_bob and rational_polynomial solves with ROS camera_info YAML, JSON
+  summaries, and CSV diagnostics
 
-## Install
+## Quick start
 
-Use Python 3.12. OpenCV wheels are not reliable on every newer Python release.
+Prerequisites: [uv](https://docs.astral.sh/uv/) and `ffmpeg`. Install ffmpeg with
+your package manager, for example `sudo apt install ffmpeg` or
+`sudo pacman -S ffmpeg`.
 
 ```bash
 git clone https://github.com/GrgaPalcic/gopro-charuco-calibrator.git
 cd gopro-charuco-calibrator
-uv sync --extra dev
+uv run gopro-charuco serve
 ```
 
-## Run The Web App
+Then open http://localhost:8765 in a browser. The first `uv run` fetches Python
+3.12 and every dependency automatically, so this is all you need. No `modprobe`
+or `sudo` is required; the only command you might run once is a firewall allow
+rule (see [Firewall](#firewall)) if the incoming UDP video is blocked.
+
+To serve other machines, add `--host 0.0.0.0 --port 8765` and open
+`http://<host-ip>:8765`. Run a single server process; the live session is kept
+in memory.
+
+Optional, start from a preset so the camera mode is identical every time:
 
 ```bash
-uv run gopro-charuco serve --host 0.0.0.0 --port 8765
+uv run gopro-charuco serve --config gopro_charuco_calibrator/presets/gopro13_wide_1080p.yaml
 ```
 
-Open:
+## Typical flow
 
-```text
-http://localhost:8765
-```
+1. Connect the GoPro over USB.
+2. Turn on `Use GoPro auto-setup`, then pick `Lens / FOV` and `Resolution` (these
+   two define the calibrated camera model), or load a preset.
+3. Click `Open Preview`. The stream status dot turns green when frames arrive.
+4. Click `Start New Run`.
+5. Move the board center along the guide route and match the highlighted box size
+   and tilt. The box turns green when the live pose matches the target.
+6. Use `Capture` for any pose the auto capture does not take.
+7. Click `Solve` once the route is complete or coverage is sufficient. The
+   results panel shows a pass or retake verdict and the recommended model.
 
-For a remote robot or camera host, replace `localhost` with the host IP.
+For the next camera, click `Next Camera`, then `Start New Run`. The server stays
+up between cameras.
 
-## Typical GoPro 13 Flow
+## GoPro settings
 
-1. Put the GoPro in the exact lens mode, resolution, and crop that runtime will use.
-2. Connect USB and confirm the device path, for example `/dev/video42`.
-3. Enter the camera name, device, resolution, FPS, and FourCC.
-4. Enter the caib.io board specs:
-   - columns and rows are checkerboard square counts
-   - square and marker sizes are in millimeters in the UI
-   - dictionary should match the print, for example `DICT_5X5_100`
-   - start ID and marker count should match the generated caib.io board
-5. For USB GoPro capture, enable `Apply GoPro settings` and leave `Open GoPro URL`
-   blank. The app probes the usual GoPro USB `.51` address automatically.
-6. Keep `Stop first`, `Start webcam`, and `Repair /dev/video` enabled, then click
-   `Open Preview`.
-7. Click `Start New Run`.
-8. Move the board center along the yellow route and match the highlighted box size.
-9. Use `Capture` for important poses if auto-capture does not take them.
-10. Click `Solve` after the capture target is reached or enough coverage is available.
+The GoPro panel uses the camera HTTP API. With the URL blank, the app probes the
+GoPro USB convention where the host is usually 172.x.x.52 and the camera answers
+on 172.x.x.51, puts the camera into webcam mode, and decodes the UDP MPEG-TS
+stream directly. Only the two settings that define the calibrated model are shown
+by default:
 
-For the next GoPro, update the camera name/device if needed and click
-`Next Camera`, then `Start New Run`. The server keeps running; only the camera
-stream is reopened when the V4L2 device, resolution, FourCC, or ArUco
-dictionary changes.
+- `Lens / FOV`: 0 is Wide, 2 is Narrow, 3 is SuperView, 4 is Linear
+- `Resolution`: 4 is 480p, 7 is 720p, 12 is 1080p
 
-## Optional GoPro Control
+Connection toggles and the recording settings sit in collapsed advanced sections
+with safe defaults, so you normally do not touch them. To calibrate a plain USB
+or V4L2 camera instead, turn off `Use GoPro auto-setup` and the app opens
+`camera.device` directly with OpenCV.
 
-The GoPro panel uses the camera HTTP API. When the URL is blank, the app probes
-the GoPro USB network convention where the host is usually `172.x.x.52` and the
-camera is `172.x.x.51`. For the Linux V4L2 path, it follows the old SO-101
-healer sequence: start GoPro webcam mode, verify a real frame from the loopback,
-restart the ffmpeg UDP-to-V4L2 bridge only if needed, then open OpenCV.
-If HTTP setup succeeds but no frame arrives, check the app's error details for
-the exact `ufw` allow command. A common local fix is:
+## Firewall
+
+If HTTP control works but no video frames arrive, a host firewall is usually
+dropping the incoming UDP video while letting the TCP control through. The app
+detects this and shows the exact command with a copy button, for example:
 
 ```bash
 sudo ufw allow in on <gopro-usb-interface> from <gopro-ip> to any port 8554 proto udp
 ```
 
-Important controls:
+firewalld and iptables variants are shown too. Run it once on the host, then
+click `Open Preview` again. This is the only step that may need `sudo`.
 
-- Webcam resolution: `7=720p`, `12=1080p`
-- Webcam FOV: `0=Wide`, `2=Narrow`, `3=SuperView`, `4=Linear`
-- Repair `/dev/video`: restart the local ffmpeg bridge into the selected V4L2
-  loopback if no frame is arriving
-- Webcam digital lens setting `43`
-- Video lens setting `121`, including HyperView and Ultra lens options on HERO13
-- Video resolution setting `2`
-- FPS setting `3`
-- Video framing/aspect, bitrate, profile, system video mode, and Max Lens Mod
+## Presets
 
-Every attempted GoPro HTTP step is recorded in the run `config.json` and final
-summary. If GoPro setup fails, disable GoPro control and use the already exposed
-V4L2 device directly.
+Presets are small YAML files that lock a consistent camera mode and board so
+calibration data is reproducible across runs and machines. Shipped presets live
+in `gopro_charuco_calibrator/presets/`:
 
-Outputs are written under:
+- `gopro13_wide_1080p.yaml` (default): HERO13, Wide lens, 1080p
+- `gopro13_linear_1080p.yaml`: HERO13, Linear lens, 1080p
+- `gopro11_wide_1080p.yaml`: HERO11, Wide lens, 1080p
+
+In the web UI, pick a preset from the dropdown and click `Load`, or store the
+current form with `Save as preset`. Saved presets are written to
+`~/.config/gopro-charuco-calibrator/presets/` and override shipped presets of the
+same name. The CLI accepts the same files via `serve --config <preset.yaml>`.
+
+## Outputs
+
+Each run is written under:
 
 ```text
 runs/<camera_name>_<timestamp>/
@@ -115,19 +126,19 @@ overlays/capture_###.jpg
 caib_marker_board_calibration_summary.json
 ```
 
-Pick the YAML with the better median/worst view error and stable-looking
-distortion coefficients. For wide GoPro modes, `rational_polynomial` often wins,
-but the diagnostics should decide.
+Pick the YAML with the better median and worst view error and stable distortion
+coefficients. For wide GoPro modes `rational_polynomial` often wins, but the
+diagnostics decide.
 
-## CLI Solver
+## CLI solver
 
-You can solve an existing frame directory without starting the web app:
+You can solve an existing frame directory without the web app:
 
 ```bash
 uv run gopro-charuco solve-frames \
-  --frames-dir runs/gopro13_hyperview_20260601_120000/frames \
-  --output-dir runs/gopro13_hyperview_20260601_120000 \
-  --config runs/gopro13_hyperview_20260601_120000/config.json
+  --frames-dir runs/gopro13_wide_1080p_20260601_120000/frames \
+  --output-dir runs/gopro13_wide_1080p_20260601_120000 \
+  --config runs/gopro13_wide_1080p_20260601_120000/config.json
 ```
 
 Board settings can also be supplied directly:
@@ -136,7 +147,7 @@ Board settings can also be supplied directly:
 uv run gopro-charuco solve-frames \
   --frames-dir ./frames \
   --output-dir ./calibration_out \
-  --camera-name gopro13_hyperview \
+  --camera-name gopro13_wide_1080p \
   --cols 11 --rows 8 \
   --square-mm 34 --marker-mm 25 \
   --aruco-dict DICT_5X5_100 \
@@ -148,8 +159,8 @@ uv run gopro-charuco solve-frames \
 
 - Intrinsics are only valid for the exact camera mode used during capture.
 - Matte prints and even lighting matter more than chasing a huge sample count.
-- The x/y target rectangle is `0.2..0.8`; push the board into corners and edges.
-- Size coverage needs both far/small and near/large board views.
+- The x/y target rectangle is 0.2 to 0.8, so push the board into corners and edges.
+- Size coverage needs both small (far) and large (near) board views.
 - Skew coverage needs tilted board poses, not only translations.
 
 ## Development

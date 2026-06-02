@@ -97,6 +97,7 @@ class GoProSettingsConfig(BaseModel):
 
 class CaptureConfig(BaseModel):
     target_samples: int = Field(default=90, ge=1, le=500)
+    max_samples: int = Field(default=200, ge=1, le=2000)
     min_markers: int = Field(default=8, ge=1)
     max_motion_px: float = Field(default=1.5, ge=0.0)
     min_param_dist: float = Field(default=0.11, ge=0.0)

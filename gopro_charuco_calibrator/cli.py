@@ -5,8 +5,9 @@ import json
 from pathlib import Path
 
 import uvicorn
+import yaml
 
-from .app import app
+from .app import app, set_default_config
 from .models import AppConfig, BoardConfig, CameraConfig, SolverConfig
 from .solver import solve_from_frames
 
@@ -14,9 +15,16 @@ from .solver import solve_from_frames
 def _load_config(path: str | None) -> AppConfig:
     if not path:
         return AppConfig()
-    with Path(path).open(encoding="utf-8") as stream:
-        data = json.load(stream)
-    if "config" in data:
+    file_path = Path(path)
+    text = file_path.read_text(encoding="utf-8")
+    if file_path.suffix.lower() in (".yaml", ".yml"):
+        data = yaml.safe_load(text)
+    else:
+        data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError(f"Config {file_path.name} must be a mapping.")
+    data.pop("title", None)  # presets may carry a human title; not part of the config
+    if "config" in data and isinstance(data["config"], dict):
         data = data["config"]
     return AppConfig.model_validate(data)
 
@@ -51,6 +59,8 @@ def _board_from_args(base: BoardConfig, args: argparse.Namespace) -> BoardConfig
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
+    if args.config:
+        set_default_config(_load_config(args.config))
     uvicorn.run(app, host=args.host, port=args.port, reload=args.reload)
     return 0
 
@@ -90,6 +100,10 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8765)
     serve.add_argument("--reload", action="store_true")
+    serve.add_argument(
+        "--config",
+        help="Optional preset (YAML or JSON) used as the startup default config",
+    )
     serve.set_defaults(func=cmd_serve)
 
     solve = sub.add_parser("solve-frames", help="Solve intrinsics from an existing frame folder")

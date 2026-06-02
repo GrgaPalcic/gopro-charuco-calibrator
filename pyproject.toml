@@ -35,6 +35,7 @@ packages = ["gopro_charuco_calibrator"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "gopro_charuco_calibrator/static" = "gopro_charuco_calibrator/static"
+"gopro_charuco_calibrator/presets" = "gopro_charuco_calibrator/presets"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

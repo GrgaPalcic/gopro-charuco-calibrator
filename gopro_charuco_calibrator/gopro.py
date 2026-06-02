@@ -425,3 +425,22 @@ def apply_gopro_settings(config: GoProSettingsConfig) -> dict[str, Any]:
         "ok": all(step["ok"] for step in steps),
         "steps": steps,
     }
+
+
+def stop_gopro_webcam(gopro_result: dict[str, Any] | None) -> dict[str, Any]:
+    """Tell the GoPro to exit webcam mode, using whichever API style answered.
+
+    Called on Stop / shutdown so the camera does not stay stuck in webcam mode.
+    """
+    if not gopro_result or not gopro_result.get("enabled"):
+        return {"ok": True, "skipped": True}
+    legacy = gopro_result.get("legacy_base_url") or ""
+    open_url = gopro_result.get("open_base_url") or ""
+    base = gopro_result.get("base_url") or ""
+    if gopro_result.get("webcam_api_style") == "legacy_gpwebcam" and (legacy or base):
+        client: GoProClient = LegacyGoProClient(legacy or base, timeout_s=2.0)
+    elif open_url or base:
+        client = GoProClient(open_url or base, timeout_s=2.0)
+    else:
+        return {"ok": False, "error": "no GoPro base URL to stop webcam"}
+    return client.stop_webcam().as_dict()

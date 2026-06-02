@@ -41,10 +41,30 @@ ROUTE_POINTS = [
 ]
 
 
+def _ring(offset: float) -> list[tuple[str, float, float]]:
+    """The 8-point route + center, at ``offset`` from frame center on each axis."""
+    lo, hi = 0.5 - offset, 0.5 + offset
+    return [
+        ("left", lo, 0.50),
+        ("top-left", lo, lo),
+        ("top", 0.50, lo),
+        ("top-right", hi, lo),
+        ("right", hi, 0.50),
+        ("bottom-right", hi, hi),
+        ("bottom", 0.50, hi),
+        ("bottom-left", lo, hi),
+        ("center", 0.50, 0.50),
+    ]
+
+
 def default_checkpoints(targets: CoverageTargets) -> list[GuideCheckpoint]:
     small = max(targets.size_min, 0.16)
     medium = min(max(0.35, targets.size_min), targets.size_max)
     large = min(targets.size_max, 0.62)
+    # A board large enough to fill ~`large` of the frame spills off two edges if it
+    # is centered in a frame corner, so those poses cannot keep enough markers in
+    # view. Pull the large route onto a tighter ring so big boards stay in frame.
+    large_offset = max(0.12, min(0.20, (1.0 - large) / 2.0 - 0.02))
     checkpoints = [GuideCheckpoint("center medium", 0.50, 0.50, medium)]
     checkpoints.extend(
         GuideCheckpoint(f"{label} small", x, y, small)
@@ -52,14 +72,18 @@ def default_checkpoints(targets: CoverageTargets) -> list[GuideCheckpoint]:
     )
     checkpoints.extend(
         GuideCheckpoint(f"{label} large", x, y, large)
-        for label, x, y in ROUTE_POINTS[1:] + ROUTE_POINTS[:1]
+        for label, x, y in _ring(large_offset)
     )
+    # Tilt poses: a board can't be held at an exact apparent size while also being
+    # tilted, so the guide asks for a clearly-tilted board (a margin below the
+    # coverage skew target) and relaxes the size gate below.
+    tilt = round(min(targets.skew_max, max(0.30, 0.8 * targets.skew_max)), 2)
     checkpoints.extend(
         [
-            GuideCheckpoint("tilt upper-left", 0.30, 0.30, medium, targets.skew_max),
-            GuideCheckpoint("tilt upper-right", 0.70, 0.30, medium, targets.skew_max),
-            GuideCheckpoint("tilt lower-right", 0.70, 0.70, medium, targets.skew_max),
-            GuideCheckpoint("tilt lower-left", 0.30, 0.70, medium, targets.skew_max),
+            GuideCheckpoint("tilt upper-left", 0.30, 0.30, medium, tilt),
+            GuideCheckpoint("tilt upper-right", 0.70, 0.30, medium, tilt),
+            GuideCheckpoint("tilt lower-right", 0.70, 0.70, medium, tilt),
+            GuideCheckpoint("tilt lower-left", 0.30, 0.70, medium, tilt),
         ]
     )
     return checkpoints
@@ -76,7 +100,10 @@ def pose_matches_checkpoint(
         return False
     if abs(pose.y - checkpoint.y) > xy_tol:
         return False
-    if abs(pose.size - checkpoint.size) > size_tol:
+    # Tilting a board changes its apparent bounding-box size, so don't also demand
+    # a precise size for tilt checkpoints; position + adequate tilt is enough.
+    effective_size_tol = size_tol if checkpoint.skew <= 0.0 else max(size_tol, 0.20)
+    if abs(pose.size - checkpoint.size) > effective_size_tol:
         return False
     if checkpoint.skew > 0.0 and pose.skew < checkpoint.skew:
         return False
@@ -93,10 +120,15 @@ def guide_status(
         any(pose_matches_checkpoint(pose, checkpoint) for pose in captured_poses)
         for checkpoint in checkpoints
     ]
-    try:
-        current_index = complete_flags.index(False)
-    except ValueError:
+    incomplete = [index for index, done in enumerate(complete_flags) if not done]
+    if not incomplete:
+        # Everything done: park on the last checkpoint.
         current_index = len(checkpoints) - 1
+    else:
+        # Sequential: always guide to the first unmet checkpoint. This keeps the
+        # highlighted target stable (it does not hop around as the live pose
+        # jitters); the route is ordered so checkpoints stay reachable in turn.
+        current_index = incomplete[0]
 
     points = []
     for index, checkpoint in enumerate(checkpoints):
