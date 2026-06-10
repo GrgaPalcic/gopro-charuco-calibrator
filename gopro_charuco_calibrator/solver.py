@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import json
+import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,35 @@ from .models import BoardConfig, CameraConfig, CoverageTargets, SolverConfig
 from .ros_yaml import save_camera_info_yaml
 
 ROBUST_SIGMA_FLOOR_PX = 0.05
+# Smallest frame set we will keep when cv2.fisheye keeps rejecting ill-conditioned
+# views; below this we stop dropping and solve without the conditioning check.
+FISHEYE_MIN_KEEP_FRAMES = 6
+
+
+@dataclass(frozen=True)
+class CalibModelSpec:
+    """A camera model the solver can fit and emit.
+
+    ``name`` is the file/summary label; ``distortion_model`` is the ROS
+    distortion_model string written into the camera_info YAML (fisheye uses the
+    canonical ``equidistant``). ``flags`` only applies to the pinhole path.
+    """
+
+    name: str
+    fisheye: bool
+    flags: int
+    distortion_model: str
+
+
+CALIB_MODELS: dict[str, CalibModelSpec] = {
+    "plumb_bob": CalibModelSpec("plumb_bob", False, 0, "plumb_bob"),
+    "rational_polynomial": CalibModelSpec(
+        "rational_polynomial", False, cv2.CALIB_RATIONAL_MODEL, "rational_polynomial"
+    ),
+    "fisheye": CalibModelSpec("fisheye", True, 0, "equidistant"),
+}
+
+_ILL_COND_RE = re.compile(r"input array (\d+)")
 
 
 @dataclass(frozen=True)
@@ -157,6 +188,120 @@ def calibration_solve(
         tvecs=tvec_tuple,
         view_errors_px=errors,
     )
+
+
+def _fisheye_view_points(
+    records: list[DetectionRecord],
+    obj_by_id: dict[int, np.ndarray],
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """Build per-view (N,1,3) object and (N,1,2) image point arrays.
+
+    cv2.fisheye is strict about the channel layout: object points must be a
+    3-channel Nx1 array and image points a 2-channel Nx1 array, both float64.
+    """
+    object_points: list[np.ndarray] = []
+    image_points: list[np.ndarray] = []
+    for record in records:
+        objp: list[np.ndarray] = []
+        imgp: list[np.ndarray] = []
+        for corner, marker_id in zip(record.corners, record.ids.ravel(), strict=True):
+            objp.append(obj_by_id[int(marker_id)])
+            imgp.append(np.asarray(corner, dtype=np.float64).reshape(4, 2))
+        obj = np.concatenate(objp, axis=0).astype(np.float64).reshape(-1, 1, 3)
+        img = np.concatenate(imgp, axis=0).astype(np.float64).reshape(-1, 1, 2)
+        object_points.append(obj)
+        image_points.append(img)
+    return object_points, image_points
+
+
+def fisheye_solve(
+    image_size: tuple[int, int],
+    records: list[DetectionRecord],
+    obj_by_id: dict[int, np.ndarray],
+) -> CalibrationSolve:
+    """Calibrate the Kannala-Brandt fisheye model (cv2.fisheye).
+
+    cv2.fisheye is numerically fragile: CALIB_CHECK_COND raises on an
+    ill-conditioned (typically extreme-edge) view, and the documented cure is to
+    drop that view and retry rather than disable the check. We iteratively drop
+    offending frames (tagging them with an infinite view error so the existing
+    selection logic rejects them) and only fall back to solving without the
+    conditioning check if too few frames would remain.
+    """
+    object_points, image_points = _fisheye_view_points(records, obj_by_id)
+    flags = (
+        cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC
+        | cv2.fisheye.CALIB_FIX_SKEW
+        | cv2.fisheye.CALIB_CHECK_COND
+    )
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6)
+    point_counts = [int(points.shape[0]) for points in object_points]
+
+    kept = list(range(len(records)))
+    dropped: list[int] = []
+    while True:
+        objp = [object_points[i] for i in kept]
+        imgp = [image_points[i] for i in kept]
+        try:
+            rms, camera_matrix, dist, rvecs, tvecs = cv2.fisheye.calibrate(
+                objp,
+                imgp,
+                tuple(image_size),
+                np.eye(3, dtype=np.float64),
+                np.zeros((4, 1), dtype=np.float64),
+                flags=flags,
+                criteria=criteria,
+            )
+            break
+        except cv2.error as exc:
+            if len(kept) <= FISHEYE_MIN_KEEP_FRAMES:
+                raise RuntimeError(
+                    "Fisheye (Kannala-Brandt) calibration could not converge on these views. "
+                    "This is expected for SuperView/HyperView captures, whose anamorphic stretch "
+                    "is not a radially-symmetric fisheye projection - use the Wide lens for the "
+                    "fisheye model, or the pinhole model for Linear."
+                ) from exc
+            match = _ILL_COND_RE.search(str(exc))
+            if match is not None and 0 <= int(match.group(1)) < len(kept):
+                # OpenCV named the ill-conditioned view by its position in kept.
+                dropped.append(kept.pop(int(match.group(1))))
+            else:
+                # No index (e.g. InitExtrinsics norm_u1 == 0). Drop the kept view
+                # with the fewest correspondences - the likeliest degenerate one.
+                victim = min(kept, key=lambda index: point_counts[index])
+                kept.remove(victim)
+                dropped.append(victim)
+
+    errors: dict[str, float] = {}
+    for position, index in enumerate(kept):
+        projected, _ = cv2.fisheye.projectPoints(
+            object_points[index], rvecs[position], tvecs[position], camera_matrix, dist
+        )
+        diff = image_points[index].reshape(-1, 2) - projected.reshape(-1, 2)
+        errors[records[index].name] = float(np.sqrt(np.mean(np.sum(diff * diff, axis=1))))
+    for index in dropped:
+        errors[records[index].name] = float("inf")
+
+    return CalibrationSolve(
+        rms=float(rms),
+        camera_matrix=np.asarray(camera_matrix, dtype=np.float64),
+        dist_coeffs=np.asarray(dist, dtype=np.float64).ravel(),
+        rvecs=tuple(np.asarray(rvec) for rvec in rvecs),
+        tvecs=tuple(np.asarray(tvec) for tvec in tvecs),
+        view_errors_px=errors,
+    )
+
+
+def solve_model(
+    model: CalibModelSpec,
+    image_size: tuple[int, int],
+    records: list[DetectionRecord],
+    board,
+    obj_by_id: dict[int, np.ndarray],
+) -> CalibrationSolve:
+    if model.fisheye:
+        return fisheye_solve(image_size, records, obj_by_id)
+    return calibration_solve(image_size, records, board, obj_by_id, model.flags)
 
 
 def robust_threshold(errors: list[float], max_view_error_px: float, mad_multiplier: float):
@@ -342,16 +487,22 @@ def select_frame_subset(
 
 def solve_summary(solve: CalibrationSolve, records: list[DetectionRecord], yaml_path: Path) -> dict:
     errors = [solve.view_errors_px[record.name] for record in records]
+    # Fisheye marks conditioning-dropped views with inf; exclude them from the
+    # aggregate stats and report them as null per-frame so the JSON stays valid.
+    finite = [error for error in errors if math.isfinite(error)]
     return {
         "frame_count": len(records),
         "rms": float(solve.rms),
-        "median_view_error_px": float(np.median(errors)),
-        "worst_view_error_px": float(np.max(errors)),
+        "median_view_error_px": float(np.median(finite)) if finite else None,
+        "worst_view_error_px": float(np.max(finite)) if finite else None,
         "camera_matrix": solve.camera_matrix.tolist(),
         "distortion": solve.dist_coeffs.ravel().tolist(),
         "yaml": str(yaml_path),
         "view_errors_px": {
-            record.name: float(solve.view_errors_px[record.name]) for record in records
+            record.name: (
+                float(error) if math.isfinite(error := solve.view_errors_px[record.name]) else None
+            )
+            for record in records
         },
     }
 
@@ -442,10 +593,10 @@ def run_model(
     records: list[DetectionRecord],
     board,
     obj_by_id: dict[int, np.ndarray],
-    model_name: str,
-    flags: int,
+    model: CalibModelSpec,
 ) -> dict[str, Any]:
-    all_solve = calibration_solve(image_size, records, board, obj_by_id, flags)
+    model_name = model.name
+    all_solve = solve_model(model, image_size, records, board, obj_by_id)
     all_yaml_path = output_dir / f"{camera.camera_name}_all_frames_{model_name}.yaml"
     save_camera_info_yaml(
         all_yaml_path,
@@ -453,8 +604,9 @@ def run_model(
         image_size=image_size,
         camera_matrix=all_solve.camera_matrix,
         dist_coeffs=all_solve.dist_coeffs,
-        distortion_model=model_name,
+        distortion_model=model.distortion_model,
         rectify_alpha=solver.rectify_alpha,
+        fisheye=model.fisheye,
     )
 
     frame_reasons: dict[str, str] = {record.name: "auto_select_disabled" for record in records}
@@ -490,12 +642,12 @@ def run_model(
             )
             selected_records = next_records
             if changed:
-                selected_solve = calibration_solve(
+                selected_solve = solve_model(
+                    model,
                     image_size,
                     selected_records,
                     board,
                     obj_by_id,
-                    flags,
                 )
                 current_records = selected_records
                 current_solve = selected_solve
@@ -513,8 +665,9 @@ def run_model(
         image_size=image_size,
         camera_matrix=selected_solve.camera_matrix,
         dist_coeffs=selected_solve.dist_coeffs,
-        distortion_model=model_name,
+        distortion_model=model.distortion_model,
         rectify_alpha=solver.rectify_alpha,
+        fisheye=model.fisheye,
     )
 
     selected_names = {record.name for record in selected_records}
@@ -593,20 +746,9 @@ def solve_from_frames(
             records=records,
             board=board,
             obj_by_id=obj_by_id,
-            model_name="plumb_bob",
-            flags=0,
-        ),
-        run_model(
-            output_dir=output_dir,
-            camera=camera,
-            solver=solver,
-            image_size=image_size,
-            records=records,
-            board=board,
-            obj_by_id=obj_by_id,
-            model_name="rational_polynomial",
-            flags=cv2.CALIB_RATIONAL_MODEL,
-        ),
+            model=CALIB_MODELS[model_name],
+        )
+        for model_name in solver.models
     ]
     summary = {
         "image_size": list(image_size),

@@ -57,6 +57,7 @@ def test_apply_gopro_settings_records_steps(monkeypatch):
             enabled=True,
             base_url="http://172.20.0.51:8080",
             start_video_bridge=False,
+            webcam_resolution=7,
             webcam_fov=4,
             video_lens=9,
             video_resolution=100,
@@ -129,7 +130,9 @@ def test_apply_gopro_settings_auto_discovers_legacy_endpoint(monkeypatch):
     monkeypatch.setattr("gopro_charuco_calibrator.gopro.subprocess.check_output", fake_check_output)
     monkeypatch.setattr("gopro_charuco_calibrator.gopro.urlopen", fake_urlopen)
 
-    result = apply_gopro_settings(GoProSettingsConfig(enabled=True, base_url="", webcam_fov=3))
+    result = apply_gopro_settings(
+        GoProSettingsConfig(enabled=True, base_url="", webcam_resolution=7, webcam_fov=3)
+    )
 
     assert result["ok"] is True
     assert result["base_url"] == "http://172.20.144.51:8080"
@@ -160,6 +163,7 @@ def test_apply_gopro_settings_uses_legacy_webcam_for_video_bridge(monkeypatch):
         GoProSettingsConfig(
             enabled=True,
             base_url="http://172.20.144.51:8080",
+            webcam_resolution=7,
             video_lens=9,
             webcam_fov=4,
         )

@@ -83,9 +83,28 @@ function populateGoProOptions(options) {
   }
 }
 
+// The backend solver.models is a list; the form exposes it as one dropdown.
+const MODEL_SETS = {
+  pinhole: ["plumb_bob", "rational_polynomial"],
+  fisheye: ["fisheye"],
+  both: ["plumb_bob", "rational_polynomial", "fisheye"],
+};
+
+function modelsToKey(models) {
+  const want = JSON.stringify([...(models || [])].sort());
+  for (const [key, set] of Object.entries(MODEL_SETS)) {
+    if (JSON.stringify([...set].sort()) === want) return key;
+  }
+  return "pinhole";
+}
+
 function setFormValue(name, value) {
   const input = form.elements[name];
   if (!input) return;
+  if (name === "solver.models") {
+    input.value = modelsToKey(value);
+    return;
+  }
   if (input.type === "checkbox") {
     input.checked = Boolean(value);
   } else if (input.dataset.mm === "true") {
@@ -115,6 +134,10 @@ function readForm() {
   const config = structuredClone(defaults.config);
   for (const input of form.elements) {
     if (!input.name) continue;
+    if (input.name === "solver.models") {
+      setDeep(config, input.name, MODEL_SETS[input.value] || MODEL_SETS.pinhole);
+      continue;
+    }
     let value = input.type === "checkbox" ? input.checked : input.value;
     if (input.dataset.optional === "true" && value === "") {
       value = null;

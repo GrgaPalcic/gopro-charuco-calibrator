@@ -136,6 +136,14 @@
           <label>Solver min frames <input name="solver.min_frames" type="number"></label>
           <label>Solver min markers <input name="solver.min_markers" type="number"></label>
         </div>
+        <label>Calibration model
+          <select name="solver.models">
+            <option value="pinhole">Pinhole — plumb_bob + rational (Linear lens)</option>
+            <option value="fisheye">Fisheye — Kannala-Brandt (Wide lens / UMI)</option>
+            <option value="both">Both — pinhole + fisheye (compare)</option>
+          </select>
+        </label>
+        <p class="note">Wide/SuperView GoPro lenses are true fisheye — use Fisheye. Pinhole only fits Linear.</p>
         <label class="switch"><input name="capture.auto_capture" type="checkbox">
           <span class="track" aria-hidden="true"></span><span>Auto capture</span></label>
       </form>

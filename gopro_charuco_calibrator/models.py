@@ -50,7 +50,10 @@ class BoardConfig(BaseModel):
 
 
 class CameraConfig(BaseModel):
-    camera_name: str = "gopro13_hyperview"
+    # Neutral placeholder, not a specific model: presets set a real name. A
+    # model-specific default (the old "gopro13_hyperview") silently mislabels
+    # every un-preset'd run after the camera it was named for.
+    camera_name: str = "gopro_camera"
     device: str = "/dev/video42"
     width: int = Field(default=1280, ge=160)
     height: int = Field(default=720, ge=120)
@@ -74,8 +77,11 @@ class GoProSettingsConfig(BaseModel):
     stop_webcam_first: bool = True
     start_webcam: bool = True
     start_video_bridge: bool = True
-    webcam_resolution: int = Field(default=7, ge=0)
-    webcam_fov: int = Field(default=3, ge=0)
+    # Safe defaults for an un-preset'd run: 1080p + Wide. The old defaults were
+    # 720p + SuperView(3) - SuperView is an anamorphic stretch no model can fit,
+    # which produced ~30px RMS for runs started without loading a preset.
+    webcam_resolution: int = Field(default=12, ge=0)  # 12 = 1080p
+    webcam_fov: int = Field(default=0, ge=0)  # 0 = Wide (native fisheye)
     webcam_port: int = Field(default=8554, ge=1, le=65535)
     webcam_protocol: Literal["RTSP", "TS"] = "TS"
     webcam_digital_lens: int | None = None
@@ -106,6 +112,9 @@ class CaptureConfig(BaseModel):
     auto_capture: bool = True
 
 
+CalibModelName = Literal["plumb_bob", "rational_polynomial", "fisheye"]
+
+
 class SolverConfig(BaseModel):
     min_markers: int = Field(default=8, ge=1)
     min_frames: int = Field(default=25, ge=3)
@@ -116,6 +125,22 @@ class SolverConfig(BaseModel):
     min_selected_frames: int | None = None
     max_selected_frames: int = Field(default=50, ge=3)
     selection_passes: int = Field(default=2, ge=1, le=10)
+    # Which camera models to solve and emit. plumb_bob/rational_polynomial are
+    # pinhole (good only for Linear/narrow lenses); fisheye is Kannala-Brandt for
+    # wide GoPro lenses (Wide ~130 deg, UMI-style). Default emits all three so a
+    # run started without a preset auto-recommends the right model for whatever
+    # lens was used (fisheye wins on Wide, pinhole on Linear); presets narrow it.
+    models: list[CalibModelName] = Field(
+        default_factory=lambda: ["plumb_bob", "rational_polynomial", "fisheye"]
+    )
+
+    @field_validator("models")
+    @classmethod
+    def dedupe_models(cls, value: list[str]) -> list[str]:
+        ordered = list(dict.fromkeys(value))
+        if not ordered:
+            raise ValueError("at least one calibration model is required")
+        return ordered
 
 
 class CoverageTargets(BaseModel):

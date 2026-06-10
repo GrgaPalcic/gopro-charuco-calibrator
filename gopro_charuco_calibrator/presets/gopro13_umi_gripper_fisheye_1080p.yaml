@@ -1,0 +1,33 @@
+title: "GoPro HERO13 UMI Gripper (Wide / fisheye)"
+# Gripper camera for UMI-style demonstration capture. UMI itself runs a physical
+# 155-deg Max Lens Mod fisheye and calibrates a Kannala-Brandt model, feeding raw
+# fisheye frames to ORB-SLAM3 and the policy. In USB webcam mode the closest match
+# is the native-fisheye Wide lens solved with the fisheye model. For full UMI
+# parity fit the Max Lens Mod, disable stabilization, and (when recording on the
+# camera, not webcam) use 2.7K. Keep lens + resolution fixed across every run.
+camera:
+  camera_name: gopro13_umi_gripper
+  device: /dev/video42
+  width: 1920
+  height: 1080
+  fps: 30.0
+  fourcc: YUYV
+gopro:
+  enabled: true
+  webcam_fov: 0          # 0 = Wide (native fisheye, ~130 deg)
+  webcam_resolution: 12  # 12 = 1080p
+  webcam_port: 8554
+  webcam_protocol: TS
+board:
+  cols: 11
+  rows: 8
+  square_m: 0.034
+  marker_m: 0.025
+  aruco_dict: DICT_5X5_100
+  start_id: 2
+  marker_count: 44
+solver:
+  # Wide is a true fisheye; a pinhole model cannot fit it (RMS blows up). Solve the
+  # Kannala-Brandt fisheye model, matching UMI's camera model.
+  models:
+    - fisheye
