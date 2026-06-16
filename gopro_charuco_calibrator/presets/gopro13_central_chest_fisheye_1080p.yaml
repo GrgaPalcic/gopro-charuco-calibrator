@@ -27,5 +27,7 @@ board:
   start_id: 2
   marker_count: 44
 solver:
+  # If this camera also wears a Max Lens Mod (ultra-wide circular image), append
+  # `- double_sphere` (needs the `openicc` Docker image or OPENICC_BINARY).
   models:
     - fisheye

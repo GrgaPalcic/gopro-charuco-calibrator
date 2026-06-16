@@ -16,6 +16,7 @@ from .boards import detector_params, make_caib_board, resolve_dictionary
 from .coverage import COVERAGE_FIELDS, PoseParams, coverage_summary
 from .detection import detect_markers
 from .models import BoardConfig, CameraConfig, CoverageTargets, SolverConfig
+from .openicc import run_double_sphere_model
 from .ros_yaml import save_camera_info_yaml
 
 ROBUST_SIGMA_FLOOR_PX = 0.05
@@ -306,8 +307,11 @@ def solve_model(
 
 def robust_threshold(errors: list[float], max_view_error_px: float, mad_multiplier: float):
     values = np.asarray(errors, dtype=np.float64)
-    median = float(np.median(values))
-    mad = float(np.median(np.abs(values - median)))
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return float(max_view_error_px), float("inf"), float("inf")
+    median = float(np.median(finite))
+    mad = float(np.median(np.abs(finite - median)))
     robust_sigma = max(1.4826 * mad, ROBUST_SIGMA_FLOOR_PX)
     threshold = min(float(max_view_error_px), median + float(mad_multiplier) * robust_sigma)
     return threshold, median, robust_sigma
@@ -507,6 +511,10 @@ def solve_summary(solve: CalibrationSolve, records: list[DetectionRecord], yaml_
     }
 
 
+def json_error_value(value: float) -> float | None:
+    return float(value) if math.isfinite(value) else None
+
+
 def selection_summary(selection: SelectionResult, pass_index: int) -> dict:
     return {
         "pass": pass_index,
@@ -687,7 +695,7 @@ def run_model(
         {
             "name": record.name,
             "reason": frame_reasons.get(record.name, ""),
-            "all_view_error_px": float(all_solve.view_errors_px[record.name]),
+            "all_view_error_px": json_error_value(all_solve.view_errors_px[record.name]),
         }
         for record in records
         if record.name not in selected_names
@@ -702,6 +710,7 @@ def run_model(
 
     return {
         "model": model_name,
+        "ok": True,
         "rms": selected_summary["rms"],
         "median_view_error_px": selected_summary["median_view_error_px"],
         "worst_view_error_px": selected_summary["worst_view_error_px"],
@@ -712,6 +721,75 @@ def run_model(
         "selected": selected_summary,
         "diagnostics_csv": str(diagnostics_csv_path),
     }
+
+
+def failed_model_result(model_name: str, exc: Exception) -> dict[str, Any]:
+    return {
+        "model": model_name,
+        "ok": False,
+        "error_type": type(exc).__name__,
+        "error": str(exc),
+        "rms": None,
+        "median_view_error_px": None,
+        "worst_view_error_px": None,
+        "camera_matrix": None,
+        "distortion": None,
+        "yaml": None,
+        "all_frames": None,
+        "selected": None,
+        "diagnostics_csv": None,
+    }
+
+
+def _layout_residual_px(records: list[DetectionRecord], obj_by_id: dict[int, np.ndarray]) -> float:
+    """Median per-corner homography residual of the layout against detections.
+
+    A planar homography absorbs pose but not lens distortion, so residuals stay
+    small (a few px at the board scale) when the marker layout matches reality
+    and jump by roughly a square size when it does not.
+    """
+    residuals: list[float] = []
+    candidates = sorted(records, key=lambda record: -record.marker_count)[:5]
+    for record in candidates:
+        object_xy = []
+        image_xy = []
+        for corner, marker_id in zip(record.corners, record.ids.ravel(), strict=True):
+            if int(marker_id) not in obj_by_id:
+                continue
+            object_xy.append(obj_by_id[int(marker_id)][:, :2])
+            image_xy.append(np.asarray(corner, dtype=np.float64).reshape(4, 2))
+        if len(object_xy) < 4:
+            continue
+        obj = np.concatenate(object_xy, axis=0)
+        img = np.concatenate(image_xy, axis=0)
+        homography, _mask = cv2.findHomography(obj, img, cv2.RANSAC, 5.0)
+        if homography is None:
+            continue
+        projected = cv2.perspectiveTransform(obj.reshape(-1, 1, 2), homography).reshape(-1, 2)
+        residuals.extend(np.linalg.norm(projected - img, axis=1).tolist())
+    return float(np.median(residuals)) if residuals else float("inf")
+
+
+def detect_board_layout(
+    records: list[DetectionRecord],
+    board_config: BoardConfig,
+    dictionary=None,
+):
+    """Pick the caib.io marker-column parity that matches the detections.
+
+    caib.io flips which checkerboard cells carry markers depending on the board
+    dimensions, so the same cols/rows/ids config can describe two mirrored
+    layouts. Assuming the wrong one silently offsets every odd-row marker by a
+    full square and ruins calibration. Score both against the detections and
+    keep the better fit.
+    """
+    standard = make_caib_board(board_config, dictionary, flipped=False)
+    flipped = make_caib_board(board_config, dictionary, flipped=True)
+    standard_residual = _layout_residual_px(records, standard[1])
+    flipped_residual = _layout_residual_px(records, flipped[1])
+    if flipped_residual < standard_residual:
+        return flipped[0], flipped[1], "flipped"
+    return standard[0], standard[1], "standard"
 
 
 def solve_from_frames(
@@ -726,7 +804,6 @@ def solve_from_frames(
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     dictionary = resolve_dictionary(board_config.aruco_dict)
-    board, obj_by_id = make_caib_board(board_config, dictionary)
     image_size, records = detect_frames(
         frames_dir=frames_dir,
         board_config=board_config,
@@ -736,20 +813,39 @@ def solve_from_frames(
     min_required = int(solver.min_frames)
     if len(records) < min_required:
         raise RuntimeError(f"Need at least {min_required} usable frames, found {len(records)}")
+    board, obj_by_id, board_layout = detect_board_layout(records, board_config, dictionary)
 
-    results = [
-        run_model(
-            output_dir=output_dir,
-            camera=camera,
-            solver=solver,
-            image_size=image_size,
-            records=records,
-            board=board,
-            obj_by_id=obj_by_id,
-            model=CALIB_MODELS[model_name],
-        )
-        for model_name in solver.models
-    ]
+    results = []
+    for model_name in solver.models:
+        try:
+            if model_name == "double_sphere":
+                # External OpenICC backend (subprocess boundary); it does its own
+                # view selection, so the cv2 solve + auto-select path is bypassed.
+                results.append(
+                    run_double_sphere_model(
+                        output_dir=output_dir,
+                        camera=camera,
+                        board_config=board_config,
+                        image_size=image_size,
+                        records=records,
+                        obj_by_id=obj_by_id,
+                    )
+                )
+            else:
+                results.append(
+                    run_model(
+                        output_dir=output_dir,
+                        camera=camera,
+                        solver=solver,
+                        image_size=image_size,
+                        records=records,
+                        board=board,
+                        obj_by_id=obj_by_id,
+                        model=CALIB_MODELS[model_name],
+                    )
+                )
+        except (cv2.error, RuntimeError, ValueError, np.linalg.LinAlgError) as exc:
+            results.append(failed_model_result(model_name, exc))
     summary = {
         "image_size": list(image_size),
         "frames": frame_summary(records),
@@ -758,6 +854,7 @@ def solve_from_frames(
             **board_config.model_dump(),
             "pattern_width_m": board_config.pattern_width_m,
             "pattern_height_m": board_config.pattern_height_m,
+            "layout": board_layout,
         },
         "camera": camera.model_dump(),
         "selection": solver.model_dump(),

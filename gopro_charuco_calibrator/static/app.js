@@ -87,6 +87,8 @@ function populateGoProOptions(options) {
 const MODEL_SETS = {
   pinhole: ["plumb_bob", "rational_polynomial"],
   fisheye: ["fisheye"],
+  fisheye_ds: ["fisheye", "double_sphere"],
+  double_sphere: ["double_sphere"],
   both: ["plumb_bob", "rational_polynomial", "fisheye"],
 };
 
@@ -411,9 +413,13 @@ function num(value, digits = 2) {
 }
 
 function pickRecommended(results) {
+  const solved = results.filter(
+    (result) => result && result.ok !== false && (result.median_view_error_px != null || result.rms != null),
+  );
+  if (!solved.length) return null;
   // Lower median reprojection error wins (rational_polynomial usually wins on
   // wide GoPro lenses); fall back to RMS.
-  return results.slice().sort((a, b) => {
+  return solved.slice().sort((a, b) => {
     const am = a.median_view_error_px ?? a.rms ?? 1e9;
     const bm = b.median_view_error_px ?? b.rms ?? 1e9;
     return am - bm;
@@ -453,6 +459,22 @@ function renderResults(modelResults, coverage, mode) {
   }
   resultsPanel.hidden = false;
   const rec = pickRecommended(modelResults);
+  if (!rec) {
+    verdictBox.className = "verdict retake";
+    verdictBadge.textContent = "FAILED";
+    verdictText.textContent = "No calibration model solved.";
+    verdictReasons.innerHTML = "";
+    resultGrid.innerHTML = "";
+    for (const result of modelResults) {
+      const dt = document.createElement("dt");
+      dt.textContent = `Failed (${result.model || "model"})`;
+      const dd = document.createElement("dd");
+      dd.textContent = result.error || result.error_type || "solver failed";
+      resultGrid.append(dt, dd);
+    }
+    resultsRaw.textContent = JSON.stringify(modelResults, null, 2);
+    return;
+  }
   const cm = rec.camera_matrix || [[null, null, null], [null, null, null]];
   const fx = cm[0]?.[0];
   const fy = cm[1]?.[1];
@@ -492,14 +514,18 @@ function renderResults(modelResults, coverage, mode) {
     ["Principal point", `cx ${num(cx, 1)}, cy ${num(cy, 1)}`],
     ["Frames used", `${used ?? "n/a"} / ${total ?? "n/a"}`],
   );
-  const other = modelResults.find((r) => r !== rec);
+  const other = modelResults.find((r) => r !== rec && r.ok !== false);
   if (other) {
     rows.push([
       `Alternate (${other.model})`,
       `median ${num(other.median_view_error_px)} px, worst ${num(other.worst_view_error_px)} px`,
     ]);
   }
+  for (const failed of modelResults.filter((r) => r.ok === false)) {
+    rows.push([`Failed (${failed.model || "model"})`, failed.error || failed.error_type || "solver failed"]);
+  }
   if (rec.yaml) rows.push(["Output YAML", rec.yaml]);
+  if (rec.json) rows.push(["Output JSON", rec.json]);
 
   resultGrid.innerHTML = "";
   for (const [key, value] of rows) {

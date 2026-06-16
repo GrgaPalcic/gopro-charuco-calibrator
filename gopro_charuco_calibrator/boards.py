@@ -22,13 +22,24 @@ def detector_params():
     return params
 
 
-def caib_marker_object_points(config: BoardConfig) -> dict[int, np.ndarray]:
+def caib_marker_object_points(config: BoardConfig, flipped: bool = False) -> dict[int, np.ndarray]:
+    """Marker corner coordinates for a caib.io board.
+
+    Markers sit on alternating checkerboard cells, but which parity the first
+    row starts on depends on the board's corner colour, which caib.io varies
+    with the grid dimensions. ``flipped=False`` is the historical layout (row 0
+    markers at even columns); ``flipped=True`` is the mirrored parity (row 0 at
+    odd columns). Use ``solver.detect_board_layout`` to pick the right one from
+    real detections.
+    """
     obj_by_id: dict[int, np.ndarray] = {}
     marker_id = int(config.start_id)
     margin = 0.5 * (config.square_m - config.marker_m)
     end_id = config.start_id + config.marker_count
+    first = 1 if flipped else 0
     for row in range(config.rows):
-        marker_cols = range(0, config.cols, 2) if row % 2 == 0 else range(1, config.cols, 2)
+        start = (first + row) % 2
+        marker_cols = range(start, config.cols, 2)
         for col in marker_cols:
             if marker_id >= end_id:
                 return obj_by_id
@@ -47,9 +58,9 @@ def caib_marker_object_points(config: BoardConfig) -> dict[int, np.ndarray]:
     return obj_by_id
 
 
-def make_caib_board(config: BoardConfig, dictionary=None):
+def make_caib_board(config: BoardConfig, dictionary=None, flipped: bool = False):
     dictionary = dictionary or resolve_dictionary(config.aruco_dict)
-    obj_by_id = caib_marker_object_points(config)
+    obj_by_id = caib_marker_object_points(config, flipped=flipped)
     ids = np.asarray(sorted(obj_by_id), dtype=np.int32)
     obj_points = [obj_by_id[int(marker_id)] for marker_id in ids]
     if hasattr(aruco, "Board_create"):

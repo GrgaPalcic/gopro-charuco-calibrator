@@ -41,10 +41,11 @@ def _discarded_points(summary: dict[str, Any]) -> list[dict[str, Any]]:
     summary frame list.
     """
     results = summary.get("results") or []
-    if not results:
+    successful = [result for result in results if result.get("ok") is not False]
+    if not successful:
         return []
     recommended = min(
-        results,
+        successful,
         key=lambda r: r.get("median_view_error_px", r.get("rms", 1e9)) or 1e9,
     )
     rejected = (recommended.get("selected") or {}).get("rejected_frames") or []
@@ -311,9 +312,18 @@ class CaptureSession:
         with summary_path.open("w", encoding="utf-8") as stream:
             json.dump(summary, stream, indent=2)
         self._state = "solved"
+        failed_models = [
+            result.get("model", "unknown")
+            for result in summary["results"]
+            if result.get("ok") is False
+        ]
         self._set_status(
             state="solved",
-            message="calibration solve complete",
+            message=(
+                "calibration solve complete"
+                if not failed_models
+                else f"calibration solve finished; failed models: {', '.join(failed_models)}"
+            ),
             summary_path=str(summary_path),
             results=summary["results"],
             acquisition_mode=summary["acquisition_mode"],

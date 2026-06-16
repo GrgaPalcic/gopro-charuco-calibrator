@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Print: OpenICC ChArUco board — A3, 10×7, 40 mm (DICT_ARUCO_ORIGINAL)</title>
+<style>
+  @page { size: A3 landscape; margin: 0; }
+  html, body { margin: 0; padding: 0; }
+  .sheet { width: 420mm; height: 297mm; position: relative; page-break-after: always; }
+  .sheet img { width: 420mm; height: 297mm; display: block; }
+  .instructions { font: 14px/1.6 system-ui, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px; }
+  @media print { .instructions { display: none; } }
+  code { background: #eef1f5; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div class="instructions">
+  <h2>OpenICC-native ChArUco board — print instructions</h2>
+  <ul>
+    <li><b>Paper:</b> A3 landscape. <b>Scale: 100% / Actual size</b> (no "fit to page").</li>
+    <li><b>Verify after printing:</b> one checker square must measure <b>40.0 mm</b> with a ruler.
+        If it doesn't, fix the print scale — do not "compensate" in software.</li>
+    <li><b>Mount flat and rigid</b> (foam board / aluminium composite). Any bend ruins calibration.</li>
+    <li><b>Spec:</b> 10×7 squares · square 40 mm · marker 20 mm (= ½·square, OpenICC's stock ratio) ·
+        dictionary <code>DICT_ARUCO_ORIGINAL</code> · marker ids 0–34.</li>
+  </ul>
+  <h3>Solver settings for this board</h3>
+  <ul>
+    <li><b>OpenICC's own extractor</b> (stock, no source edit needed — the ½ ratio matches):
+        <code>--board_type=charuco --num_squares_x=10 --num_squares_y=7 --checker_square_length_m=0.040</code>
+        and leave <code>--aruco_dict</code> at its default (ARUCO_ORIGINAL).</li>
+    <li><b>This calibrator app:</b> dictionary <code>DICT_ARUCO_ORIGINAL</code>, columns 10, rows 7,
+        square 40.0 mm, marker 20.0 mm, start ID 0, marker count 35. Layout parity is auto-detected.
+        <i>(Compatibility expected; verify marker detection on the first capture.)</i></li>
+  </ul>
+  <p><b>Note:</b> the primary recommended board remains the existing 11×8 <code>DICT_5X5_100</code>
+  34/25 mm calib.io board (bigger squares, modern dictionary, no interference with DICT_4X4 gripper
+  markers). This ARUCO_ORIGINAL board exists for OpenICC-extractor parity work (e.g. the IMU
+  calibration pipeline) and is also safe alongside 4×4 gripper markers.</p>
+</div>
+<div class="sheet"><img src="openicc_charuco_A3_10x7_40mm_dictoriginal.png" alt="ChArUco board 10x7, 40mm squares"></div>
+</body>
+</html>

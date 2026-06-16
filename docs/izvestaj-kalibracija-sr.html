@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="sr-Latn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kalibracija GoPro kamera za UMI/robotiku — izveštaj</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --ink:#1c2330; --muted:#5b6678; --line:#e3e7ee;
+    --green:#1f9d57; --greenbg:#e8f7ee; --blue:#2563c9; --bluebg:#e8f0fc;
+    --purple:#7c4dd1; --purplebg:#f1ebfb; --red:#cf3b3b; --redbg:#fceced;
+    --amber:#b5790a; --amberbg:#fdf4e1; --teal:#0e8f8f;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.65 "Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif;}
+  .wrap{max-width:920px;margin:0 auto;padding:32px 20px 80px}
+  header.top{border-bottom:3px solid var(--ink);padding-bottom:18px;margin-bottom:8px}
+  header.top h1{font-size:27px;margin:0 0 6px;letter-spacing:-.3px}
+  header.top .sub{color:var(--muted);font-size:15px}
+  h2{font-size:21px;margin:38px 0 10px;padding-top:10px;border-top:1px solid var(--line)}
+  h3{font-size:17px;margin:22px 0 6px}
+  p{margin:10px 0}
+  .lead{font-size:17px}
+  code{background:#eef1f5;border:1px solid var(--line);border-radius:5px;padding:1px 6px;
+    font:13.5px/1.4 "Consolas",ui-monospace,monospace}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:16px 20px;margin:14px 0;box-shadow:0 1px 2px rgba(20,30,50,.04)}
+  .tech{background:#0f1729;color:#dbe3f0;border-radius:12px;padding:14px 18px;margin:14px 0;
+    border:1px solid #1e2a44}
+  .tech b,.tech strong{color:#fff}
+  .tech .tag{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.4px;
+    color:#7fd1ff;text-transform:uppercase;margin-bottom:6px}
+  .tech code{background:#1b2640;border-color:#2b3a5c;color:#cfe0ff}
+  .callout{border-left:5px solid;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+  .warn{background:var(--redbg);border-color:var(--red)}
+  .ok{background:var(--greenbg);border-color:var(--green)}
+  .note{background:var(--amberbg);border-color:var(--amber)}
+  .pill{display:inline-block;font-size:12px;font-weight:700;padding:2px 9px;border-radius:999px;
+    vertical-align:middle}
+  .pill.bad{background:var(--redbg);color:var(--red)}
+  .pill.good{background:var(--greenbg);color:var(--green)}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14.5px;background:#fff}
+  th,td{border:1px solid var(--line);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:#eef1f6}
+  ul,ol{margin:10px 0;padding-left:22px}
+  li{margin:5px 0}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;font-size:13.5px;color:var(--muted);margin:6px 0 2px}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:13px;height:13px;border-radius:3px;display:inline-block}
+  .flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:8px;margin:10px 0}
+  .step{flex:1;min-width:120px;background:#fff;border:1px solid var(--line);border-radius:10px;
+    padding:10px 12px;font-size:13.5px}
+  .step .n{font-size:12px;color:var(--muted);font-weight:700}
+  .arrow{align-self:center;color:var(--muted);font-size:20px}
+  .pathbox{border-radius:12px;padding:12px 14px;margin:12px 0}
+  .pathbox.bad{background:var(--redbg);border:1px solid #f1c9cb}
+  .pathbox.good{background:var(--greenbg);border:1px solid #bfe6cd}
+  .pathbox h3{margin:2px 0 8px}
+  .stepbad{border-color:#eecccd}
+  .stepgood{border-color:#c7e7d3}
+  .small{font-size:13px;color:var(--muted)}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:14.5px}
+  .kv .k{color:var(--muted)}
+  a{color:var(--blue)}
+  figure{margin:16px 0}
+  figcaption{font-size:13px;color:var(--muted);margin-top:6px;text-align:center}
+  .req{display:grid;grid-template-columns:auto 1fr;gap:10px 14px;align-items:start;margin:12px 0}
+  .req .ico{font-size:20px;line-height:1.3}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <h1>Kalibracija GoPro kamera za UMI/robotiku — problemi, nalazi i rešenje</h1>
+  <div class="sub">Izveštaj sa istraživanja · 10.06.2026. · GoPro ChArUco kalibrator</div>
+</header>
+
+<p class="lead">Ovaj dokument objašnjava <b>zašto kalibracija GoPro kamere trenutno ne uspeva</b>,
+šta tačno radi svaki deo opreme, i <b>šta nam konkretno treba</b> da bi sve proradilo — kako za
+snimanje podataka, tako i za rad robota. Pisan je tako da ga razume i osoba van struke; detaljni,
+tehnički delovi su izdvojeni u tamne „Za tehničare“ okvire koje slobodno možete preskočiti.</p>
+
+<div class="callout note">
+  <b>Najkraće moguće:</b> trenutno snimamo kameru preko <b>USB „webcam“ režima</b>, a taj režim
+  <b>ne ume da iskoristi Max Lens Mod objektiv</b> kako treba — zato dobijamo izobličenu sliku sa
+  crnim uglovima koju <b>nijedan model ne može da kalibriše</b>. Rešenje (i način na koji to radi
+  UMI) jeste da se kamera poveže preko <b>HDMI-ja u „capture“ karticu</b>, plus da se koristi
+  napredniji matematički model objektiva (<b>Double Sphere</b>). Bez ta dva dela — ne radi.
+</div>
+
+<!-- ========================= POJMOVNIK ========================= -->
+<h2>1. Osnovni pojmovi (za netehnička lica)</h2>
+<div class="card">
+<div class="kv">
+  <div class="k">Kalibracija</div><div>Merenje „karaktera“ objektiva — koliko savija sliku i gde mu je
+    centar — da bismo iz slike mogli tačno da računamo geometriju (rastojanja, uglove, pokrete).</div>
+  <div class="k">Intrinzični parametri</div><div>Brojevi koji opisuju taj karakter kamere (žižna daljina,
+    centar slike, koeficijenti izobličenja). Rezultat kalibracije.</div>
+  <div class="k">Izobličenje (distorzija)</div><div>Savijanje pravih linija. Širokougaoni objektivi
+    savijaju jako (efekat „ribljeg oka“).</div>
+  <div class="k">Vidno polje (FOV)</div><div>Koliko sveta kamera vidi, u stepenima. Veći broj = šira slika.</div>
+  <div class="k">„Riblje oko“ (fisheye)</div><div>Širok objektiv koji savija ivice. Treba mu poseban
+    matematički model.</div>
+  <div class="k">„Pravolinijski“ (pinhole / linear)</div><div>Uzak objektiv kod kojeg prave linije ostaju
+    prave. Najjednostavniji za kalibraciju, ali usko vidno polje.</div>
+  <div class="k">Reprojekcijska greška</div><div>Mera tačnosti kalibracije, u pikselima. Manje = bolje.
+    Ispod ~1px je odlično; <b>30–50px znači da kalibracija ne valja</b>.</div>
+  <div class="k">ChArUco tabla</div><div>Šahovska tabla sa markerima koju snimamo iz raznih uglova da
+    bismo izmerili objektiv.</div>
+  <div class="k">UMI</div><div>„Universal Manipulation Interface“ — poznati robotski projekat koji koristi
+    GoPro kameru za prikupljanje demonstracija. Mi pravimo sličan sistem.</div>
+</div>
+</div>
+
+<!-- ========================= KLJUČNA IDEJA ========================= -->
+<h2>2. Ključna ideja: <i>fizički objektiv</i> vs <i>digitalni režim</i></h2>
+<p>Ovo je tačka koja zbunjuje, a sve ostalo zavisi od nje. Postoje <b>dva sloja</b>:</p>
+<ul>
+  <li><b>Fizički objektiv</b> — pravo staklo ispred senzora. On određuje koliko sveta uđe u kameru.
+    Standardni GoPro objektiv vidi ~120–130°. <b>Max Lens Mod</b> je dodatno staklo koje se naškrabi
+    spreda i fizički proširi pogled na <b>155° (verzija 1.0)</b> ili <b>177° (verzija 2.0)</b>.</li>
+  <li><b>Digitalni režim</b> (Wide / Linear / SuperView…) — softverska obrada onoga što je objektiv
+    već uhvatio: isecanje i „ispravljanje“ slike.</li>
+</ul>
+<p>Zato „Linear“ <b>nije isto što i uzak objektiv</b>, a „Wide“ <b>nije isto što i Max Lens Mod</b>.
+Max Lens Mod fizički hvata više sveta nego što ijedan digitalni režim može da „izmisli“.</p>
+
+<div class="tech">
+  <div class="tag">🔧 Za tehničare</div>
+  Digitalni objektivi su reprojekcije/krop iste senzorske slike. „Linear“ je <i>rektilinearna</i>
+  projekcija (prave ostaju prave) i zato je inherentno uska — na ~155° rektilinearna projekcija
+  rasteže ivice ka beskonačnosti, pa Linear praktično daje ~90–110° bez obzira na objektiv ispred.
+  „SuperView/HyperView“ su <b>nelinearno anamorfno razvlačenje</b> 4:3/8:7 senzora na 16:9 —
+  <b>nije radijalno simetrično</b> i nijedan standardni model (ni pinhole ni fisheye) ga ne opisuje.
+</div>
+
+<!-- ========================= GRAFIKON FOV→MODEL ========================= -->
+<h2>3. Koji matematički model radi za koje vidno polje</h2>
+<p>Što je objektiv širi, to je potreban „pametniji“ model. Ovaj lenjir pokazuje gde koji naš objektiv
+pada i koji model ga može opisati:</p>
+
+<figure>
+<svg viewBox="0 0 880 280" width="100%" role="img" aria-label="Lenjir vidnog polja i modela kamere">
+  <!-- band backgrounds -->
+  <rect x="60" y="120" width="361" height="34" fill="#e8f7ee" stroke="#bfe6cd"/>
+  <rect x="421" y="120" width="209" height="34" fill="#e8f0fc" stroke="#c7d8f5"/>
+  <rect x="630" y="120" width="190" height="34" fill="#f1ebfb" stroke="#dccdf3"/>
+  <!-- band labels -->
+  <text x="240" y="142" text-anchor="middle" font-size="13" fill="#1f9d57" font-weight="700">pinhole · do ~95°</text>
+  <text x="525" y="138" text-anchor="middle" font-size="12.5" fill="#2563c9" font-weight="700">fisheye (cv2.fisheye)</text>
+  <text x="525" y="150" text-anchor="middle" font-size="11" fill="#2563c9">~95–150° · imamo ga</text>
+  <text x="725" y="138" text-anchor="middle" font-size="12.5" fill="#7c4dd1" font-weight="700">Double Sphere / EUCM</text>
+  <text x="725" y="150" text-anchor="middle" font-size="11" fill="#7c4dd1">~150–195° · NEMAMO</text>
+  <!-- axis -->
+  <line x1="60" y1="170" x2="820" y2="170" stroke="#9aa6b8" stroke-width="1"/>
+  <g font-size="11" fill="#5b6678" text-anchor="middle">
+    <text x="60" y="186">0°</text><text x="402" y="186">90°</text>
+    <text x="554" y="186">130°</text><text x="649" y="186">155°</text>
+    <text x="733" y="186">177°</text><text x="820" y="186">200°</text>
+  </g>
+  <!-- markers -->
+  <g stroke-width="2">
+    <line x1="402" y1="92" x2="402" y2="170" stroke="#1f9d57"/>
+    <line x1="554" y1="92" x2="554" y2="170" stroke="#2563c9"/>
+    <line x1="649" y1="60" x2="649" y2="170" stroke="#7c4dd1"/>
+    <line x1="733" y1="60" x2="733" y2="170" stroke="#7c4dd1"/>
+  </g>
+  <g font-size="12.5" font-weight="700">
+    <text x="402" y="86" text-anchor="middle" fill="#1f9d57">Linear ~90°</text>
+    <text x="554" y="86" text-anchor="middle" fill="#2563c9">Wide ~130°</text>
+    <text x="649" y="54" text-anchor="middle" fill="#7c4dd1">MLM 1.0 · 155°</text>
+    <text x="733" y="54" text-anchor="middle" fill="#7c4dd1">MLM 2.0 · 177°</text>
+  </g>
+  <text x="733" y="42" text-anchor="middle" font-size="11" fill="#cf3b3b" font-weight="700">⟵ naš objektiv</text>
+  <!-- SuperView aside -->
+  <rect x="60" y="218" width="760" height="42" rx="8" fill="#fceced" stroke="#f1c9cb"/>
+  <text x="74" y="236" font-size="13" fill="#cf3b3b" font-weight="700">SuperView / HyperView ~170°+</text>
+  <text x="74" y="252" font-size="12" fill="#7a4a4a">nije na lenjiru — to je anamorfno razvlačenje, NIJEDAN model ga ne kalibriše (potvrđeno: ~30px greška)</text>
+</svg>
+<figcaption>Vidno polje (°) i model koji ga može opisati. Naš objektiv (MLM 2.0, 177°) pada u
+ljubičastu zonu — gde <b>cv2.fisheye već otkazuje</b>, a treba Double Sphere.</figcaption>
+</figure>
+
+<div class="legend">
+  <span><i class="sw" style="background:#1f9d57"></i> pinhole (jednostavno)</span>
+  <span><i class="sw" style="background:#2563c9"></i> fisheye / Kannala–Brandt (imamo)</span>
+  <span><i class="sw" style="background:#7c4dd1"></i> Double Sphere (nemamo)</span>
+  <span><i class="sw" style="background:#cf3b3b"></i> nemoguće za kalibraciju</span>
+</div>
+
+<div class="tech">
+  <div class="tag">🔧 Za tehničare</div>
+  Granice (MathWorks, Tangram MetriCal, Double Sphere rad, arXiv 1807.08957): pinhole radtan/rational
+  ≤~90–95° (perspektiva ima tvrd limit na 90° od ose). <code>cv2.fisheye</code> je Kannala–Brandt
+  implementiran kao <i>pinhole-pa-distorzija</i> → <b>tvrd zid blizu 180°</b>, degradira iznad ~150°.
+  Double Sphere/EUCM/omnidir za ~150–195° (zatvorena inverzija, bez singulariteta na z=0). Empirijski
+  na realnim kadrovima korisnika (177°): pinhole 52px, <code>cv2.fisheye</code> ne konvergira,
+  <code>cv2.omnidir</code> diverguje/zadrži 10 od 103 kadra. UMI koristi <b>OpenImuCameraCalibrator</b>
+  (Double Sphere/KB), ne cv2.fisheye.
+</div>
+
+<!-- ========================= ŠTA SE DEŠAVALO ========================= -->
+<h2>4. Šta se tačno dešavalo — korak po korak</h2>
+
+<h3>4.1. „GoPro 13 izgleda kao riblje oko, GoPro 11 ravno, greška ogromna“</h3>
+<p>Alat je do sada koristio samo <b>pinhole</b> model. GoPro 11 preko webcam-a daje usku, skoro ravnu
+sliku → pinhole je opisuje lepo (~1–2px). GoPro 13 (i Max Lens Mod) daju široko riblje oko → pinhole
+to <b>matematički ne može</b> → greška „eksplodira“. <span class="pill bad">uzrok: pogrešan model</span></p>
+
+<h3>4.2. Snimak na ~30px (SuperView, 720p)</h3>
+<p>Jedan stvarni snimak je napravljen u <b>SuperView</b> režimu (jer su to bile <i>podrazumevane</i>
+postavke). SuperView je anamorfno razvlačenje koje <b>nijedan model ne kalibriše</b> — otud ~27–44px.
+<span class="pill bad">uzrok: SuperView + loši podrazumevani podešavanja</span></p>
+
+<h3>4.3. „Rezultat ostaje n/a“ (poslednji snimak)</h3>
+<p>To je bila kamera sa <b>Max Lens Mod 2.0</b>, Wide, 1080p, sa novim fisheye modelom. Snimljeno 108
+kadrova, ali <b>nije upisan nijedan rezultat</b> → ekran pokazuje <code>n/a</code>. Razlog: fisheye
+kalibracija je <b>pukla</b> (177° je iznad njenih mogućnosti) i ništa nije sačuvala.
+<span class="pill bad">uzrok: 177° je previše širok za cv2.fisheye</span></p>
+
+<div class="callout ok">
+  <b>Bitno (proverili smo na vašim kadrovima):</b> tabla i njena podešavanja su <b>ispravni</b>
+  (kolone=10, redovi=7 — provereno testiranjem svih geometrija). Problem <b>nije</b> u maloj tabli i
+  <b>nije</b> u alatu — problem je <b>objektiv od 177° preko webcam-a</b>. Veća tabla (kao vaša sa
+  GoPro 11) ipak pomaže preciznosti i preporučuje se, ali ne rešava 177°.
+</div>
+
+<div class="tech">
+  <div class="tag">🔧 Za tehničare · reprodukovano</div>
+  Run <code>gopro13_umi_gripper_20260610_140106</code>: 108 kadrova, nema summary JSON →
+  <code>fisheye_solve</code> baca „could not converge“. Sweep geometrije table: <code>cols=10,rows=7</code>
+  daje 52px, sve ostale 200–1000px; max ID markera = 34 (=35 markera) → geometrija tačna.
+  Na istim kadrovima: pinhole 52px, cv2.fisheye pukne, cv2.omnidir 48px/diverguje. Za referencu,
+  cv2.fisheye na uskom Wide snimku = <b>1.12px</b> (dokaz da nova fisheye putanja radi u svom opsegu).
+</div>
+
+<!-- ========================= ZAŠTO WEBCAM NE RADI ========================= -->
+<h2>5. Zašto webcam režim ne radi sa Max Lens Mod-om (crni uglovi)</h2>
+<p>Kada je Max Lens Mod nakačen, fizički objektiv ubacuje široku <b>kružnu</b> sliku na senzor. U
+<b>USB webcam režimu</b> kamera <b>ne primenjuje obradu za Max Lens Mod</b> — ona ne „zna“ da je
+objektiv tu i koristi geometriju standardnog Wide objektiva. Zato ta kružna slika ne popuni ceo
+kadar i ostaju <b>crni uglovi (vignette)</b>. <b>To se ne može popraviti u webcam režimu</b> —
+nema podešavanja ni firmvera koji to menja na USB putanji.</p>
+
+<p>Suština: dobijate <b>najgore od oba sveta</b> — izobličenje od 177° (koje je teško kalibrisati),
+ali bez čiste, pravilno obrađene slike.</p>
+
+<figure>
+<div class="pathbox bad">
+  <h3>❌ Putanja A — USB webcam (ono što sada koristimo)</h3>
+  <div class="flow">
+    <div class="step stepbad"><div class="n">1</div>GoPro 13 + MLM 2.0<br><span class="small">objektiv hvata ~177°</span></div>
+    <div class="arrow">→</div>
+    <div class="step stepbad"><div class="n">2</div>USB webcam režim<br><span class="small">NE primenjuje MLM obradu</span></div>
+    <div class="arrow">→</div>
+    <div class="step stepbad"><div class="n">3</div>Kružna slika + crni uglovi<br><span class="small">vignette, ~177°</span></div>
+    <div class="arrow">→</div>
+    <div class="step stepbad"><div class="n">4</div>Kalibracija<br><span class="small">pinhole 52px · fisheye pukne</span></div>
+    <div class="arrow">→</div>
+    <div class="step stepbad"><div class="n">5</div><b>n/a</b> — nema rezultata</div>
+  </div>
+</div>
+<div class="pathbox good">
+  <h3>✅ Putanja B — HDMI + capture kartica (kako radi UMI)</h3>
+  <div class="flow">
+    <div class="step stepgood"><div class="n">1</div>GoPro 13 + MLM 2.0</div>
+    <div class="arrow">→</div>
+    <div class="step stepgood"><div class="n">2</div>Media Mod (HDMI izlaz)<br><span class="small">+ GoPro Labs „clean HDMI“</span></div>
+    <div class="arrow">→</div>
+    <div class="step stepgood"><div class="n">3</div>Capture kartica (UVC)<br><span class="small">vidi se kao <code>/dev/video</code></span></div>
+    <div class="arrow">→</div>
+    <div class="step stepgood"><div class="n">4</div>Čista široka slika<br><span class="small">pravilno obrađen MLM, bez vignette</span></div>
+    <div class="arrow">→</div>
+    <div class="step stepgood"><div class="n">5</div>Double Sphere model<br><span class="small">✅ tačni parametri</span></div>
+  </div>
+  <p class="small" style="margin:8px 2px 0">Ista HDMI putanja radi i <b>uživo na robotu</b> (deployment) — isti
+  ulaz, ista slika, ista kalibracija. Naš alat je čita nepromenjen, jer i jedno i drugo izgleda kao <code>/dev/video</code>.</p>
+</div>
+<figcaption>Poređenje dve putanje. Webcam puca na koraku 2 (nema MLM obrade) i koraku 4 (model ne može 177°).
+HDMI putanja rešava oba.</figcaption>
+</figure>
+
+<div class="tech">
+  <div class="tag">🔧 Za tehničare</div>
+  Open GoPro webcam FOV enum je samo <code>WIDE/NARROW/SUPERVIEW/LINEAR</code>, ≤1080p; <code>fov=</code>
+  je nepouzdan (issue #459, WONTFIX). „Clean HDMI“ preslikava record/preview cevovod koji <i>primenjuje</i>
+  MLM obradu. UMI: Media Mod 1.0 → Elgato HD60 X → UVC, otvoreno sa <code>cv2.VideoCapture(path, cv2.CAP_V4L2)</code>
+  (<code>uvc_camera.py</code>), pa <code>fisheye_converter</code> + resize na 224×224. Jeftin MS2109 grabber se
+  pojavljuje kao in-kernel <code>uvcvideo /dev/video0</code>; Elgato Cam Link 4K traži v4l2loopback zaobilaznicu.
+  Čist HDMI na HERO12/13 traži Media Mod + GoPro Labs (<code>HDMI=1</code>/<code>MHDMI1</code>, trajno sa <code>*</code> prefiksom).
+</div>
+
+<!-- ========================= ŠTA TREBA ========================= -->
+<h2>6. Zašto bez određene opreme NE ide — i šta tačno treba</h2>
+<p>Da bi MLM kamera (gripper, široko vidno polje) radila i za kalibraciju i za robota, svaki od ovih
+delova rešava tačno jedan problem. Ako bilo koji nedostaje — lanac puca:</p>
+
+<div class="req">
+  <div class="ico">🔌</div><div><b>Media Mod</b> — daje GoPro-u <b>HDMI izlaz</b>.
+    <span class="small">Bez njega nema HDMI-ja → zaglavljeni smo na webcam-u → MLM ne radi (crni uglovi).</span></div>
+  <div class="ico">🎛️</div><div><b>HDMI „capture“ kartica</b> (npr. jeftin UVC grabber/MS2109 ili Elgato) — pretvara
+    HDMI u <code>/dev/video</code> koji računar i naš alat čitaju.
+    <span class="small">Bez nje HDMI signal ne može da uđe u računar.</span></div>
+  <div class="ico">💾</div><div><b>GoPro Labs firmver</b> (komanda <code>MHDMI=1</code>) — daje <b>čist HDMI</b>
+    bez menija i preklopa, koji ostaje uključen.
+    <span class="small">Bez njega HDMI ima ikone preko slike i resetuje se → neupotrebljivo za kalibraciju.</span></div>
+  <div class="ico">🧮</div><div><b>Double Sphere / EUCM model</b> u kalibratoru — jedini koji opisuje 155–177°.
+    <span class="small">Bez njega cv2.fisheye puca na 177° (upravo naš <code>n/a</code>).</span></div>
+  <div class="ico">🎯</div><div><b>Veća ChArUco tabla</b> (kao vaša sa GoPro 11) — bolja preciznost i pokrivenost.
+    <span class="small">Pomaže, ali nije presudno.</span></div>
+</div>
+
+<div class="callout note">
+  <b>Da li nam treba GoPro 9?</b> <b>Ne.</b> UMI je istorijski koristio GoPro 9 + Max Lens Mod 1.0 (155°),
+  ali to je samo njihov izbor — <b>vaš GoPro 13 + Max Lens Mod 2.0 je sasvim u redu</b>. Ono što nedostaje
+  <b>nije kamera</b>, već <b>način povezivanja (HDMI + capture kartica)</b> i <b>model za širok ugao
+  (Double Sphere)</b>. (Napomena: Max Lens Mod <b>2.0</b> ide samo na HERO 12/13 — ne na HERO 11.)
+</div>
+
+<!-- ========================= ŠTA SMO PROMENILI ========================= -->
+<h2>7. Šta smo već uradili u alatu (ova sesija)</h2>
+<ul>
+  <li><b>Dodali fisheye (Kannala–Brandt) model</b> — pokriva objektive do ~130–150° (npr. obična Wide
+    kamera za grudi / scenu). Provereno: ~1.12px na uskom Wide snimku.</li>
+  <li><b>Biranje modela</b> u podešavanjima (pinhole / fisheye / oba) i u presetima.</li>
+  <li><b>Bezbednije podrazumevane vrednosti</b> — sada Wide + 1080p + neutralno ime (umesto SuperView +
+    720p + „gopro13_hyperview“ koji je sve pogrešno označavao).</li>
+  <li><b>Novi preseti</b>: <code>gopro13_umi_gripper_fisheye</code>, <code>gopro13_central_chest_fisheye</code>,
+    <code>gopro13_central_linear_pinhole</code> (stari obrisani; GoPro 11 preset zadržan).</li>
+  <li>Svih 20 testova prolazi.</li>
+</ul>
+<div class="callout warn">
+  <b>Još nije urađeno:</b> (1) da alat <b>prikaže grešku</b> umesto tihog <code>n/a</code> kad solver
+  pukne; (2) <b>Double Sphere</b> model za 155–177° (ili uvoz iz OpenImuCameraCalibrator-a, kako radi UMI).
+  Ovo drugo je preduslov za široke gripper kamere.
+</div>
+
+<!-- ========================= ODLUKE ========================= -->
+<h2>8. Odluke i preporuka</h2>
+<p>Dve nezavisne odluke:</p>
+<table>
+  <tr><th>Pitanje</th><th>Opcije</th><th>Preporuka</th></tr>
+  <tr>
+    <td><b>Kako povezujemo kameru?</b></td>
+    <td>USB webcam <span class="pill bad">ne može MLM</span> · HDMI + capture kartica <span class="pill good">radi</span></td>
+    <td>HDMI + capture kartica za sve MLM kamere</td>
+  </tr>
+  <tr>
+    <td><b>Koji model za kalibraciju?</b></td>
+    <td>Linear→pinhole · Wide(~130°)→fisheye <span class="pill good">imamo</span> · 155–177°→Double Sphere <span class="pill bad">nemamo</span></td>
+    <td>Double Sphere za široke gripper kamere</td>
+  </tr>
+</table>
+<p><b>Zaključak:</b> široke „UMI“ gripper kamere traže <b>HDMI + Double Sphere</b> (kao UMI). Kamera za
+grudi/scenu, ako joj ne treba 155°, može i preko <b>webcam Wide + fisheye</b> (već radi). „Sužavanje na
+Linear“ <b>ne čuva široko vidno polje</b> (~90–110°), pa je samo za kamere kojima širina nije bitna.</p>
+
+<div class="callout warn">
+  <b>Tvrd preduslov:</b> bez <b>Media Mod-a + capture kartice</b>, široke MLM kamere se <b>ne mogu</b>
+  ni kalibrisati ni koristiti na robotu — bez obzira na model. To je prva stvar koju treba nabaviti/proveriti.
+</div>
+
+<!-- ========================= IZVORI ========================= -->
+<h2>9. Izvori (primarni)</h2>
+<ul class="small">
+  <li>UMI rad — <a href="https://arxiv.org/html/2402.10329v3">arxiv.org/html/2402.10329v3</a></li>
+  <li>UMI kod (<code>uvc_camera.py</code>, <code>bimanual_umi_env.py</code>) — <a href="https://github.com/real-stanford/universal_manipulation_interface">github.com/real-stanford/universal_manipulation_interface</a></li>
+  <li>UMI intrinzični (KB fisheye) — <a href="https://github.com/real-stanford/universal_manipulation_interface/blob/main/example/calibration/gopro_intrinsics_2_7k.json">gopro_intrinsics_2_7k.json</a></li>
+  <li>OpenImuCameraCalibrator — <a href="https://github.com/urbste/OpenImuCameraCalibrator">github.com/urbste/OpenImuCameraCalibrator</a></li>
+  <li>Double Sphere rad — <a href="https://arxiv.org/abs/1807.08957">arxiv.org/abs/1807.08957</a></li>
+  <li>MathWorks fisheye — <a href="https://www.mathworks.com/help/vision/ug/fisheye-calibration-basics.html">mathworks.com/help/vision/…/fisheye</a></li>
+  <li>Joshi GoPro VI-SLAM (SuperView upozorenje) — <a href="https://joshi-bharat.github.io/projects/gopro/">joshi-bharat.github.io/projects/gopro</a></li>
+  <li>Open GoPro SDK / webcam <code>fov=</code> WONTFIX — <a href="https://github.com/gopro/OpenGoPro/issues/459">OpenGoPro #459</a></li>
+  <li>Max Lens Mod 2.0 (177°, HERO12/13) — <a href="https://gopro.com/en/us/shop/mounts-accessories/max-lens-mod-2/ADWAL-002.html">gopro.com/…/ADWAL-002</a></li>
+  <li>GoPro Labs clean HDMI — <a href="https://gopro.github.io/labs/control/extensions">gopro.github.io/labs/control/extensions</a></li>
+</ul>
+<p class="small" style="margin-top:18px;color:var(--muted)">Puni tehnički izveštaj (engleski):
+<code>docs/calibration-research-report.md</code>.</p>
+
+</div>
+</body>
+</html>

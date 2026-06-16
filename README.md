@@ -14,7 +14,8 @@ Features:
 - auto capture of stable, diverse board poses, plus manual capture
 - x/y/size/skew coverage feedback and a pass or retake verdict after solving
 - camera presets you can load and save so the camera mode stays consistent
-- plumb_bob and rational_polynomial solves with ROS camera_info YAML, JSON
+- plumb_bob, rational_polynomial, fisheye (Kannala-Brandt), and double_sphere
+  (ultra-wide, via the OpenICC backend) solves, with ROS camera_info YAML, JSON
   summaries, and CSV diagnostics
 
 ## Quick start
@@ -30,9 +31,16 @@ uv run gopro-charuco serve
 ```
 
 Then open http://localhost:8765 in a browser. The first `uv run` fetches Python
-3.12 and every dependency automatically, so this is all you need. No `modprobe`
-or `sudo` is required; the only command you might run once is a firewall allow
-rule (see [Firewall](#firewall)) if the incoming UDP video is blocked.
+3.12 and every dependency automatically, so this is all you need for the
+`plumb_bob`, `rational_polynomial`, and `fisheye` solves. No `modprobe` or `sudo`
+is required; the only command you might run once is a firewall allow rule (see
+[Firewall](#firewall)) if the incoming UDP video is blocked.
+
+The one extra step is the `double_sphere` model (only used by the UMI gripper
+preset): it needs the OpenICC Docker image built once, see
+[Double Sphere](#double-sphere-openicc-backend). Without it, only that single
+model fails (a red row in the results); every other model still solves, so a
+quick Wide/fisheye calibration needs nothing beyond `serve`.
 
 To serve other machines, add `--host 0.0.0.0 --port 8765` and open
 `http://<host-ip>:8765`. Run a single server process; the live session is kept
@@ -95,9 +103,22 @@ Presets are small YAML files that lock a consistent camera mode and board so
 calibration data is reproducible across runs and machines. Shipped presets live
 in `gopro_charuco_calibrator/presets/`:
 
-- `gopro13_wide_1080p.yaml` (default): HERO13, Wide lens, 1080p
-- `gopro13_linear_1080p.yaml`: HERO13, Linear lens, 1080p
-- `gopro11_wide_1080p.yaml`: HERO11, Wide lens, 1080p
+- `gopro13_wide_1080p.yaml` (default): HERO13, Wide, 1080p — `fisheye` solve
+- `gopro13_central_chest_fisheye_1080p.yaml`: HERO13 chest-mounted scene camera,
+  Wide, 1080p — `fisheye` solve
+- `gopro13_umi_gripper_fisheye_1080p.yaml`: HERO13 UMI gripper with Max Lens Mod
+  2.0, Wide, 1080p — `fisheye` **plus** `double_sphere` (the DS model needs the
+  OpenICC Docker image; see [Double Sphere](#double-sphere-openicc-backend))
+- `gopro13_central_linear_pinhole_1080p.yaml`: HERO13 Linear, 1080p —
+  `plumb_bob`/`rational_polynomial` for a ROS image_proc pipeline
+- `gopro13_linear_1080p.yaml`: HERO13, Linear, 1080p — pinhole solve
+- `gopro11_wide_1080p.yaml`: HERO11, Wide, 1080p
+
+All shipped presets are USB-webcam mode at **1080p / 30 fps** — the GoPro webcam
+stream tops out at 1080p. 4K/2.7K is only available when *recording on the
+camera*, which is a separate offline-calibration workflow (not this app's live
+webcam capture). All use the 11x8 `DICT_5X5_100` calib.io board (34 mm square /
+25 mm marker), which does not collide with `DICT_4X4` gripper markers.
 
 In the web UI, pick a preset from the dropdown and click `Load`, or store the
 current form with `Save as preset`. Saved presets are written to
@@ -118,17 +139,50 @@ Key files:
 config.json
 frames/capture_###.jpg
 overlays/capture_###.jpg
-<camera_name>_plumb_bob.yaml
-<camera_name>_rational_polynomial.yaml
-<camera_name>_all_frames_plumb_bob.yaml
-<camera_name>_all_frames_rational_polynomial.yaml
+<camera_name>_<model>.yaml              # one per solved model, e.g. _fisheye.yaml
+<camera_name>_all_frames_<model>.yaml
+<camera_name>_double_sphere.json       # only when the double_sphere model runs
 <camera_name>_*_frame_diagnostics.csv
+openicc/calibrate_camera.log          # double_sphere backend log (if it ran)
 caib_marker_board_calibration_summary.json
 ```
 
 Pick the YAML with the better median and worst view error and stable distortion
-coefficients. For wide GoPro modes `rational_polynomial` often wins, but the
-diagnostics decide.
+coefficients. For Linear use `plumb_bob`/`rational_polynomial`; for Wide use
+`fisheye`; for the Max Lens Mod ultra-wide use `double_sphere` (it fits the
+widest lenses best, with `fisheye` as the Docker-free fallback). The diagnostics
+decide.
+
+## Double Sphere (OpenICC backend)
+
+Ultra-wide fisheye lenses (GoPro Max Lens Mod, ~150–195°) exceed what the
+built-in pinhole/Kannala-Brandt models can fit. The `double_sphere` model covers
+them by driving [OpenImuCameraCalibrator](https://github.com/urbste/OpenImuCameraCalibrator)
+(AGPL-3.0) as an external subprocess — nothing is linked or vendored. Build its
+Docker image once:
+
+```bash
+git clone --depth 1 https://github.com/urbste/OpenImuCameraCalibrator /tmp/openicc
+cd /tmp/openicc && docker build -t openicc .
+```
+
+Then select **Fisheye + Double Sphere** (or **Double Sphere only**) as the
+calibration model, or put `double_sphere` in a preset's `solver.models`. The
+solve emits `<camera_name>_double_sphere.json` (UMI/OpenICC-native intrinsics:
+focal length, principal point, xi, alpha) at native resolution, plus
+`openicc/calibrate_camera.log` for diagnostics. 4K inputs are solved at 1080p
+coordinate scale automatically and rescaled.
+
+Environment variables: `OPENICC_DOCKER_IMAGE` (default `openicc`),
+`OPENICC_BINARY` (use a native `calibrate_camera` build instead of Docker),
+`OPENICC_GRID_SIZE` (default 0.1), `OPENICC_TIMEOUT_S` (default 360). If the
+backend is unavailable the model shows up as a failed row and the other models
+still solve.
+
+The solver also auto-detects the caib.io marker-column parity per run
+(`board.layout` in the summary): caib boards mirror which checkerboard cells
+carry markers depending on the grid dimensions, and assuming the wrong parity
+silently shifts every odd-row marker by a full square.
 
 ## CLI solver
 

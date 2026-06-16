@@ -139,11 +139,15 @@
         <label>Calibration model
           <select name="solver.models">
             <option value="pinhole">Pinhole — plumb_bob + rational (Linear lens)</option>
-            <option value="fisheye">Fisheye — Kannala-Brandt (Wide lens / UMI)</option>
-            <option value="both">Both — pinhole + fisheye (compare)</option>
+            <option value="fisheye">Fisheye — Kannala-Brandt (Wide lens, ~130°)</option>
+            <option value="fisheye_ds">Fisheye + Double Sphere (ultra-wide / Max Lens Mod / UMI)</option>
+            <option value="double_sphere">Double Sphere only (OpenICC backend)</option>
+            <option value="both">Pinhole + fisheye (compare)</option>
           </select>
         </label>
-        <p class="note">Wide/SuperView GoPro lenses are true fisheye — use Fisheye. Pinhole only fits Linear.</p>
+        <p class="note">Wide GoPro lenses are true fisheye — use Fisheye. Pinhole only fits Linear.
+          Double Sphere handles ultra-wide (Max Lens Mod) but needs the <code>openicc</code> Docker image
+          (or <code>OPENICC_BINARY</code>); if missing, it shows as a failed model and other models still solve.</p>
         <label class="switch"><input name="capture.auto_capture" type="checkbox">
           <span class="track" aria-hidden="true"></span><span>Auto capture</span></label>
       </form>

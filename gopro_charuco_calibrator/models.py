@@ -112,7 +112,7 @@ class CaptureConfig(BaseModel):
     auto_capture: bool = True
 
 
-CalibModelName = Literal["plumb_bob", "rational_polynomial", "fisheye"]
+CalibModelName = Literal["plumb_bob", "rational_polynomial", "fisheye", "double_sphere"]
 
 
 class SolverConfig(BaseModel):
@@ -127,9 +127,12 @@ class SolverConfig(BaseModel):
     selection_passes: int = Field(default=2, ge=1, le=10)
     # Which camera models to solve and emit. plumb_bob/rational_polynomial are
     # pinhole (good only for Linear/narrow lenses); fisheye is Kannala-Brandt for
-    # wide GoPro lenses (Wide ~130 deg, UMI-style). Default emits all three so a
-    # run started without a preset auto-recommends the right model for whatever
-    # lens was used (fisheye wins on Wide, pinhole on Linear); presets narrow it.
+    # wide GoPro lenses (Wide ~130 deg). double_sphere covers ultra-wide fisheye
+    # (Max Lens Mod, ~150-195 deg, UMI-native) and is solved by the external
+    # OpenICC backend (the `openicc` Docker image or OPENICC_BINARY) — opt-in via
+    # preset/UI, not in the defaults so an un-preset'd run has no external deps.
+    # Default emits the three built-ins so a run started without a preset
+    # auto-recommends the right model for whatever lens was used.
     models: list[CalibModelName] = Field(
         default_factory=lambda: ["plumb_bob", "rational_polynomial", "fisheye"]
     )
