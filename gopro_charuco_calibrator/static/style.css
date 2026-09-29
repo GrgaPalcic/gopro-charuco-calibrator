@@ -309,6 +309,37 @@ h1 {
   width: 100%;
 }
 
+/* At phone width the number and title share the first row, and the text and
+   buttons below use the step's full width (the setup names are long). */
+@media (max-width: 560px) {
+  .step {
+    flex-wrap: wrap;
+    align-items: center;
+    row-gap: 6px;
+  }
+
+  .step-body {
+    display: contents;
+  }
+
+  .step-title {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .step-desc,
+  .step-actions,
+  .step-msg {
+    flex: 1 1 100%;
+  }
+}
+
+/* Until a camera setup is chosen, the dropdown is the next action: amber outline. */
+.step-actions select.select-primary {
+  border-color: var(--signal);
+  box-shadow: 0 0 0 1px var(--signal);
+}
+
 .step-msg:empty {
   display: none;
 }
@@ -372,6 +403,10 @@ h1 {
   cursor: pointer;
   white-space: nowrap;
   transition: background 0.12s, border-color 0.12s;
+}
+
+.btn[hidden] {
+  display: none;
 }
 
 .btn:hover:not(:disabled) {
@@ -620,8 +655,17 @@ h1 {
   display: none;
 }
 
+.swatch-next-dot {
+  background: var(--signal);
+}
+
+/* The reach line: dashed and light, on the preview and on the coverage map. */
 .swatch-target {
-  border: 1px dashed var(--signal);
+  border: 1px dashed rgba(232, 230, 225, 0.8);
+}
+
+.legend li[hidden] {
+  display: none;
 }
 
 .bar {

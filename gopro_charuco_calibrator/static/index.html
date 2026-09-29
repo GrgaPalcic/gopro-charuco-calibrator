@@ -65,7 +65,7 @@
           <p class="step-desc" id="solveDesc">Computes the lens calibration from the saved views.</p>
           <div class="step-actions">
             <button type="button" id="solveBtn" class="btn" disabled>Solve</button>
-            <button type="button" id="nextCameraBtn" class="btn">Next camera</button>
+            <button type="button" id="nextCameraBtn" class="btn" hidden>Next camera</button>
           </div>
         </div>
         </li>
@@ -92,10 +92,12 @@
           </div>
         </div>
         <ul class="legend guide-legend" id="guideLegend" hidden aria-label="What the marks on the preview mean">
-          <li><span class="swatch swatch-next" aria-hidden="true"></span>Orange box: hold the board here next</li>
+          <li data-legend-next><span class="swatch swatch-next" aria-hidden="true"></span>Orange box: hold the board here next</li>
+          <li data-legend-next><span class="swatch swatch-dot swatch-next-dot" aria-hidden="true"></span>Orange dot: put the board centre here</li>
           <li><span class="swatch swatch-dot swatch-done" aria-hidden="true"></span>Green: done</li>
           <li><span class="swatch swatch-dot swatch-todo" aria-hidden="true"></span>Blue: still to do</li>
           <li><span class="swatch swatch-dot swatch-now" aria-hidden="true"></span>Red dot: where the board is now</li>
+          <li><span class="swatch swatch-target" aria-hidden="true"></span>Dashed line: the board centre must reach it or beyond</li>
         </ul>
         <p class="guide-prompt" id="guidePrompt">Open preview to start.</p>
 

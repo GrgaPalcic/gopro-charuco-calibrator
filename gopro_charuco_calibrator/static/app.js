@@ -190,22 +190,40 @@ function modelName(model) {
 // Solved by the OpenICC backend: one aggregate error, no per-view errors.
 const OPENICC_MODELS = new Set(["double_sphere", "kannala_brandt"]);
 
+// What a form field shows for a config value, and the config value it reads
+// back. setFormValue, readForm and the camera-setup match all go through these
+// two, so a setup matches exactly when the form would show it.
+function formString(input, value) {
+  if (input.name === "solver.models") return modelsToKey(value);
+  if (input.type === "checkbox") return Boolean(value);
+  if (input.dataset.mm === "true") return Number(value * 1000).toFixed(1);
+  if (input.dataset.optional === "true" && value === null) return "";
+  const text = String(value ?? "");
+  // A select cannot show a value it has no option for; it shows nothing instead.
+  if (input.tagName === "SELECT" && ![...input.options].some((o) => o.value === text)) return "";
+  return text;
+}
+
+function parseFormValue(input, raw) {
+  if (input.name === "solver.models") return MODEL_SETS[raw] || MODEL_SETS.pinhole;
+  if (input.dataset.mm === "true") return Number(raw) / 1000;
+  if (input.dataset.optional === "true" && raw === "") return null;
+  if (input.type === "number" || input.dataset.goproOptions) return raw === "" ? null : Number(raw);
+  return raw;
+}
+
 function setFormValue(name, value) {
   const input = form.elements[name];
   if (!input) return;
-  if (name === "solver.models") {
-    input.value = modelsToKey(value);
-    return;
-  }
-  if (input.type === "checkbox") {
-    input.checked = Boolean(value);
-  } else if (input.dataset.mm === "true") {
-    input.value = Number(value * 1000).toFixed(1);
-  } else if (input.dataset.optional === "true" && value === null) {
-    input.value = "";
-  } else {
-    input.value = value ?? "";
-  }
+  const shown = formString(input, value);
+  if (input.type === "checkbox") input.checked = shown;
+  else input.value = shown;
+}
+
+// A narrow dropdown cuts its label short; the tooltip carries the whole choice.
+function showFullChoice(select) {
+  const text = select.selectedOptions[0]?.text || "";
+  if (select.title !== text) select.title = text;
 }
 
 function populateForm(config, dicts, goproOptions) {
@@ -221,24 +239,14 @@ function populateForm(config, dicts, goproOptions) {
   }
   syncGoproVisibility();
   updateBoardSummary();
+  showFullChoice(form.elements["solver.models"]);
 }
 
 function readForm() {
   const config = structuredClone(baseConfig || defaults.config);
   for (const input of form.elements) {
     if (!input.name) continue;
-    if (input.name === "solver.models") {
-      setDeep(config, input.name, MODEL_SETS[input.value] || MODEL_SETS.pinhole);
-      continue;
-    }
-    let value = input.type === "checkbox" ? input.checked : input.value;
-    if (input.dataset.optional === "true" && value === "") {
-      value = null;
-    } else if (input.type === "number" || input.dataset.goproOptions) {
-      value = value === "" ? null : Number(value);
-    }
-    if (input.dataset.mm === "true") value = Number(input.value) / 1000;
-    setDeep(config, input.name, value);
+    setDeep(config, input.name, parseFormValue(input, input.type === "checkbox" ? input.checked : input.value));
   }
   return config;
 }
@@ -433,36 +441,81 @@ function renderReadout(gopro, live) {
 
 // ---- Steps ----
 
-function stepStates({state, live, captures, minFrames, hasResults, presetChosen}) {
-  const captured = ["complete", "solving", "solved"].includes(state);
-  // Stopped with enough views: Solve is the next step, not reconnecting.
-  const solvable = !live && !captured && !hasResults && state !== "error" && captures >= minFrames;
-  const started = live || captures > 0 || hasResults;
+// What the page knows about the run, gathered once per status so the step bar,
+// the amber button, the prompt and the Solve line all say the same thing.
+// `solved`: at least one model solved; `pass`: the verdict on the card is PASS.
+function runFacts(status, minFrames) {
+  const state = status.state || "idle";
+  const captures = status.captures || 0;
+  const live = isLive(status);
+  const results = status.results || [];
+  const verdict = judge(results, status.coverage);
+  const atCap = status.max_samples != null && captures >= status.max_samples;
+  const done = state === "complete" || state === "solved";
+  return {
+    state, live, captures, minFrames, atCap,
+    enough: captures >= minFrames,
+    hasResults: results.length > 0,
+    solved: verdict.rec !== null,
+    pass: verdict.pass,
+    // Resume carries on the same run: from paused, or after the route or a solve.
+    canResume: live && (state === "paused" || done) && !atCap,
+    connecting: live && (state === "idle" || /^waiting for/.test(status.message || "")),
+    presetChosen: Boolean(presetChoice),
+  };
+}
+
+function stepStates(f) {
+  const {state, live, captures, enough, solved, pass} = f;
+  const started = live || captures > 0 || f.hasResults;
   // Custom settings are allowed, but a newcomer is pointed at step 1 first.
-  const setup = presetChosen || started ? "done" : "current";
-  let connect = live ? "done" : solvable ? "pending" : "current";
-  if (setup === "current") connect = "pending";
+  const setup = f.presetChosen || started ? "done" : "current";
+  let connect = setup === "current" ? "pending" : "current";
   let capture = "pending";
-  if (captured) capture = "done";
-  else if (live) capture = "current";
   let solve = "pending";
-  if (state === "solved" || (hasResults && !live)) solve = "done";
-  else if (state === "solving" || state === "complete" || solvable) solve = "current";
+  if (live) {
+    connect = "done";
+    capture = "current";
+    if (state === "solving" || state === "complete" || (state === "paused" && enough)) {
+      capture = "done";
+      solve = "current";
+    } else if (state === "solved") {
+      // A retake goes back to capturing; a failed solve is solved again.
+      capture = solved && !pass ? "current" : "done";
+      solve = !solved ? "current" : "done";
+    }
+  } else if (state !== "error") {
+    if (state === "solving" || (enough && !solved)) {
+      // Stopped with enough views: Solve is the next step, not reconnecting.
+      connect = "pending";
+      capture = "done";
+      solve = "current";
+    } else if (solved) {
+      // Open preview again for the next camera (or for a retake).
+      capture = "done";
+      solve = "done";
+    }
+  }
   return {setup, connect, capture, solve};
 }
 
 // The one obvious next action (the amber button), or null while the operator
-// is busy moving the board or waiting for a solve.
-function primaryButton({state, live, captures, minFrames, hasResults}) {
-  if (state === "capturing" || state === "solving") return null;
-  if (!live) {
-    const solvable = state !== "error" && !hasResults && captures >= minFrames;
-    return solvable ? solveBtn : previewBtn;
-  }
+// is busy moving the board, waiting for the camera or a solve, or has still to
+// pick the camera setup (then the step 1 dropdown carries the highlight).
+function primaryButton(f, setupCurrent) {
+  const {state, live, enough, solved, pass, canResume} = f;
+  if (setupCurrent) return null;
+  if (state === "capturing" || state === "solving" || f.connecting) return null;
+  if (!live) return state !== "error" && enough && !solved ? solveBtn : previewBtn;
   if (state === "preview") return startRunBtn;
-  if (state === "paused") return captures >= minFrames ? solveBtn : pauseResumeBtn;
+  if (state === "paused") return enough ? solveBtn : pauseResumeBtn;
   if (state === "complete") return solveBtn;
-  if (state === "solved") return nextCameraBtn;
+  if (state === "solved") {
+    if (!solved) return solveBtn; // fix the reason on the card, then solve again
+    if (pass) return nextCameraBtn;
+    // Retake: add views to this run, or, at the frame cap, start a fresh one.
+    return canResume ? pauseResumeBtn : startRunBtn;
+  }
   return null;
 }
 
@@ -549,9 +602,9 @@ function drawCoverageMap(points, imageSize, target = targetBox(null)) {
   ctx.strokeStyle = COLOR.frame;
   ctx.strokeRect(ox + 0.5, oy + 0.5, w - 1, h - 1);
 
-  // The spread the coverage targets ask for.
+  // The spread the coverage targets ask for (dashed, as on the live preview).
   ctx.setLineDash([6, 5]);
-  ctx.strokeStyle = COLOR.signalSoft;
+  ctx.strokeStyle = COLOR.muted;
   ctx.lineWidth = 1.5;
   ctx.strokeRect(px(target.x), py(target.y), target.w * w, target.h * h);
   ctx.setLineDash([]);
@@ -576,7 +629,14 @@ function drawGuideOverlay(status) {
   const checkpoints = status.guide?.checkpoints || [];
   // Only over a live picture: on the empty preview it would cover the how-to.
   const draw = isLive(status) && checkpoints.length > 0;
+  // Once the capture is finished (route done, frame cap, a solve) there is no
+  // "next" pose: the orange box, the orange dot and their legend lines go.
+  const state = status.state || "idle";
+  const current = status.guide?.current;
+  const showNext = Boolean(current) && !status.guide?.complete
+    && !["complete", "solving", "solved"].includes(state);
   guideLegend.hidden = !draw || Boolean(status.guide?.complete);
+  for (const line of guideLegend.querySelectorAll("[data-legend-next]")) line.hidden = !showNext;
   if (!draw) return;
 
   const naturalW = preview.naturalWidth || status.image_size?.[0] || cssW;
@@ -596,18 +656,19 @@ function drawGuideOverlay(status) {
     ctx.fill();
   }
 
+  // The reach line in white, not orange: orange means "the board goes here next".
   ctx.save();
-  ctx.strokeStyle = COLOR.signal;
-  ctx.globalAlpha = 0.9;
-  ctx.lineWidth = 3;
+  ctx.strokeStyle = COLOR.ink;
+  ctx.globalAlpha = 0.75;
+  ctx.lineWidth = 2;
   const target = targetBox(status.coverage);
   const midX = target.x + target.w / 2;
   const midY = target.y + target.h / 2;
   ctx.setLineDash([14, 10]);
   ctx.strokeRect(px(target.x), py(target.y), imageW * target.w, imageH * target.h);
   ctx.setLineDash([]);
-  ctx.globalAlpha = 0.35;
-  ctx.lineWidth = 2;
+  ctx.globalAlpha = 0.25;
+  ctx.lineWidth = 1.5;
   ctx.beginPath();
   ctx.moveTo(px(target.x), py(midY));
   ctx.lineTo(px(target.x + target.w), py(midY));
@@ -617,13 +678,12 @@ function drawGuideOverlay(status) {
   ctx.restore();
 
   for (const point of checkpoints) {
-    const radius = point.current ? 12 : 7;
-    const color = point.complete ? COLOR.pass : point.current ? COLOR.signal : COLOR.target;
-    dot(point, color, radius);
+    const next = point.current && showNext;
+    const color = point.complete ? COLOR.pass : next ? COLOR.signal : COLOR.target;
+    dot(point, color, next ? 12 : 7);
   }
 
-  const current = status.guide?.current;
-  if (current && !status.guide?.complete) {
+  if (showNext) {
     const boxW = Math.max(80, current.size * imageW);
     const boxH = Math.max(50, current.size * imageH);
     ctx.strokeStyle = current.live_match ? COLOR.pass : COLOR.signal;
@@ -636,18 +696,32 @@ function drawGuideOverlay(status) {
 
 const IDLE_PROMPT = "Open preview to start.";
 
-function guideText(status, live, minFrames) {
+// What the result card asks for next, in the same words as the amber button.
+function resultPrompt(f) {
+  if (!f.solved) {
+    return f.enough
+      ? "The solve failed. Fix the first reason in the result below, then Solve again."
+      : "The solve failed. Open preview and start a new run.";
+  }
+  if (!f.live) return "Solved. Check the result below. Open preview to calibrate again.";
+  if (f.pass) {
+    return "Solved. Check the result below, then click Next camera. "
+      + "To improve it first, Resume and add views where the coverage map has gaps.";
+  }
+  return f.canResume
+    ? "Retake: click Resume and add the views listed in the result below, then Solve again."
+    : "Retake: this run is at its frame cap. Start a new run and add the views listed below.";
+}
+
+function guideText(status, f) {
   const guide = status.guide || {};
-  const state = status.state || "idle";
+  const {state, live, minFrames} = f;
   const done = guide.complete_count || 0;
   const total = guide.total_count || 0;
   if (state === "solving") return "Solving…";
-  if (state === "solved") {
-    return live
-      ? "Solved. Check the result below; Resume to add views where the coverage map has gaps, then Solve again."
-      : "Solved. Check the result below. Open preview to calibrate again.";
-  }
   if (state === "error") return "Fix the problem on the status line, then Open preview again.";
+  // A finished solve, live or after Stop: the card below is what matters now.
+  if (state === "solved" || (!live && f.hasResults)) return resultPrompt(f);
   if (!live) {
     const captures = status.captures || 0;
     if (!captures || !status.run_id) return IDLE_PROMPT;
@@ -655,6 +729,7 @@ function guideText(status, live, minFrames) {
       ? `Preview stopped. Solve this run's ${captures} views, or Open preview to start again.`
       : `Preview stopped with ${captures} views; solving needs ${minFrames}. Open preview and start a new run.`;
   }
+  if (f.connecting) return "Connecting to the camera. This can take up to 25 seconds.";
   if (state === "preview") return "Hold the board in front of the camera, then click Start new run.";
   if (state === "complete") {
     if (guide.complete) {
@@ -665,6 +740,11 @@ function guideText(status, live, minFrames) {
       + "Solve with these views, or raise Frame cap under Capture and solver and start a new run.";
   }
   const paused = state === "paused";
+  // Enough views to solve: Solve is the amber button, so say so first.
+  if (paused && f.enough) {
+    const where = guide.complete || !guide.current ? "" : ` (guide at ${done}/${total})`;
+    return `Paused with ${f.captures} views${where}. Solve now, or Resume to keep capturing.`;
+  }
   if (guide.complete) {
     // Resumed after the route was done: free capture of extra views.
     return paused
@@ -685,10 +765,15 @@ function guideText(status, live, minFrames) {
 
 // ---- Results ----
 
+// A model counts as solved only when it reported an error figure; ok:false
+// rows and rows without numbers are failures.
+function solvedOk(result) {
+  return Boolean(result) && result.ok !== false
+    && (result.median_view_error_px != null || result.rms != null);
+}
+
 function pickRecommended(results) {
-  const solved = results.filter(
-    (result) => result && result.ok !== false && (result.median_view_error_px != null || result.rms != null),
-  );
+  const solved = results.filter(solvedOk);
   if (!solved.length) return null;
   // The solver marks the recommendation (double_sphere when it solved: the cv2
   // medians are biased by dropping edge views). Older summaries lack the flag:
@@ -812,20 +897,45 @@ function fileRows(result) {
   return rows;
 }
 
+// The verdict on a set of results: the recommended model, what is wrong with
+// it, and whether that adds up to PASS. The step bar and the amber button read
+// it too, so the card and the controls never disagree.
+function judge(results, coverage) {
+  const rec = results.length ? pickRecommended(results) : null;
+  if (!rec) return {rec: null, reasons: [], pass: false, alpha: null};
+  const reasons = coverageReasons(coverage);
+  if (rec.worst_view_error_px != null && rec.worst_view_error_px > 2.5) {
+    reasons.push(`The worst view is off by ${num(rec.worst_view_error_px)} px.`);
+  }
+  const alpha = rec.model === "double_sphere" ? rec.distortion?.[1] : null;
+  if (alpha != null && alpha >= 0.98) {
+    reasons.push(`alpha ${num(alpha, 3)} is at its limit: the board missed the edge of the lens circle. Add edge views.`);
+  }
+  reasons.push(...resultWarnings(rec));
+  return {rec, reasons, pass: reasons.length === 0, alpha};
+}
+
+let resultsSignature = "";
+
 function renderResults(modelResults, coverage, mode, live) {
   if (!modelResults || !modelResults.length) {
     resultsPanel.hidden = true;
+    resultsSignature = "";
     return;
   }
   resultsPanel.hidden = false;
+  // Rebuild only on a change: the status polls every 150 ms, and a rebuilt card
+  // would drop a text selection (copying a file path) on every poll.
+  const signature = JSON.stringify([modelResults, coverage, mode, live]);
+  if (signature === resultsSignature) return;
+  resultsSignature = signature;
   resultGrid.replaceChildren();
   filesGrid.replaceChildren();
   recFigures.replaceChildren();
   verdictReasons.replaceChildren();
   resultsRaw.textContent = JSON.stringify(modelResults, null, 2);
-  const solvedOk = (r) => r && r.ok !== false && (r.median_view_error_px != null || r.rms != null);
   const failed = modelResults.filter((r) => !solvedOk(r));
-  const rec = pickRecommended(modelResults);
+  const {rec, reasons, pass, alpha} = judge(modelResults, coverage);
   const failedRows = () => {
     for (const result of failed) {
       gridRow(resultGrid, `${modelName(result.model)} failed`, result.error || result.error_type || "solver failed", {cls: "failed"});
@@ -850,16 +960,6 @@ function renderResults(modelResults, coverage, mode, live) {
   const used = selected.frame_count ?? allFrames.frame_count;
   const total = allFrames.frame_count ?? used;
 
-  const reasons = coverageReasons(coverage);
-  if (rec.worst_view_error_px != null && rec.worst_view_error_px > 2.5) {
-    reasons.push(`The worst view is off by ${num(rec.worst_view_error_px)} px.`);
-  }
-  const alpha = isDS ? rec.distortion?.[1] : null;
-  if (alpha != null && alpha >= 0.98) {
-    reasons.push(`alpha ${num(alpha, 3)} is at its limit: the board missed the edge of the lens circle. Add edge views.`);
-  }
-  reasons.push(...resultWarnings(rec));
-  const pass = reasons.length === 0;
   verdictBox.className = `verdict ${pass ? "pass" : "retake"}`;
   verdictBadge.textContent = pass ? "PASS" : "RETAKE";
   const next = live
@@ -872,8 +972,17 @@ function renderResults(modelResults, coverage, mode, live) {
   const checked = isDS
     ? " and alpha is clear of its limit"
     : isOpenICC ? "" : " and no kept view is off by more than 2.5 px";
+  // A PASS covers the recommended model only; point at a warning on another row.
+  const solved = modelResults.filter(solvedOk);
+  const warned = solved.filter((r) => r !== rec && resultWarnings(r).length);
+  let seeAlso = "";
+  if (warned.some((r) => r.model === "kannala_brandt")) {
+    seeAlso = " See the note on the For UMI row before using the UMI file.";
+  } else if (warned.length) {
+    seeAlso = " See the notes on the other models below before using their files.";
+  }
   verdictDetail.textContent = pass
-    ? `Recommended model: ${modelName(rec.model)}. Coverage targets met${checked}.`
+    ? `Recommended model: ${modelName(rec.model)}. Coverage targets met${checked}.${seeAlso}`
     : `The recommended model, ${modelName(rec.model)}, solved and wrote its files, but:`;
   for (const reason of reasons) {
     const li = document.createElement("li");
@@ -901,7 +1010,6 @@ function renderResults(modelResults, coverage, mode, live) {
 
   const modeStr = modeSummary(mode);
   if (modeStr) gridRow(resultGrid, "Captured in", `${modeStr}. Record your data in exactly this mode.`);
-  const solved = modelResults.filter(solvedOk);
   for (const result of solved) {
     // The recommended row's warnings are already in the verdict above.
     const notes = result === rec ? [] : warningNotes(result);
@@ -937,18 +1045,33 @@ function renderDiagnostics(status, fwCmd) {
   results.hidden = !text;
 }
 
+// A message with no closing punctuation gets a full stop before the next sentence.
+function sentence(text) {
+  const trimmed = String(text).trim();
+  return /[.!?…]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
 function updateStatus(status) {
   lastStatus = status;
   const state = status.state || "idle";
   const captures = status.captures || 0;
   const message = status.message || "";
-  if (state === "error") {
-    setStatusLine(`Problem: ${message || "the camera could not be opened."}`);
-  } else {
-    setStatusLine(stateSentence(state, captures), QUIET_MESSAGES.has(message) ? "" : message);
-  }
   const target = status.target_samples || 0;
   const minFrames = Math.max(3, Number(form.elements["solver.min_frames"].value || 25));
+  const facts = runFacts(status, minFrames);
+  const {live, solved, atCap} = facts;
+  if (state === "error") {
+    setStatusLine(`Problem: ${message || "the camera could not be opened."}`);
+  } else if (facts.connecting) {
+    // The first seconds after Open preview: the webcam is starting (up to 25 s).
+    setStatusLine("Connecting to the camera…", QUIET_MESSAGES.has(message) ? "" : message);
+  } else {
+    let main = stateSentence(state, captures);
+    // "Calibration done." only when the card below agrees.
+    if (state === "solved" && !solved) main = "The solve failed: no model solved.";
+    else if (state === "solved" && !facts.pass) main = "Calibration done, but it needs a retake.";
+    setStatusLine(main, QUIET_MESSAGES.has(message) ? "" : message);
+  }
   document.getElementById("captureCount").textContent = captures;
   document.getElementById("captureAim").textContent = `· aim ${target}`;
   document.getElementById("markerCount").textContent = status.markers || 0;
@@ -958,23 +1081,22 @@ function updateStatus(status) {
   const capturing = state === "capturing";
   const paused = state === "paused";
   const solving = state === "solving";
-  const live = isLive(status);
-  guidePrompt.textContent = guideText(status, live, minFrames);
+  guidePrompt.textContent = guideText(status, facts);
   // Before anything has started, the how-to on the empty preview says it all.
   guidePrompt.hidden = guidePrompt.textContent === IDLE_PROMPT;
   updateBars(status.coverage || {});
   drawCoverageMap(status.coverage?.points || [], status.image_size, targetBox(status.coverage));
   drawGuideOverlay(status);
   renderReadout(status.gopro, live);
-  const hasResults = Boolean(status.results && status.results.length);
-  const facts = {state, live, captures, minFrames, hasResults, presetChosen: Boolean(presetChoice)};
-  renderSteps(stepStates(facts));
+  const stepValues = stepStates(facts);
+  renderSteps(stepValues);
+  // Until a camera setup is chosen, the step 1 dropdown is the next thing to do.
+  const setupCurrent = stepValues.setup === "current";
+  presetSelect.classList.toggle("select-primary", setupCurrent);
 
   currentState = state;
   currentLive = live;
   const done = state === "complete" || state === "solved";
-  // At the frame cap, Resume would stop again on the next frame.
-  const atCap = status.max_samples != null && captures >= status.max_samples;
   const waitSolve = "Wait for the solve to finish";
   // Open only when nothing is live; stop only when something is.
   setButton(previewBtn, !live, "Start the GoPro webcam and show its picture", "The preview is already open");
@@ -984,7 +1106,9 @@ function updateStatus(status) {
     startRunBtn, !(capturing || solving), "Start saving views into a new run folder",
     solving ? waitSolve : "A run is capturing. Pause it first to start over",
   );
-  // Switch only from a live session.
+  // Shown once a model has solved (the plan's "after a solve"); switch only
+  // from a live session.
+  nextCameraBtn.hidden = !solved;
   setButton(
     nextCameraBtn, live && !solving,
     "End this run and stop the webcam, so you can plug in the next camera",
@@ -1003,23 +1127,31 @@ function updateStatus(status) {
     resumeLabel ? "Carry on saving views into this run" : "Stop saving views for now; the preview keeps running",
     pauseWhy,
   );
-  setButton(
-    captureBtn, capturing, "Save the current view immediately (views also save automatically)",
-    paused ? "Resume first" : "Start a new run first",
-  );
+  let captureWhy = "Start a new run first";
+  if (!live) captureWhy = "Open the preview first";
+  else if ((paused || done) && atCap) captureWhy = "The run has reached its frame cap. Start a new run to capture more";
+  else if (paused || done) captureWhy = "Resume first";
+  else if (solving) captureWhy = waitSolve;
+  setButton(captureBtn, capturing, "Save the current view immediately (views also save automatically)", captureWhy);
   setButton(
     solveBtn, captures >= minFrames && !solving, "Compute the lens calibration from the saved views",
     solving ? "Solving now…" : `Needs at least ${minFrames} views (${captures} saved so far)`,
   );
-  const primary = primaryButton(facts);
+  const primary = primaryButton(facts, setupCurrent);
   for (const button of [previewBtn, stopBtn, startRunBtn, captureBtn, pauseResumeBtn, solveBtn, nextCameraBtn]) {
     button.classList.toggle("btn-primary", button === primary && !button.disabled);
   }
-  solveDesc.textContent = !hasResults
-    ? "Computes the lens calibration from the saved views."
-    : live
+  let solveLine = "Computes the lens calibration from the saved views.";
+  if (facts.hasResults && !solved) {
+    solveLine = "The last solve failed. Fix the first reason in the result below, then Solve again.";
+  } else if (solved && !facts.pass) {
+    solveLine = "Solved, but the result below asks for a retake.";
+  } else if (solved) {
+    solveLine = live
       ? "Done. Next camera ends this run so you can plug in the next GoPro."
       : "Done. For another camera, plug it in and click Open preview.";
+  }
+  solveDesc.textContent = solveLine;
 
   // When the route first completes, run a checkpoint solve automatically so the
   // operator gets an early quality readout (and can then Resume to fix weak areas).
@@ -1032,7 +1164,7 @@ function updateStatus(status) {
   previewEmpty.hidden = live;
   if (state === "error") {
     previewEmpty.replaceChildren(Object.assign(document.createElement("p"), {
-      textContent: `${status.message || "The camera could not be opened."} Fix it, then Open preview again.`,
+      textContent: `${sentence(status.message || "The camera could not be opened")} Fix it, then Open preview again.`,
     }));
   } else if (previewEmpty.innerHTML !== previewEmptyHTML) {
     previewEmpty.innerHTML = previewEmptyHTML;
@@ -1088,11 +1220,33 @@ async function loadPresetList() {
   }
 }
 
-// The camera setup whose config is exactly this one, or "" for custom settings.
+// JSON with sorted keys, so two configs compare equal whatever their key order.
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableJson(value[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+// A config as the form would read it back, minus the camera name: renaming the
+// camera for the next GoPro keeps the same camera setup.
+function setupKey(config) {
+  const copy = structuredClone(config);
+  for (const input of form.elements) {
+    if (!input.name) continue;
+    setDeep(copy, input.name, parseFormValue(input, formString(input, getDeep(config, input.name))));
+  }
+  if (copy.camera) delete copy.camera.camera_name;
+  return stableJson(copy);
+}
+
+// The camera setup the form holds, or "" for custom settings.
 function matchingPreset(config) {
-  const want = JSON.stringify(config);
+  const want = setupKey(config);
   for (const [name, cfg] of Object.entries(presetConfigs)) {
-    if (cfg && JSON.stringify(cfg) === want) return name;
+    if (cfg && setupKey(cfg) === want) return name;
   }
   return "";
 }
@@ -1101,6 +1255,7 @@ function showPresetChoice(name) {
   presetChoice = name;
   presetSelect.value = name;
   presetCustom.hidden = Boolean(name); // offered only while it is the truth
+  showFullChoice(presetSelect);
   if (lastStatus) updateStatus(lastStatus); // step 1 follows the choice
 }
 
@@ -1231,7 +1386,8 @@ solveBtn.addEventListener("click", runSolve);
 
 nextCameraBtn.addEventListener("click", act("Next camera", async () => {
   const captures = lastStatus?.captures || 0;
-  const unsolved = captures > 0 && !(lastStatus?.results || []).length;
+  // Failed solves leave results behind, but nothing usable: still ask.
+  const unsolved = captures > 0 && !(lastStatus?.results || []).some(solvedOk);
   if (unsolved && !confirm(
     `Next camera ends this run. Its ${captures} views stay on disk but can then be solved only `
     + "with the solve-frames command. Continue?",
@@ -1264,6 +1420,17 @@ for (const name of ["gopro.enabled", "gopro.apply_on_preview"]) {
 }
 form.addEventListener("input", (event) => {
   if (event.target.name?.startsWith("board.")) updateBoardSummary();
+  if (event.target.name === "solver.models") showFullChoice(event.target);
+  // Step 1 names the setup only while the form still holds it.
+  const name = matchingPreset(readForm());
+  if (name === presetChoice) return;
+  const was = presetChoice;
+  showPresetChoice(name);
+  presetMsg.textContent = name
+    ? `These settings match "${presetSelect.selectedOptions[0]?.text || name}".`
+    : was
+      ? "You changed a setting, so these are now custom settings. Save as… keeps them as a camera setup."
+      : "";
 });
 
 firewallCopy.addEventListener("click", async () => {

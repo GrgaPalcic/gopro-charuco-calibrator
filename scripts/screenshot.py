@@ -13,11 +13,13 @@ itself runs unmodified in this process.
 It also checks layout facts a person would otherwise have to eyeball: no
 horizontal page scroll, key panels visible, no text spilling out of buttons,
 chips or figures, exactly one enabled amber (primary) button where a state has a
-next action, nothing drawn over the idle preview, no discarded or surplus boxes in
-the coverage legend, and no browser console errors. It exits non-zero if any fail.
+next action, the step bar agreeing with it, Next camera only after a solve,
+nothing drawn over the idle preview, no discarded or surplus boxes in the
+coverage legend, and no browser console errors. It exits non-zero if any fail.
 
-Output: docs/screenshot.png (solved, desktop). The idle, preview, capturing and
-390 px mobile shots are for review only and go to --review-dir.
+Output: docs/screenshot.png (solved, desktop). The other shots (idle, idle with
+custom settings, preview, capturing, paused with enough views, every model
+failed, and 390 px mobile) are for review only and go to --review-dir.
 """
 
 from __future__ import annotations
@@ -284,20 +286,37 @@ def build_states(config, workdir, views):
         summary_path=f"{shown}/caib_marker_board_calibration_summary.json",
     )
     last = views[-1]
+    # The picture shows the last view, so the stats describe that view too.
+    solved.update(markers=last[1].marker_count, pose=last[1].pose.as_dict())
     solved_frame = draw_detection(
         last[0], last[1], f"{last[1].marker_count} markers", selected=True
     )
+
+    # Review-only states the page must not get wrong (hand-made from the above).
+    # Paused with enough views: Solve is next, and the Solve step says so.
+    paused = dict(capturing, state="paused", message="capture paused", captures=len(poses))
+    paused.update(
+        coverage=coverage_summary(poses, targets), guide=guide_status(poses[:16], None, targets)
+    )
+    # Every model failed: the page asks to Solve again, never offers Next camera.
+    failed = dict(solved)
+    failed["results"] = [
+        {"model": r["model"], "ok": False, "error": f"{r['model']}: solver did not converge"}
+        for r in results
+    ]
     return {
         "preview": (preview, preview_frame),
         "capturing": (capturing, capturing_frame),
+        "paused": (paused, capturing_frame),
         "solved": (solved, solved_frame),
+        "failed": (failed, solved_frame),
     }
 
 
 # ---- browser ------------------------------------------------------------
 
 LAYOUT_CHECK = """
-({expect, primary, overlayEmpty, mustSay}) => {
+({expect, primary, overlayEmpty, mustSay, absent, steps, setupHighlighted}) => {
   const problems = [];
   const vw = document.documentElement.clientWidth;
   if (document.documentElement.scrollWidth > vw + 1) {
@@ -352,6 +371,21 @@ LAYOUT_CHECK = """
   if (oldSwatch || /discard|left out/i.test(legend)) {
     problems.push("coverage legend still lists discarded or surplus views");
   }
+  for (const selector of absent) {
+    const el = document.querySelector(selector);
+    if (el && el.offsetParent) problems.push(`should not be shown: ${selector}`);
+  }
+  for (const [id, want] of Object.entries(steps)) {
+    const got = document.getElementById(id).dataset.stepState;
+    if (got !== want) problems.push(`step ${id} is ${got}, expected ${want}`);
+  }
+  if (document.querySelectorAll("[aria-current=step]").length > 1) {
+    problems.push("more than one step is marked current");
+  }
+  const setupAmber = document.getElementById("presetSelect").classList.contains("select-primary");
+  if (setupAmber !== setupHighlighted) {
+    problems.push(`step 1 dropdown highlight is ${setupAmber}, expected ${setupHighlighted}`);
+  }
   const body = document.body.innerText;
   for (const text of mustSay) {
     if (!body.includes(text)) problems.push(`missing text: "${text}"`);
@@ -361,11 +395,22 @@ LAYOUT_CHECK = """
 """
 
 
-def shoot(browser, base_url, status, jpeg, path, viewport, checks, text_path=None):
+def custom_defaults(route):
+    """Serve the start-up settings changed so they match no camera setup, as a
+    plain `gopro-charuco serve` without --config does."""
+    response = route.fetch()
+    data = response.json()
+    data["config"]["capture"]["target_samples"] += 7
+    route.fulfill(response=response, json=data)
+
+
+def shoot(browser, base_url, status, jpeg, path, viewport, checks, text_path=None, custom=False):
     errors = []
     page = browser.new_page(viewport=viewport, device_scale_factor=1)
     page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
     page.on("pageerror", lambda exc: errors.append(str(exc)))
+    if custom:
+        page.route("**/api/defaults", custom_defaults)
     if status is not None:
         body = json.dumps(status)
         page.route(
@@ -441,15 +486,26 @@ def main() -> int:
     desktop = {"width": 1440, "height": 900}
     solved_texts = ["Kannala–Brandt for UMI: matches Double Sphere", "UMI intrinsics JSON"]
 
-    def checks(expect, primary, overlay_empty=False, texts=()):
+    def checks(
+        expect, primary, overlay_empty=False, texts=(), absent=(), steps=None, setup=False
+    ):
         return {
             "expect": common + expect,
             "primary": primary,
             "overlayEmpty": overlay_empty,
             "mustSay": list(texts),
+            "absent": list(absent),
+            "steps": steps or {},
+            "setupHighlighted": setup,
         }
 
+    def step_row(setup, connect, capture, solve):
+        names = ("stepSetup", "stepConnect", "stepCapture", "stepSolve")
+        return dict(zip(names, (setup, connect, capture, solve), strict=True))
+
     review = args.review_dir
+    live = ["#preview", "#cameraReadout .chip"]
+    # (name, status, frame, path, viewport, checks, custom start-up settings)
     shots = [
         (
             "idle",
@@ -457,21 +513,69 @@ def main() -> int:
             b"",
             review / "idle.png",
             desktop,
-            checks(["#previewEmpty"], "#previewBtn", overlay_empty=True),
+            checks(
+                ["#previewEmpty"],
+                "#previewBtn",
+                overlay_empty=True,
+                absent=["#nextCameraBtn", "#guideLegend"],
+                steps=step_row("done", "current", "pending", "pending"),
+            ),
+            False,
+        ),
+        (
+            # A plain `serve` with no --config: step 1 is next, so no button is amber.
+            "custom-idle",
+            None,
+            b"",
+            review / "custom-idle.png",
+            desktop,
+            checks(
+                ["#previewEmpty"],
+                None,
+                overlay_empty=True,
+                steps=step_row("current", "pending", "pending", "pending"),
+                setup=True,
+            ),
+            True,
         ),
         (
             "preview",
             *states["preview"],
             review / "preview.png",
             desktop,
-            checks(["#preview", "#cameraReadout .chip", "#guideLegend"], "#startRunBtn"),
+            checks(
+                [*live, "#guideLegend"],
+                "#startRunBtn",
+                absent=["#nextCameraBtn"],
+                steps=step_row("done", "done", "current", "pending"),
+            ),
+            False,
         ),
         (
             "capturing",
             *states["capturing"],
             review / "capturing.png",
             desktop,
-            checks(["#preview", "#cameraReadout .chip", "#guideLegend"], None),
+            checks(
+                [*live, "#guideLegend", "[data-legend-next]"],
+                None,
+                absent=["#nextCameraBtn"],
+                steps=step_row("done", "done", "current", "pending"),
+            ),
+            False,
+        ),
+        (
+            "paused-enough",
+            *states["paused"],
+            review / "paused-enough.png",
+            desktop,
+            checks(
+                live,
+                "#solveBtn",
+                texts=["Solve now, or Resume"],
+                steps=step_row("done", "done", "done", "current"),
+            ),
+            False,
         ),
         (
             "solved",
@@ -479,10 +583,27 @@ def main() -> int:
             args.out_dir / "screenshot.png",
             desktop,
             checks(
-                ["#preview", "#cameraReadout .chip", "#resultsPanel", ".figure"],
+                [*live, "#resultsPanel", ".figure"],
                 "#nextCameraBtn",
                 texts=solved_texts,
+                absent=["[data-legend-next]"],
+                steps=step_row("done", "done", "done", "done"),
             ),
+            False,
+        ),
+        (
+            "all-failed",
+            *states["failed"],
+            review / "all-failed.png",
+            desktop,
+            checks(
+                [*live, "#resultsPanel"],
+                "#solveBtn",
+                texts=["FAILED", "The last solve failed", "The solve failed: no model solved."],
+                absent=["#nextCameraBtn"],
+                steps=step_row("done", "done", "done", "current"),
+            ),
+            False,
         ),
         (
             # Layout check only: the page must still work at phone width.
@@ -491,13 +612,14 @@ def main() -> int:
             review / "solved-mobile.png",
             {"width": 390, "height": 844},
             checks(["#preview", "#resultsPanel"], "#nextCameraBtn", texts=solved_texts),
+            False,
         ),
     ]
     failures = 0
     launch = {"executable_path": shutil.which("chromium")} if shutil.which("chromium") else {}
     with sync_playwright() as pw:
         browser = pw.chromium.launch(**launch)
-        for name, status, frame, path, viewport, shot_checks in shots:
+        for name, status, frame, path, viewport, shot_checks, custom in shots:
             jpeg = (
                 cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 88])[1].tobytes()
                 if len(frame)
@@ -505,7 +627,7 @@ def main() -> int:
             )
             text_path = args.review_dir / f"{name}.txt"
             problems = shoot(
-                browser, base_url, status, jpeg, path, viewport, shot_checks, text_path
+                browser, base_url, status, jpeg, path, viewport, shot_checks, text_path, custom
             )
             print(f"{name}: {path}  {'ok' if not problems else 'PROBLEMS'}")
             for problem in problems:
