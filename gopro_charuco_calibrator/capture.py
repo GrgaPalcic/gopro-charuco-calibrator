@@ -244,10 +244,9 @@ class CaptureSession:
         if self._thread is not None:
             self._thread.join(timeout=5.0)
         self._thread = None
-        # Leave a clean state: the capture thread has released the V4L2 device, so
-        # now stop the local ffmpeg bridge (frees /dev/video*, so the loopback can
-        # be removed and a reopen starts a fresh low-latency bridge) and tell the
-        # GoPro to exit webcam mode.
+        # Leave a clean state: the capture thread has stopped reading, so kill the
+        # ffmpeg decode process (a reopen then starts a fresh low-latency one) and
+        # tell the GoPro to exit webcam mode.
         if self.config.gopro.enabled:
             try:
                 stop_gopro_video_bridge(self.config)

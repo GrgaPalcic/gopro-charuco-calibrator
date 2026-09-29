@@ -1,14 +1,12 @@
 title: "GoPro HERO11 Wide 1080p"
-# HERO11 uses the legacy gpWebcam API; the ffmpeg V4L2 bridge (Repair /dev/video)
-# handles it automatically. Webcam params match the HERO13 Wide preset so the
-# calibrated model stays comparable.
+# HERO11, stock lens, USB webcam Wide at 1080p. The HERO11 answers the legacy
+# gpWebcam API, which the app detects and uses on its own. Same stream settings as
+# the HERO13 Wide preset, so the two calibrations are comparable.
 camera:
   camera_name: gopro11_wide_1080p
-  device: /dev/video42
   width: 1920
   height: 1080
   fps: 30.0
-  fourcc: YUYV
 gopro:
   enabled: true
   webcam_fov: 0          # 0 = Wide

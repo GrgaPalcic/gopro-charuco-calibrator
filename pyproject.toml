@@ -1,7 +1,7 @@
 [project]
 name = "gopro-charuco-calibrator"
-version = "0.1.0"
-description = "Local web app for caib.io ChArUco intrinsics calibration from V4L2 cameras."
+version = "0.2.0"
+description = "Local web app that calibrates GoPro lenses (incl. Max Lens Mod fisheye) with a caib.io ChArUco board."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { text = "Apache-2.0" }
@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "httpx2>=2.13",
   "pytest>=8.3.0",
   "ruff>=0.8.0",
 ]

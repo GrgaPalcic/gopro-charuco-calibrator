@@ -1,22 +1,20 @@
-title: "GoPro HERO13 UMI Gripper (Wide / fisheye)"
-# Gripper camera for UMI-style demonstration capture. UMI itself runs a physical
-# 155-deg Max Lens Mod fisheye and calibrates a Kannala-Brandt model, feeding raw
-# fisheye frames to ORB-SLAM3 and the policy. This preset pins Max Lens Mod 2.0
-# plus the webcam Wide stream so the run config records the physical lens state.
-# Keep the physical lens installed and keep lens + resolution fixed across every
-# run. If recording on the camera instead of webcam, UMI commonly uses 2.7K.
+title: "GoPro HERO13 + Max Lens Mod 2.0 (UMI gripper)"
+# Gripper camera for UMI-style demonstration capture, calibrated exactly as it
+# records: Max Lens Mod 2.0 fitted, USB webcam Wide, 1080p. With the mod on, the
+# webcam image is a ~167 deg circular fisheye with black corners.
+# double_sphere (OpenICC backend, `gopro-charuco setup-openicc`) is the model to
+# use; it is the only one valid over the whole circle and is recommended whenever
+# it solves. fisheye (Kannala-Brandt) is kept as a Docker-free cross-check.
 camera:
   camera_name: gopro13_umi_gripper
-  device: /dev/video42
   width: 1920
   height: 1080
   fps: 30.0
-  fourcc: YUYV
 gopro:
   enabled: true
-  max_lens_mod: 2        # 2 = Max Lens Mod 2.0; keep the physical lens installed
-  webcam_fov: 0          # 0 = Wide; with the mod on this is a ~167 deg circular fisheye
-  webcam_resolution: 12  # 12 = 1080p
+  max_lens_mod: 2        # 2 = Max Lens 2.0 (setting 189); keep the mod fitted
+  webcam_fov: 0          # 0 = Wide
+  webcam_resolution: 12  # 12 = 1080p, the webcam maximum
   webcam_port: 8554
   webcam_protocol: TS
 board:
@@ -28,11 +26,6 @@ board:
   start_id: 2
   marker_count: 44
 solver:
-  # With the Max Lens Mod the webcam stream is an ultra-wide circular fisheye that
-  # only the Double Sphere model fits (solved by the external OpenICC backend —
-  # `openicc` Docker image or OPENICC_BINARY; emits <camera>_double_sphere.json,
-  # UMI-native). Kannala-Brandt fisheye stays as a fallback so machines without
-  # Docker still produce a usable solve; the UI recommends whichever scores better.
   models:
     - fisheye
     - double_sphere

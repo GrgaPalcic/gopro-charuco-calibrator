@@ -329,9 +329,23 @@ def test_double_sphere_recovers_measured_hero13_intrinsics(tmp_path):
     assert result["ok"] is True, result
     assert result["rms"] < 1.0
     matrix = result["camera_matrix"]
-    assert matrix[0][0] == pytest.approx(fx, rel=0.02)
     assert matrix[0][2] == pytest.approx(cx, abs=5.0)
     assert matrix[1][2] == pytest.approx(cy, abs=5.0)
-    assert result["distortion"][1] == pytest.approx(alpha, abs=0.05)
+    # Compare the models, not the numbers: in Double Sphere f, xi and alpha trade
+    # off against each other, and OpenICC is not deterministic, so on this exact
+    # data f lands anywhere in ~575-630 px (measured 2026-09-29) at the same RMS.
+    # What must hold is that the same 3D rays land on the same pixels.
+    theta = np.radians(np.linspace(0.0, 70.0, 36))
+    phi = np.radians(np.linspace(0.0, 360.0, 48, endpoint=False))
+    t_grid, p_grid = np.meshgrid(theta, phi)
+    rays = np.stack(
+        [np.sin(t_grid) * np.cos(p_grid), np.sin(t_grid) * np.sin(p_grid), np.cos(t_grid)], -1
+    ).reshape(-1, 3)
+    expected, _ = _project_double_sphere(rays, fx, fx, cx, cy, xi, alpha)
+    recovered, valid = _project_double_sphere(
+        rays, matrix[0][0], matrix[1][1], matrix[0][2], matrix[1][2], *result["distortion"]
+    )
+    assert valid.all()
+    assert np.abs(recovered - expected).max() < 1.5
     artifact = json.loads(Path(result["json"]).read_text(encoding="utf-8"))
     assert artifact["intrinsic_type"] == "DOUBLE_SPHERE"

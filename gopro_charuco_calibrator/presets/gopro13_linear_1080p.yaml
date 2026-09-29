@@ -1,13 +1,12 @@
 title: "GoPro HERO13 Linear 1080p"
-# Compatibility preset for the original linear name. Linear is rectilinear, so
-# emit pinhole models for ROS/image_proc-style consumers.
+# Stock lens, USB webcam Linear at 1080p: the firmware de-fishes to a ~90 deg
+# rectilinear image, the only GoPro mode a pinhole model fits. Use it when the
+# consumer needs a plain ROS camera_info (plumb_bob / rational_polynomial).
 camera:
   camera_name: gopro13_linear_1080p
-  device: /dev/video42
   width: 1920
   height: 1080
   fps: 30.0
-  fourcc: YUYV
 gopro:
   enabled: true
   webcam_fov: 4          # 4 = Linear

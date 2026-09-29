@@ -54,7 +54,7 @@ class CameraConfig(BaseModel):
     # model-specific default (the old "gopro13_hyperview") silently mislabels
     # every un-preset'd run after the camera it was named for.
     camera_name: str = "gopro_camera"
-    device: str = "/dev/video42"
+    device: str = "/dev/video0"  # only used when GoPro auto-setup is off
     width: int = Field(default=1280, ge=160)
     height: int = Field(default=720, ge=120)
     fps: float = Field(default=30.0, gt=0.0)

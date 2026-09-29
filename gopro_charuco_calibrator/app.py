@@ -42,8 +42,18 @@ async def _lifespan(_app: FastAPI):
         pass
 
 
+class _RevalidatedStaticFiles(StaticFiles):
+    """Static files the browser must revalidate on every load (ETag makes that a
+    cheap 304), so a UI update is picked up without hand-bumped ?v= query strings."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 app = FastAPI(title="GoPro ChArUco Calibrator", lifespan=_lifespan)
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/static", _RevalidatedStaticFiles(directory=STATIC_DIR), name="static")
 
 _session_lock = threading.Lock()
 _session = CaptureSession()
@@ -64,7 +74,7 @@ def set_default_config(config) -> None:
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/defaults")

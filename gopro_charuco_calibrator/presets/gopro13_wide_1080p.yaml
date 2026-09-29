@@ -1,13 +1,11 @@
 title: "GoPro HERO13 Wide 1080p"
-# Compatibility preset for the original quick-start name. Wide is the native
-# fisheye-like webcam stream; solve the Kannala-Brandt/equidistant model.
+# Stock lens (no mod), USB webcam Wide at 1080p: a ~123-130 deg fisheye that the
+# built-in Kannala-Brandt model fits. Needs nothing beyond `serve`.
 camera:
   camera_name: gopro13_wide_1080p
-  device: /dev/video42
   width: 1920
   height: 1080
   fps: 30.0
-  fourcc: YUYV
 gopro:
   enabled: true
   webcam_fov: 0          # 0 = Wide
