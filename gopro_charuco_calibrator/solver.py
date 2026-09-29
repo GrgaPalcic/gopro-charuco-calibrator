@@ -16,13 +16,20 @@ from .boards import detector_params, make_caib_board, resolve_dictionary
 from .coverage import COVERAGE_FIELDS, PoseParams, coverage_summary
 from .detection import detect_markers
 from .models import BoardConfig, CameraConfig, CoverageTargets, SolverConfig
-from .openicc import run_double_sphere_model
+from .openicc import OPENICC_MODELS, run_openicc_model
+from .projection import board_reach_deg, kb_vs_double_sphere_px
 from .ros_yaml import save_camera_info_yaml
 
 ROBUST_SIGMA_FLOOR_PX = 0.05
 # Smallest frame set we will keep when cv2.fisheye keeps rejecting ill-conditioned
 # views; below this we stop dropping and solve without the conditioning check.
 FISHEYE_MIN_KEEP_FRAMES = 6
+# UMI loads Kannala-Brandt with fy = fx, so a solved aspect ratio further than
+# this from 1 is lost when it loads our file.
+UMI_ASPECT_TOLERANCE = 0.005
+# Largest Kannala-Brandt vs Double Sphere pixel difference, out to the angle the
+# board reached, that we still call a match.
+UMI_MAX_DIFF_PX = 1.0
 
 
 @dataclass(frozen=True)
@@ -796,10 +803,11 @@ def recommended_model(results: list[dict[str, Any]]) -> str | None:
     """Model the operator should use, or None when nothing solved.
 
     double_sphere wins whenever it solved: it is the only model valid over the
-    whole ultra-wide image. Comparing error numbers across models is biased here,
-    because the cv2 models' auto-select drops the hard edge views (their median
-    then looks better) while OpenICC reports one aggregate error. Otherwise the
-    lowest median view error wins, falling back to RMS.
+    whole ultra-wide image. kannala_brandt (OpenICC FISHEYE, the file UMI loads)
+    comes next. Comparing error numbers across models is biased here, because the
+    cv2 models' auto-select drops the hard edge views (their median then looks
+    better) while OpenICC reports one aggregate error. Otherwise the lowest median
+    view error wins, falling back to RMS.
     """
     solved = [
         result
@@ -809,8 +817,9 @@ def recommended_model(results: list[dict[str, Any]]) -> str | None:
     ]
     if not solved:
         return None
-    if any(result.get("model") == "double_sphere" for result in solved):
-        return "double_sphere"
+    for preferred in ("double_sphere", "kannala_brandt"):
+        if any(result.get("model") == preferred for result in solved):
+            return preferred
     best = min(
         solved,
         key=lambda r: (
@@ -818,6 +827,72 @@ def recommended_model(results: list[dict[str, Any]]) -> str | None:
         ),
     )
     return best.get("model")
+
+
+def _solved(results: list[dict[str, Any]], model: str) -> dict[str, Any] | None:
+    return next(
+        (r for r in results if r.get("model") == model and r.get("ok") is not False), None
+    )
+
+
+def umi_check(
+    kb_result: dict[str, Any],
+    ds_result: dict[str, Any] | None,
+    records: list[DetectionRecord],
+) -> dict[str, Any]:
+    """How safely UMI can use the Kannala-Brandt result.
+
+    The board reach is the largest off-axis angle any detected corner reached, read
+    through Double Sphere (valid over the whole fisheye image). Out to that angle
+    the Kannala-Brandt model, evaluated as UMI loads it (fy = fx), should land on
+    the same pixels as Double Sphere.
+    """
+    matrix = kb_result["camera_matrix"]
+    raw_intrinsics = (kb_result.get("openicc") or {}).get("intrinsics") or {}
+    aspect = float(raw_intrinsics.get("aspect_ratio", matrix[1][1] / matrix[0][0]))
+    reach = None
+    max_diff = None
+    if ds_result is not None:
+        pixels = [
+            np.asarray(corner, dtype=np.float64).reshape(-1, 2)
+            for record in records
+            for corner in record.corners
+        ]
+        if pixels:
+            reach = board_reach_deg(ds_result, np.concatenate(pixels))
+        if reach is not None:
+            max_diff = kb_vs_double_sphere_px(kb_result, ds_result, reach)
+            if not math.isfinite(max_diff):
+                max_diff = None
+    warnings = []
+    if abs(aspect - 1.0) > UMI_ASPECT_TOLERANCE:
+        warnings.append(
+            f"The solve found pixels {abs(aspect - 1.0) * 100:.1f}% out of square (aspect "
+            f"ratio {aspect:.4f}). UMI assumes square pixels, so its view will be slightly "
+            "stretched. Check that the video is not scaled or cropped unevenly, then "
+            "calibrate again."
+        )
+    if max_diff is not None and max_diff > UMI_MAX_DIFF_PX:
+        warnings.append(
+            f"The UMI (Kannala-Brandt) file differs from Double Sphere by up to "
+            f"{max_diff:.1f} px out to {reach:.0f}°, the widest angle the board reached, "
+            "so UMI may be off by about that much. The two are solved separately and can "
+            "drift apart: solve again, and if the gap stays, add views near the edge of "
+            "the circle."
+        )
+    return {
+        "board_reach_deg": reach,
+        "max_diff_vs_double_sphere_px": max_diff,
+        "aspect_ratio": aspect,
+        "warnings": warnings,
+    }
+
+
+def _attach_umi_check(results: list[dict[str, Any]], records: list[DetectionRecord]) -> None:
+    kb_result = _solved(results, "kannala_brandt")
+    if kb_result is None:
+        return
+    kb_result["umi_check"] = umi_check(kb_result, _solved(results, "double_sphere"), records)
 
 
 def solve_from_frames(
@@ -846,11 +921,12 @@ def solve_from_frames(
     results = []
     for model_name in solver.models:
         try:
-            if model_name == "double_sphere":
+            if model_name in OPENICC_MODELS:
                 # External OpenICC backend (subprocess boundary); it does its own
                 # view selection, so the cv2 solve + auto-select path is bypassed.
                 results.append(
-                    run_double_sphere_model(
+                    run_openicc_model(
+                        model=model_name,
                         output_dir=output_dir,
                         camera=camera,
                         board_config=board_config,
@@ -874,6 +950,7 @@ def solve_from_frames(
                 )
         except (cv2.error, RuntimeError, ValueError, np.linalg.LinAlgError) as exc:
             results.append(failed_model_result(model_name, exc))
+    _attach_umi_check(results, records)
     recommended = recommended_model(results)
     for result in results:
         result["recommended"] = result.get("model") == recommended

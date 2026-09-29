@@ -112,7 +112,7 @@ def cmd_setup_openicc(args: argparse.Namespace) -> int:
     except subprocess.CalledProcessError as exc:
         print(f"error: `{' '.join(exc.cmd)}` failed with exit {exc.returncode}")
         return 1
-    print("OpenICC image ready; the double_sphere model can now solve.")
+    print("OpenICC image ready; the double_sphere and kannala_brandt models can now solve.")
     return 0
 
 
@@ -144,7 +144,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     setup = sub.add_parser(
         "setup-openicc",
-        help="Build the OpenICC Docker image the double_sphere model needs (once, ~10 min)",
+        help=(
+            "Build the OpenICC Docker image the double_sphere and kannala_brandt models "
+            "need (once, ~10 min)"
+        ),
     )
     setup.add_argument("--source-dir", help=f"Default: {DEFAULT_SOURCE_DIR}")
     setup.add_argument("--image", help="Image tag (default: $OPENICC_DOCKER_IMAGE or openicc)")

@@ -361,7 +361,7 @@ def _solve_with_patched(monkeypatch, tmp_path, ds_behavior):
         lambda *_args, **_kwargs: (object(), {}),
     )
     monkeypatch.setattr(
-        "gopro_charuco_calibrator.solver.run_double_sphere_model", ds_behavior
+        "gopro_charuco_calibrator.solver.run_openicc_model", ds_behavior
     )
     return solve_from_frames(
         frames_dir=tmp_path / "frames",

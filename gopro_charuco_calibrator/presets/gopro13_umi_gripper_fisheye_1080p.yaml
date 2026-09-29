@@ -2,9 +2,14 @@ title: "GoPro HERO13 + Max Lens Mod 2.0 (UMI gripper)"
 # Gripper camera for UMI-style demonstration capture, calibrated exactly as it
 # records: Max Lens Mod 2.0 fitted, USB webcam Wide, 1080p. With the mod on, the
 # webcam image is a ~167 deg circular fisheye with black corners.
-# double_sphere (OpenICC backend, `gopro-charuco setup-openicc`) is the model to
-# use; it is the only one valid over the whole circle and is recommended whenever
-# it solves. fisheye (Kannala-Brandt) is kept as a Docker-free cross-check.
+# double_sphere and kannala_brandt are solved by the OpenICC backend (build it once
+# with `gopro-charuco setup-openicc`):
+# - double_sphere is the reference: the only model valid over the whole circle,
+#   recommended whenever it solves;
+# - kannala_brandt is the file UMI loads (<camera>_kannala_brandt.json, the
+#   gopro_intrinsics_2_7k.json layout) plus an ORB-SLAM3 camera block; the result
+#   says how closely it matches double_sphere out to the widest angle the board reached;
+# - fisheye (cv2 Kannala-Brandt) needs no Docker and writes the ROS camera_info YAML.
 camera:
   camera_name: gopro13_umi_gripper
   width: 1920
@@ -27,5 +32,6 @@ board:
   marker_count: 44
 solver:
   models:
-    - fisheye
     - double_sphere
+    - kannala_brandt
+    - fisheye

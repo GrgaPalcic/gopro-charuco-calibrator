@@ -41,8 +41,9 @@ def _discarded_points(summary: dict[str, Any]) -> list[dict[str, Any]]:
     summary frame list.
     """
     results = summary.get("results") or []
-    # Only models that report per-frame rejections can place points; double_sphere
-    # (OpenICC selects views internally) does not, so fall back to the best cv2 one.
+    # Only models that report per-frame rejections can place points; the OpenICC
+    # models (double_sphere, kannala_brandt) select views internally and do not, so
+    # fall back to the best cv2 one.
     with_frames = [
         result
         for result in results
