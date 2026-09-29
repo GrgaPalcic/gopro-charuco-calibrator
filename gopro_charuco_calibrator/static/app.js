@@ -478,7 +478,10 @@ function runFacts(status, minFrames) {
   const state = status.state || "idle";
   const captures = status.captures || 0;
   const live = isLive(status);
-  const results = status.results || [];
+  // A fresh preview (after Stop, then Open preview) belongs to the next run: the
+  // server still holds the last run's result, but it no longer applies.
+  const stale = live && state === "preview";
+  const results = stale ? [] : status.results || [];
   const verdict = judge(results, status.coverage);
   const atCap = status.max_samples != null && captures >= status.max_samples;
   const done = state === "complete" || state === "solved";
@@ -489,11 +492,19 @@ function runFacts(status, minFrames) {
     hasResults: results.length > 0,
     solved,
     pass: verdict.pass,
-    // Something solved, but a model the run asked for did not: its files are
-    // missing (for the gripper preset, possibly the UMI file), so solve again.
-    missing: solved ? verdict.failed : [],
-    incomplete: solved && verdict.failed.length > 0,
-    missingText: solved ? missingSentence(verdict.failed, cameraOf(status)) : "",
+    stale,
+    // Views were added (Resume) since the result shown: it does not include them.
+    moreViews: live && results.length > 0 && ["capturing", "paused", "complete"].includes(state),
+    // Something solved, but an OpenICC model the run asked for did not: its files
+    // are missing (for the gripper preset, possibly the UMI file), and the usual
+    // cause (setup, or a solve that did not settle) is fixed by solving again. A
+    // failed OpenCV model next to them is not: OpenCV's fisheye cannot fit every
+    // lens, so that row is only a note.
+    missing: solved ? verdict.failed.filter((r) => OPENICC_MODELS.has(r.model)) : [],
+    incomplete: solved && verdict.failed.some((r) => OPENICC_MODELS.has(r.model)),
+    missingText: solved
+      ? missingSentence(verdict.failed.filter((r) => OPENICC_MODELS.has(r.model)), cameraOf(status))
+      : "",
     // Resume carries on the same run: from paused, or after the route or a solve.
     canResume: live && (state === "paused" || done) && !atCap,
     connecting: isConnecting(status),
@@ -770,6 +781,8 @@ function drawGuideOverlay(status) {
 }
 
 const IDLE_PROMPT = "Open preview to start.";
+const OTHER_CAMERA = "To do another camera, plug it in, give it its own Camera name in Settings "
+  + "(it names the files), then click Open preview.";
 const NEXT_CAMERA_PROMPT = "Plug in the next GoPro, give it its own Camera name in Settings "
   + "(it names the files), then click Open preview.";
 
@@ -780,10 +793,13 @@ function resultPrompt(f) {
       ? "The solve failed. Fix the first reason in the result below, then Solve again."
       : "The solve failed. Open preview and start a new run.";
   }
+  if (f.moreViews) {
+    return "Adding views to this run. Solve again to include the views added since the last solve.";
+  }
   if (f.incomplete) return fixMissing(f);
   if (!f.live) {
     return f.pass
-      ? "Solved. Check the result below. To do another camera, plug it in and click Open preview."
+      ? `Solved. Check the result below. ${OTHER_CAMERA}`
       : "Retake: Open preview and start a new run with the views listed below.";
   }
   if (f.pass) {
@@ -1018,7 +1034,9 @@ function renderResults(modelResults, coverage, mode, f) {
   resultsPanel.hidden = false;
   // Rebuild only on a change: the status polls every 150 ms, and a rebuilt card
   // would drop a text selection (copying a file path) on every poll.
-  const signature = JSON.stringify([modelResults, coverage, mode, f.live, f.canResume, f.missingText]);
+  const signature = JSON.stringify(
+    [modelResults, coverage, mode, f.live, f.canResume, f.missingText, f.moreViews],
+  );
   if (signature === resultsSignature) return;
   resultsSignature = signature;
   resultGrid.replaceChildren();
@@ -1030,7 +1048,13 @@ function renderResults(modelResults, coverage, mode, f) {
   const {rec, reasons, pass, alpha} = judge(modelResults, coverage);
   const failedRows = () => {
     for (const result of failed) {
-      gridRow(resultGrid, `${modelName(result.model)} failed`, result.error || result.error_type || "solver failed", {cls: "failed"});
+      // Beside a solved result, an OpenCV model that failed is a note, not a to-do:
+      // OpenCV's fisheye cannot fit every lens, and solving again will not change that.
+      const notes = rec && !OPENICC_MODELS.has(result.model)
+        ? [`No ${modelName(result.model)} files from this run. The other files are complete; `
+          + "solving again will not change this."]
+        : [];
+      gridRow(resultGrid, `${modelName(result.model)} failed`, result.error || result.error_type || "solver failed", {cls: "failed", notes});
     }
   };
 
@@ -1055,9 +1079,11 @@ function renderResults(modelResults, coverage, mode, f) {
   const complete = pass && !f.incomplete;
   verdictBox.className = `verdict ${complete ? "pass" : "retake"}`;
   verdictBadge.textContent = f.incomplete ? "INCOMPLETE" : pass ? "PASS" : "RETAKE";
-  const next = f.live
-    ? "Click Next camera to do another camera."
-    : "To do another camera, plug it in and click Open preview.";
+  const next = f.moreViews
+    ? "Solve again to include the views added since this result."
+    : f.live
+      ? "Click Next camera to do another camera."
+      : OTHER_CAMERA;
   let headline;
   if (f.incomplete) {
     const lead = pass
@@ -1200,7 +1226,7 @@ function updateStatus(status) {
   drawGuideOverlay(status);
   renderReadout(status.gopro, live);
   // Once the result passes, the poses the guide did not reach are not needed.
-  const todo = facts.pass && !facts.incomplete
+  const todo = facts.pass && !facts.incomplete && !facts.moreViews
     ? "Blue: not reached (not needed, the result passed)"
     : "Blue: still to do";
   if (legendTodo.textContent !== todo) legendTodo.textContent = todo;
@@ -1230,7 +1256,7 @@ function updateStatus(status) {
   setButton(
     nextCameraBtn, live && !solving,
     "End this run and stop the webcam, so you can plug in the next camera",
-    solving ? waitSolve : "Only needed while the preview is open. Otherwise plug in the next camera and click Open preview",
+    solving ? waitSolve : "Only needed while the preview is open. Otherwise plug in the next camera, give it its own Camera name in Settings, and click Open preview",
   );
   // Resume re-enables capturing from paused or after the route completed/solved,
   // so the operator can add or repeat poses on the same run.
@@ -1251,16 +1277,23 @@ function updateStatus(status) {
   else if (paused || done) captureWhy = "Resume first";
   else if (solving) captureWhy = waitSolve;
   setButton(captureBtn, capturing, "Save the current view immediately (views also save automatically)", captureWhy);
+  // A fresh preview's saved views are the last run's (maybe another camera's):
+  // solving them from here would mix runs, so wait for Start new run.
   setButton(
-    solveBtn, captures >= minFrames && !solving, "Compute the lens calibration from the saved views",
-    solving ? "Solving now…" : `Needs at least ${minFrames} views (${captures} saved so far)`,
+    solveBtn, captures >= minFrames && !solving && !facts.stale,
+    "Compute the lens calibration from the saved views",
+    solving ? "Solving now…"
+      : facts.stale ? "Start a new run first: the saved views belong to the last run"
+        : `Needs at least ${minFrames} views (${captures} saved so far)`,
   );
   const primary = primaryButton(facts, setupCurrent);
   for (const button of [previewBtn, stopBtn, startRunBtn, captureBtn, pauseResumeBtn, solveBtn, nextCameraBtn]) {
     button.classList.toggle("btn-primary", button === primary && !button.disabled);
   }
   let solveLine = "Computes the lens calibration from the saved views.";
-  if (facts.hasResults && !solved) {
+  if (facts.moreViews) {
+    solveLine = "Solve again to include the views added since the last solve.";
+  } else if (facts.hasResults && !solved) {
     solveLine = "The last solve failed. Fix the first reason in the result below, then Solve again.";
   } else if (facts.incomplete) {
     const rows = facts.missing.length === 1 ? "row" : "rows";
@@ -1271,7 +1304,7 @@ function updateStatus(status) {
   } else if (solved) {
     solveLine = live
       ? "Done. Next camera ends this run so you can plug in the next GoPro."
-      : "Done. For another camera, plug it in and click Open preview.";
+      : `Done. ${OTHER_CAMERA}`;
   }
   solveDesc.textContent = solveLine;
 
@@ -1299,7 +1332,7 @@ function updateStatus(status) {
   const fwCmd = bridge ? bridge.ufw_command || extractUfwFromError(bridge.error) : "";
   renderFirewall(bridge, fwCmd);
 
-  if (status.results && status.results.length) {
+  if (status.results && status.results.length && !facts.stale) {
     renderResults(status.results, status.coverage, status.acquisition_mode, facts);
     results.hidden = true;
   } else {
@@ -1516,10 +1549,16 @@ nextCameraBtn.addEventListener("click", act("Next camera", async () => {
   const captures = lastStatus?.captures || 0;
   // The button is hidden until something solved; if a model the run asked for
   // failed (its files are missing), ask before ending the run.
-  const failed = (lastStatus?.results || []).filter((r) => !solvedOk(r));
-  if (captures > 0 && failed.length && !confirm(
-    `${missingSentence(failed, cameraOf(lastStatus))} Next camera ends this run. Its ${captures} views `
-    + "stay on disk but can then be solved only with the solve-frames command. Continue?",
+  const failed = (lastStatus?.results || []).filter(
+    (r) => !solvedOk(r) && OPENICC_MODELS.has(r.model),
+  );
+  // Views added since the last solve are not in its files either.
+  const unsolvedViews = lastStatus?.state !== "solved";
+  const why = failed.length ? missingSentence(failed, cameraOf(lastStatus))
+    : unsolvedViews ? "The views added since the last solve are not in its files." : "";
+  if (captures > 0 && why && !confirm(
+    `${why} Next camera ends this run. Its ${captures} views stay on disk but can then be `
+    + "solved only with the solve-frames command. Continue?",
   )) return;
   // Cleanly stop the current camera and go idle; the operator swaps the camera,
   // edits the camera name if needed, then clicks Open preview for the new one.
