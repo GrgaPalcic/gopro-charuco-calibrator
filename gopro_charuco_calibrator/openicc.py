@@ -1,4 +1,4 @@
-"""Double Sphere calibration through the external OpenImuCameraCalibrator.
+"""Double Sphere and Kannala-Brandt calibration through the external OpenImuCameraCalibrator.
 
 OpenICC (github.com/urbste/OpenImuCameraCalibrator) is AGPL-3.0, so it is kept at
 arm's length: we exchange files with its ``calibrate_camera`` binary over a
@@ -55,6 +55,27 @@ STDERR_TAIL_CHARS = 2000
 OPENICC_REPO = "https://github.com/urbste/OpenImuCameraCalibrator"
 OPENICC_COMMIT = "d75dda57285c6c1fda0f41e5f4ad901483f73fff"
 DEFAULT_SOURCE_DIR = Path("~/.cache/gopro-charuco-calibrator/openicc")
+
+
+@dataclass(frozen=True)
+class OpenICCModel:
+    name: str  # our model name, as in SolverConfig.models
+    flag: str  # OpenICC --camera_model_to_calibrate
+    work_dir: str  # per-model folder under the run, so logs and results never collide
+    params: tuple[str, ...]  # distortion keys in OpenICC's "intrinsics", in order
+
+
+OPENICC_MODELS = {
+    "double_sphere": OpenICCModel("double_sphere", "DOUBLE_SPHERE", "openicc", ("xi", "alpha")),
+    # OpenICC's FISHEYE is Kannala-Brandt with k1..k4 on theta (cv2.fisheye's model),
+    # and its JSON is exactly the layout of UMI's gopro_intrinsics_2_7k.json.
+    "kannala_brandt": OpenICCModel(
+        "kannala_brandt",
+        "FISHEYE",
+        "openicc_kannala_brandt",
+        tuple(f"radial_distortion_{i}" for i in range(1, 5)),
+    ),
+}
 
 
 class OpenICCError(RuntimeError):
@@ -130,6 +151,7 @@ def build_corners_payload(
     square_size_m: float,
     fps: float,
     downscale: float = 1.0,
+    model_name: str = "double_sphere",
 ) -> dict[str, Any]:
     scene_pts: dict[str, list[float]] = {}
     for marker_id, corners3d in obj_by_id.items():
@@ -160,7 +182,7 @@ def build_corners_payload(
 
     if len(views) < OPENICC_MIN_VIEWS:
         raise OpenICCError(
-            f"OpenICC double_sphere needs at least {OPENICC_MIN_VIEWS} views with "
+            f"OpenICC {model_name} needs at least {OPENICC_MIN_VIEWS} views with "
             f"detections, found {len(views)}"
         )
 
@@ -223,7 +245,7 @@ def build_image_commands(source_dir: Path, image: str) -> list[list[str]]:
 
 
 def build_image(source_dir: Path | None = None, image: str | None = None) -> None:
-    """Build the OpenICC Docker image the double_sphere model runs (~10 min)."""
+    """Build the OpenICC Docker image the OpenICC models run in (~10 min)."""
     source_dir = (source_dir or DEFAULT_SOURCE_DIR).expanduser()
     image = image or settings_from_env().docker_image
     source_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -232,10 +254,12 @@ def build_image(source_dir: Path | None = None, image: str | None = None) -> Non
         subprocess.run(command, check=True)
 
 
-def _calibrate_flags(corners: str, out_prefix: str, grid_size: float) -> list[str]:
+def _calibrate_flags(
+    corners: str, out_prefix: str, grid_size: float, camera_model: str = "DOUBLE_SPHERE"
+) -> list[str]:
     return [
         f"--input_corners={corners}",
-        "--camera_model_to_calibrate=DOUBLE_SPHERE",
+        f"--camera_model_to_calibrate={camera_model}",
         f"--save_path_calib_dataset={out_prefix}",
         f"--grid_size={grid_size}",
         "--optimize_board_points=false",
@@ -245,11 +269,14 @@ def _calibrate_flags(corners: str, out_prefix: str, grid_size: float) -> list[st
 
 
 def build_command(
-    work_dir: Path, settings: OpenICCSettings, container_name: str | None
+    work_dir: Path,
+    settings: OpenICCSettings,
+    container_name: str | None,
+    camera_model: str = "DOUBLE_SPHERE",
 ) -> list[str]:
     if settings.binary_path:
         return [settings.binary_path] + _calibrate_flags(
-            str(work_dir / "corners.uson"), str(work_dir / "out"), settings.grid_size
+            str(work_dir / "corners.uson"), str(work_dir / "out"), settings.grid_size, camera_model
         )
     command = ["docker", "run", "--rm"]
     if container_name:
@@ -258,7 +285,7 @@ def build_command(
         command += ["--user", f"{os.getuid()}:{os.getgid()}"]
     command += ["-v", f"{work_dir.resolve()}:/data", settings.docker_image]
     command += [CALIBRATE_CAMERA_BIN] + _calibrate_flags(
-        "/data/corners.uson", "/data/out", settings.grid_size
+        "/data/corners.uson", "/data/out", settings.grid_size, camera_model
     )
     return command
 
@@ -276,9 +303,11 @@ def _result_json_path(work_dir: Path) -> Path:
     )
 
 
-def run_calibrate_camera(work_dir: Path, settings: OpenICCSettings) -> dict[str, Any]:
+def run_calibrate_camera(
+    work_dir: Path, settings: OpenICCSettings, camera_model: str = "DOUBLE_SPHERE"
+) -> dict[str, Any]:
     container_name = None if settings.binary_path else f"openicc-{uuid.uuid4().hex[:12]}"
-    command = build_command(work_dir, settings, container_name)
+    command = build_command(work_dir, settings, container_name, camera_model)
     log_path = work_dir / "calibrate_camera.log"
     # A re-solve of the same run (auto-solve at route end, then Resume + Solve)
     # reuses work_dir; drop old results so a run that writes none cannot be
@@ -354,13 +383,12 @@ def intrinsics_to_camera_matrix(intrinsics: Mapping[str, Any]) -> list[list[floa
     return [[focal, skew, cx], [0.0, focal * aspect, cy], [0.0, 0.0, 1.0]]
 
 
-def _require_finite(result: Mapping[str, Any]) -> None:
+def _require_finite(result: Mapping[str, Any], params: Sequence[str] = ("xi", "alpha")) -> None:
     intrinsics = result.get("intrinsics")
     if not isinstance(intrinsics, Mapping):
         raise OpenICCError("OpenICC result has no 'intrinsics' object")
     values = [result.get("final_reproj_error")] + [
-        intrinsics.get(key)
-        for key in ("focal_length", "principal_pt_x", "principal_pt_y", "xi", "alpha")
+        intrinsics.get(key) for key in ("focal_length", "principal_pt_x", "principal_pt_y", *params)
     ]
     for value in values:
         if not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -370,8 +398,36 @@ def _require_finite(result: Mapping[str, Any]) -> None:
             )
 
 
-def run_double_sphere_model(
+def orbslam3_kb8_yaml(raw: Mapping[str, Any]) -> str:
+    """The camera block of an ORB-SLAM3 KannalaBrandt8 settings file, from OpenICC FISHEYE.
+
+    UMI's SLAM settings live in a fixed file inside its Docker image; this block replaces
+    its Camera1.* and Camera.* lines. fx = fy = focal_length, as UMI's own loader does.
+    """
+    intr = raw["intrinsics"]
+    k = [float(intr[f"radial_distortion_{i}"]) for i in range(1, 5)]
+    focal = float(intr["focal_length"])
+    lines = [
+        "# Camera block for an ORB-SLAM3 settings file (File.version 1.0), from OpenICC FISHEYE.",
+        "# Merge into your existing settings: the IMU.* block is not calibrated here.",
+        'Camera.type: "KannalaBrandt8"',
+        f"Camera1.fx: {focal!r}",
+        f"Camera1.fy: {focal!r}",
+        f"Camera1.cx: {float(intr['principal_pt_x'])!r}",
+        f"Camera1.cy: {float(intr['principal_pt_y'])!r}",
+        *(f"Camera1.k{i}: {value!r}" for i, value in enumerate(k, start=1)),
+        f"Camera.width: {int(raw['image_width'])}",
+        f"Camera.height: {int(raw['image_height'])}",
+    ]
+    fps = raw.get("fps")
+    if fps:
+        lines.append(f"Camera.fps: {round(float(fps))}")
+    return "\n".join(lines) + "\n"
+
+
+def run_openicc_model(
     *,
+    model: str,
     output_dir: Path,
     camera: CameraConfig,
     board_config: BoardConfig,
@@ -380,8 +436,9 @@ def run_double_sphere_model(
     obj_by_id: dict[int, np.ndarray],
     settings: OpenICCSettings | None = None,
 ) -> dict[str, Any]:
+    spec = OPENICC_MODELS[model]
     settings = settings or settings_from_env()
-    work_dir = output_dir / "openicc"
+    work_dir = output_dir / spec.work_dir
     downscale = max(1.0, image_size[1] / MAX_SOLVE_HEIGHT)
     payload = build_corners_payload(
         records=records,
@@ -390,13 +447,14 @@ def run_double_sphere_model(
         square_size_m=board_config.square_m,
         fps=camera.fps,
         downscale=downscale,
+        model_name=model,
     )
     write_corners_file(work_dir / "corners.uson", payload)
 
-    raw = run_calibrate_camera(work_dir, settings)
-    _require_finite(raw)
+    raw = run_calibrate_camera(work_dir, settings, spec.flag)
+    _require_finite(raw, spec.params)
 
-    # Scale intrinsics back to the native resolution (xi/alpha are scale-free).
+    # Scale intrinsics back to the native resolution (xi, alpha and k1..k4 are scale-free).
     intrinsics = dict(raw["intrinsics"])
     for key in ("focal_length", "principal_pt_x", "principal_pt_y"):
         intrinsics[key] = float(intrinsics[key]) * downscale
@@ -410,12 +468,16 @@ def run_double_sphere_model(
         "image_height": int(image_size[1]),
         "solve_downsample_factor": downscale,
     }
-    artifact_path = output_dir / f"{camera.camera_name}_double_sphere.json"
+    artifact_path = output_dir / f"{camera.camera_name}_{model}.json"
     artifact_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    orbslam3_path = None
+    if model == "kannala_brandt":
+        orbslam3_path = output_dir / f"{camera.camera_name}_kannala_brandt_orbslam3.yaml"
+        orbslam3_path.write_text(orbslam3_kb8_yaml(raw), encoding="utf-8")
 
     error = float(raw["final_reproj_error"])
     camera_matrix = intrinsics_to_camera_matrix(intrinsics)
-    distortion = [float(intrinsics["xi"]), float(intrinsics["alpha"])]
+    distortion = [float(intrinsics[key]) for key in spec.params]
     views_used = int(raw.get("nr_calib_images") or 0)
     selected = {
         "frame_count": views_used,
@@ -427,7 +489,7 @@ def run_double_sphere_model(
         "yaml": None,
     }
     return {
-        "model": "double_sphere",
+        "model": model,
         "ok": True,
         "rms": error,
         "median_view_error_px": error,
@@ -436,11 +498,16 @@ def run_double_sphere_model(
         "error_metric": "openicc_final_reproj_error_px",
         "camera_matrix": camera_matrix,
         "distortion": distortion,
-        "distortion_model": "double_sphere",
+        "distortion_model": model,
         "yaml": None,
         "json": str(artifact_path),
+        "orbslam3_yaml": None if orbslam3_path is None else str(orbslam3_path),
         "all_frames": {"frame_count": len(payload["views"])},
         "selected": selected,
         "diagnostics_csv": None,
         "openicc": raw,
     }
+
+
+def run_double_sphere_model(**kwargs: Any) -> dict[str, Any]:
+    return run_openicc_model(model="double_sphere", **kwargs)

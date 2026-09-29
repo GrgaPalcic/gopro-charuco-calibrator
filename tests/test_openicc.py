@@ -271,7 +271,7 @@ OUT_JSON = {
 
 
 def _patched_runner(out_json):
-    def fake_runner(work_dir: Path, _settings):
+    def fake_runner(work_dir: Path, _settings, _camera_model="DOUBLE_SPHERE"):
         (work_dir / "out.json").write_text(json.dumps(out_json), encoding="utf-8")
         return out_json
 
