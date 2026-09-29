@@ -128,7 +128,8 @@ class SolverConfig(BaseModel):
     # Which camera models to solve and emit. plumb_bob/rational_polynomial are
     # pinhole (good only for Linear/narrow lenses); fisheye is Kannala-Brandt for
     # wide GoPro lenses (Wide ~130 deg). double_sphere covers ultra-wide fisheye
-    # (Max Lens Mod, ~150-195 deg, UMI-native) and is solved by the external
+    # (Max Lens Mod, ~150-195 deg; OpenICC's JSON layout, but UMI itself only loads
+    # Kannala-Brandt) and is solved by the external
     # OpenICC backend (the `openicc` Docker image or OPENICC_BINARY) — opt-in via
     # preset/UI, not in the defaults so an un-preset'd run has no external deps.
     # Default emits the three built-ins so a run started without a preset

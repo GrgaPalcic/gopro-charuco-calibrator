@@ -333,7 +333,7 @@ def test_double_sphere_recovers_measured_hero13_intrinsics(tmp_path):
     assert matrix[1][2] == pytest.approx(cy, abs=5.0)
     # Compare the models, not the numbers: in Double Sphere f, xi and alpha trade
     # off against each other, and OpenICC is not deterministic, so on this exact
-    # data f lands anywhere in ~575-630 px (measured 2026-09-29) at the same RMS.
+    # data f landed anywhere in 573-626 px over ten runs (2026-09-29) at the same RMS.
     # What must hold is that the same 3D rays land on the same pixels.
     theta = np.radians(np.linspace(0.0, 70.0, 36))
     phi = np.radians(np.linspace(0.0, 360.0, 48, endpoint=False))

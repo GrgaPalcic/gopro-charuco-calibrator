@@ -73,7 +73,7 @@ mod fitted, USB webcam Wide, 1080p.
    its limit means the board missed the edge: Resume, add edge views, solve again.
 
 Calibrate every camera and mod pair separately, and again after refitting a mod. To compare two
-Double Sphere results, project rays through both; the focal lengths alone can differ by 50 px at
+Double Sphere results, project rays through both; the focal lengths alone can differ by over 50 px at
 the same error ([why](docs/footguns.md#double-sphere-parameters-are-not-unique)). A Double Sphere
 result does not drop into UMI's pipeline, which expects Kannala–Brandt
 ([details](docs/umi-and-deployment.md#where-our-calibration-differs)).

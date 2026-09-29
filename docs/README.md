@@ -5,15 +5,49 @@ with the doc that answers your question.
 
 | Doc | Answers |
 |---|---|
-| [lens-modes-and-models.md](lens-modes-and-models.md) | Which GoPro modes can be calibrated, which model fits which field of view, and which capture paths exist (webcam, recording, HDMI, Wi-Fi, Labs) with their limits. |
-| [footguns.md](footguns.md) | Why a calibration looks impossible when it isn't. Each trap as symptom → cause → how to tell → fix, plus the claims we had to retract. |
-| [measurements.md](measurements.md) | Every result we measured: date, dataset, board, lens mode, solver, error. Also the pending video-vs-webcam comparison. |
+| [lens-modes-and-models.md](lens-modes-and-models.md) | Which GoPro modes can be calibrated, which model fits which field of view, which capture paths exist (webcam, recording, HDMI, Wi-Fi, Labs), and their limits. |
+| [footguns.md](footguns.md) | Why a calibration can look impossible when it isn't. Each trap as symptom → cause → how to tell → fix, plus the claims we had to retract. |
+| [measurements.md](measurements.md) | Every result we measured, with date, dataset, board, lens mode, solver and error. Also the pending video-vs-webcam comparison. |
 | [double-sphere-backend.md](double-sphere-backend.md) | How the app drives OpenICC for the Max Lens Mod, how to read a Double Sphere result, and how to calibrate an on-camera recording. |
-| [umi-and-deployment.md](umi-and-deployment.md) | What UMI does, why a Double Sphere result does not drop into it, the HDMI capture chain for a live robot, and multi-camera sync. |
+| [umi-and-deployment.md](umi-and-deployment.md) | What UMI does, why a Double Sphere result does not drop into it, the live paths for a robot, and multi-camera sync. |
 
-Tags used throughout: **verified** means measured by us or read from the primary source;
-**inferred** means consistent with the evidence but not directly demonstrated.
+Tags used throughout:
+- **verified:** measured by us, or read from the primary source.
+- **inferred:** consistent with the evidence, but not directly demonstrated.
+- **assessed:** established practice, not re-benchmarked here.
 
-These docs replace the June reports (`calibration-report.html`, `calibration-research-report.md`).
-Their corrections are folded in rather than appended; the retracted claims are listed at the end of
+These docs replace the June reports (`calibration-report.html` and
+`calibration-research-report.md`, both in git history). Their corrections are folded in rather than
+appended; the retracted claims are listed at the end of
 [footguns.md](footguns.md#what-we-got-wrong-before).
+
+## Glossary
+
+- **Intrinsics:** the numbers that describe a lens: focal length, principal point (image centre)
+  and distortion. Calibration measures them.
+- **Reprojection error (RMS):** how far, in pixels, the model puts the board's corners from where
+  they were detected. Under ~1 px is good; 30–50 px means the model does not fit at all.
+- **Pinhole, `plumb_bob`, `rational_polynomial`:** the standard narrow-lens model, with 5 or 8
+  distortion coefficients. Fits up to ~90–95°.
+- **Kannala–Brandt (KB), `fisheye`, `equidistant`:** the standard fisheye model. OpenCV's version
+  has 4 coefficients; "KB8" in ORB-SLAM3 is the same 4-coefficient model with 8 parameters in total
+  (fx, fy, cx, cy plus k1–k4).
+- **Double Sphere (DS):** a fisheye model for ~150–195° lenses. Beyond focal length and principal
+  point it has two parameters: **xi**, the offset between its two projection spheres, and
+  **alpha**, in the range 0–1, which blends between them. f, xi and alpha trade off against each
+  other, so compare DS models by projecting rays, not by their numbers.
+- **EUCM:** the Enhanced Unified Camera Model, another wide-angle model that OpenICC offers.
+- **Ray projection (comparing two models):** take a set of 3D directions (for example every 2° out
+  to 70° off-axis), project each through both models, and compare the pixel positions. See
+  `_project_double_sphere` in `tests/test_hero13_readiness.py`.
+- **Anamorphic:** stretched unevenly in one direction. GoPro SuperView and HyperView are anamorphic,
+  so no lens model fits them.
+- **Centre-weighted views:** the views a solver kept after dropping its worst ones. On a very wide
+  lens these are mostly near the centre, which makes an unsuitable model look better than it is.
+- **Layout parity (caib.io board):** which of the alternating checkerboard cells carry markers. It
+  varies with the board's dimensions, and assuming the wrong one ruins the solve.
+- **OpenICC:** OpenImuCameraCalibrator, the external tool that solves Double Sphere (and UMI's KB).
+- **GPMF:** GoPro's metadata track in the mp4, which carries the IMU (accelerometer and gyro).
+- **UVC:** USB Video Class, a standard USB camera. Linux exposes it as `/dev/videoX`.
+- **UMI:** the Universal Manipulation Interface, a robot-learning project that collects GoPro
+  demonstrations. It is our reference pipeline.
