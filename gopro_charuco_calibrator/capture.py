@@ -204,7 +204,7 @@ class CaptureSession:
         self._run_start_time = time.monotonic()
         self._state = "capturing"
         self._write_run_config()
-        self._set_status(state="capturing", message="new run started", rejected_points=[])
+        self._set_status(state="capturing", message="new run started", **self._run_status())
         return self.status()
 
     def pause(self) -> dict[str, Any]:
@@ -244,7 +244,11 @@ class CaptureSession:
         if config is not None:
             self.config = config
         self._set_status(
-            state="idle", message="stopped; ready for next camera", gopro=None, video_bridge=None
+            state="idle",
+            message="stopped; ready for next camera",
+            gopro=None,
+            video_bridge=None,
+            **self._run_status(),
         )
         return self.status()
 
@@ -380,6 +384,22 @@ class CaptureSession:
         }
         with (self.output_dir / "config.json").open("w", encoding="utf-8") as stream:
             json.dump(payload, stream, indent=2)
+
+    def _run_status(self) -> dict[str, Any]:
+        # _set_status merges, so everything describing a run must be reset
+        # explicitly when a run starts or ends, or the previous run's counts,
+        # verdict and output paths linger in the UI.
+        return {
+            "run_id": self.run_id,
+            "run_dir": "" if self.output_dir is None else str(self.output_dir),
+            "captures": self._capture_count,
+            "coverage": coverage_summary(self._captured_poses, self.config.coverage_targets),
+            "guide": guide_status([], None, self.config.coverage_targets),
+            "results": None,
+            "summary_path": None,
+            "acquisition_mode": None,
+            "rejected_points": [],
+        }
 
     def _base_status(self, state: str, message: str) -> dict[str, Any]:
         return {

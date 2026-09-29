@@ -79,6 +79,9 @@ const STATE_LABEL = {
 };
 
 let defaults = null;
+// The config the form edits: the server defaults, or the last loaded preset. Keys
+// with no form field (for example gopro.webcam_digital_lens) pass through from it.
+let baseConfig = null;
 let pollTimer = null;
 let streamActive = false;
 let fallbackTimer = null;
@@ -175,7 +178,7 @@ function populateForm(config, dicts, goproOptions) {
 }
 
 function readForm() {
-  const config = structuredClone(defaults.config);
+  const config = structuredClone(baseConfig || defaults.config);
   for (const input of form.elements) {
     if (!input.name) continue;
     if (input.name === "solver.models") {
@@ -572,7 +575,7 @@ function drawGuideOverlay(status) {
   if (pose) dot(pose, COLOR.fail, 9);
 }
 
-function guideText(status, live) {
+function guideText(status, live, minFrames) {
   const guide = status.guide || {};
   const state = status.state || "idle";
   const done = guide.complete_count || 0;
@@ -585,9 +588,11 @@ function guideText(status, live) {
   }
   if (state === "error") return "Fix the problem on the status line, then Open preview again.";
   if (!live) {
-    return (status.captures || 0) > 0 && status.run_id
-      ? `Preview stopped. Solve this run's ${status.captures} views, or Open preview to start again.`
-      : "Open preview to start.";
+    const captures = status.captures || 0;
+    if (!captures || !status.run_id) return "Open preview to start.";
+    return captures >= minFrames
+      ? `Preview stopped. Solve this run's ${captures} views, or Open preview to start again.`
+      : `Preview stopped with ${captures} views; solving needs ${minFrames}. Open preview and start a new run.`;
   }
   if (state === "preview") return "Start a new run, then move the board centre along the guide.";
   if (state === "complete") {
@@ -808,7 +813,7 @@ function updateStatus(status) {
   const paused = state === "paused";
   const solving = state === "solving";
   const live = isLive(status);
-  guidePrompt.textContent = guideText(status, live);
+  guidePrompt.textContent = guideText(status, live, minFrames);
   updateBars(status.coverage || {});
   drawCoverageMap(
     status.coverage?.points || [], status.rejected_points || [], status.image_size, targetBox(status.coverage),
@@ -901,6 +906,7 @@ async function applyPreset(name) {
   try {
     const preset = await api(`/api/presets/${encodeURIComponent(name)}`);
     const cfg = preset.config || preset;
+    baseConfig = structuredClone(cfg);
     populateForm(cfg, defaults.aruco_dictionaries, defaults.gopro_options);
     presetMsg.textContent = `Loaded "${preset.title || name}".`;
   } catch (err) {
@@ -982,6 +988,8 @@ captureBtn.addEventListener("click", act("Capture", async () => {
 }));
 
 async function runSolve() {
+  // After Stop nothing polls, so no "solving" status would disable the button.
+  solveBtn.disabled = true;
   statusLine.textContent = "Solving…";
   try {
     // Pause capture first so solving from an active run is a clean, explicit stop.

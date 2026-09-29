@@ -118,6 +118,24 @@ def test_next_camera_forgets_the_previous_camera_report(tmp_path, monkeypatch):
     assert session._last_gopro_result is None
 
 
+def test_next_camera_clears_the_previous_run_from_the_status(tmp_path, monkeypatch):
+    session = _offline_session(tmp_path, monkeypatch, {"ok": True})
+    session._set_status(
+        run_id="cam1_x",
+        captures=40,
+        results=[{"model": "fisheye"}],
+        summary_path="x.json",
+        rejected_points=[{"x": 0.5, "y": 0.5}],
+    )
+    status = session.next_camera()
+    assert status["run_id"] is None
+    assert status["captures"] == 0
+    assert status["results"] is None
+    assert status["summary_path"] is None
+    assert status["rejected_points"] == []
+    assert status["coverage"]["count"] == 0
+
+
 def test_stop_keeps_the_camera_report_for_a_later_solve(tmp_path, monkeypatch):
     # Stop then Solve is a normal flow; the summary must still say what the camera applied.
     report = {"ok": True}
