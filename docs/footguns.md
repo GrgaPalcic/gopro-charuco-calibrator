@@ -48,7 +48,9 @@ exactly like "this lens cannot be calibrated", and most of them are not. Terms a
 - **Cause:** the Max Lens Mod preset sets setting 189 = 2 (Max Lens 2.0) since 06-16. The June
   reference capture (0.617 px) was taken without it. Whether telling the camera the mod is fitted
   changes the webcam image is not known.
-- **Fix:** calibrate with 189 set the same way it was when your data was recorded. The pending
+- **Fix:** calibrate with 189 set the same way it was when your data was recorded. The camera
+  keeps the setting between sessions; the **Mod** chip shows its current value, and the app writes
+  it only when a preset or **Recording settings → Lens mod** asks for a value. The pending
   comparison in [measurements.md](measurements.md#pending-video-vs-webcam-comparison) tests both
   ways.
 

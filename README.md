@@ -72,6 +72,13 @@ mod fitted, USB webcam Wide, 1080p.
 5. **A good result** is `double_sphere` at about 0.6–1.1 px with alpha clearly below 1.0. alpha at
    its limit means the board missed the edge: Resume, add edge views, solve again.
 
+The preset tells the camera the mod is fitted (setting 189 = Max Lens 2.0). The June reference
+calibration was captured without the app setting that, and whether it changes the webcam image is
+untested. Calibrate with the camera's lens-mod setting as it was when your data was recorded: the
+**Mod** chip shows the current value. The camera keeps the setting, and the app writes it only
+when **Lens mod** under **Recording settings** is set
+([details](docs/footguns.md#setting-189-changes-the-conditions-maybe-the-image)).
+
 Calibrate every camera and mod pair separately, and again after refitting a mod. To compare two
 Double Sphere results, project rays through both; the focal lengths alone can differ by over 50 px at
 the same error ([why](docs/footguns.md#double-sphere-parameters-are-not-unique)). A Double Sphere
@@ -100,11 +107,11 @@ presets of the same name.
 |---|---|---|
 | Linear | ~90° | `plumb_bob` / `rational_polynomial` (ROS camera_info) |
 | Wide | ~123–130° | `fisheye` (Kannala–Brandt, ROS `equidistant`) |
-| Wide with the Max Lens Mod | ~167° | `double_sphere` (OpenICC) |
+| Wide with the Max Lens Mod | ~167° lens | `double_sphere` (OpenICC) |
 | SuperView, HyperView, Max HyperView | — | none: anamorphic, never calibrate these |
 
 The live stream tops out at 1080p over USB, Wi-Fi and Labs RTMP alike. 4K exists only in
-on-camera recordings, and intrinsics from a recording don't carry over to the webcam stream.
+on-camera recordings, and intrinsics from a recording shouldn't be reused on the webcam stream.
 The full picture, including Labs firmware and HDMI capture, is in
 [lens-modes-and-models.md](docs/lens-modes-and-models.md).
 
