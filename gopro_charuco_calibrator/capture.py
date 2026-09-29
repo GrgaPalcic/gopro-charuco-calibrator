@@ -215,11 +215,14 @@ class CaptureSession:
         return self.status()
 
     def resume(self) -> dict[str, Any]:
-        if self.output_dir is not None:
+        # Resuming needs a live stream: after Stop there is nothing to capture from.
+        if self.output_dir is not None and self.preview_open():
             self._capture_enabled = True
             self._paused = False
             self._state = "capturing"
             self._set_status(state="capturing", message="capture resumed")
+        elif self.output_dir is not None:
+            self._set_status(message="open the preview before resuming this run")
         return self.status()
 
     def next_camera(self, config: AppConfig | None = None) -> dict[str, Any]:
@@ -302,9 +305,16 @@ class CaptureSession:
         with self._frame_cond:
             return self._latest_jpeg, self._jpeg_seq
 
+    def preview_open(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
     def status(self) -> dict[str, Any]:
         with self._lock:
-            return dict(self._status)
+            status = dict(self._status)
+        # The state names describe the run; whether the camera is still streaming
+        # is separate (Stop then Solve leaves a solved run with no preview).
+        status["preview_open"] = self.preview_open()
+        return status
 
     def solve(self) -> dict[str, Any]:
         if self.frames_dir is None or self.output_dir is None:
@@ -323,11 +333,12 @@ class CaptureSession:
                 coverage_targets=self.config.coverage_targets,
             )
         except Exception as exc:
-            # Never leave the session stuck in "solving": park it paused on the
-            # same run, so the operator can Resume to add views or Solve again.
-            self._paused = True
-            self._state = "paused"
-            self._set_status(state="paused", message=f"solve failed: {exc}")
+            # Never leave the session stuck in "solving". With the camera still
+            # streaming, park it paused on the same run so the operator can Resume
+            # to add views or Solve again; after Stop, go back to idle.
+            self._state = "paused" if self.preview_open() else "idle"
+            self._paused = self._state == "paused"
+            self._set_status(state=self._state, message=f"solve failed: {exc}")
             raise
         summary["gopro"] = self._last_gopro_result
         summary["video_bridge"] = self._last_bridge_result
@@ -377,6 +388,7 @@ class CaptureSession:
             "message": message,
             "captures": self._capture_count,
             "target_samples": self.config.capture.target_samples,
+            "max_samples": self.config.capture.max_samples,
             "coverage": coverage_summary(self._captured_poses, self.config.coverage_targets),
             "guide": guide_status([], None, self.config.coverage_targets),
             "latest_detection_url": "/api/session/latest.jpg",

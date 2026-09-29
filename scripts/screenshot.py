@@ -207,6 +207,8 @@ def base_status(config, state, message, gopro):
         "message": message,
         "captures": 0,
         "target_samples": config.capture.target_samples,
+        "max_samples": config.capture.max_samples,
+        "preview_open": state != "idle",
         "coverage": coverage_summary([], config.coverage_targets),
         "guide": guide_status([], None, config.coverage_targets),
         "gopro": gopro,

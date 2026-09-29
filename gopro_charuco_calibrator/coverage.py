@@ -85,6 +85,7 @@ def coverage_summary(
             "size": dict(empty_axis),
             "skew": {"max": 0.0, "target": targets.skew_max, "progress": 0.0, "hit": False},
             "points": [],
+            "targets": targets.model_dump(),
         }
 
     matrix = np.asarray([pose.as_list() for pose in poses], dtype=np.float64)
@@ -111,5 +112,6 @@ def coverage_summary(
             "progress": skew_progress,
             "hit": bool(skew_max >= targets.skew_max),
         },
+        "targets": targets.model_dump(),
         "points": [pose.as_dict() for pose in poses],
     }

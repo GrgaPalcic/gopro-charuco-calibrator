@@ -25,7 +25,6 @@
 
   --radius: 6px;
   --gap: 16px;
-  --focus: 0 0 0 2px var(--bench), 0 0 0 4px var(--signal);
 
   font-family: var(--font-ui);
   font-size: 15px;
@@ -67,12 +66,27 @@ code,
 }
 
 :focus-visible {
-  outline: none;
-  box-shadow: var(--focus);
+  /* An outline, not a box-shadow: forced-colors (high contrast) mode drops shadows. */
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  * {
+  *,
+  *::before,
+  *::after {
     transition: none !important;
     animation: none !important;
   }
@@ -217,8 +231,20 @@ h1 {
 .steps {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.step-list {
+  display: flex;
+  flex-wrap: wrap;
   align-items: stretch;
   gap: 8px;
+  flex: 1 1 660px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .step {
@@ -660,6 +686,7 @@ input[type="number"] {
 
 /* Toggle switch */
 .switch {
+  position: relative;
   flex-direction: row;
   align-items: center;
   gap: 10px;
@@ -669,8 +696,13 @@ input[type="number"] {
 
 .switch input {
   position: absolute;
+  top: 0;
+  left: 0;
   width: 1px;
   height: 1px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
   opacity: 0;
 }
 
@@ -706,7 +738,8 @@ input[type="number"] {
 }
 
 .switch input:focus-visible + .track {
-  box-shadow: var(--focus);
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
 }
 
 /* Disclosures */
@@ -714,6 +747,10 @@ details.disclosure {
   border: 1px solid var(--rule);
   border-radius: var(--radius);
   background: var(--panel-2);
+}
+
+details.disclosure[hidden] {
+  display: none;
 }
 
 details.disclosure > summary {

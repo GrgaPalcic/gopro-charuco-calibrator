@@ -55,7 +55,7 @@ def test_discarded_points_handles_empty():
     assert _discarded_points({}) == []
 
 
-def test_failed_solve_parks_the_run_instead_of_sticking_in_solving(tmp_path, monkeypatch):
+def test_failed_solve_after_stop_returns_to_idle(tmp_path, monkeypatch):
     session = CaptureSession(runs_dir=tmp_path)
     session.output_dir = tmp_path / "run"
     session.frames_dir = session.output_dir / "frames"
@@ -68,8 +68,36 @@ def test_failed_solve_parks_the_run_instead_of_sticking_in_solving(tmp_path, mon
     with pytest.raises(RuntimeError, match="no usable frames"):
         session.solve()
     status = session.status()
-    assert status["state"] == "paused"
+    # No preview is streaming (as after Stop), so there is nothing to pause on.
+    assert status["state"] == "idle"
+    assert status["preview_open"] is False
     assert "solve failed: no usable frames" in status["message"]
+
+
+def test_failed_solve_with_a_live_preview_parks_the_run_paused(tmp_path, monkeypatch):
+    session = CaptureSession(runs_dir=tmp_path)
+    session.output_dir = tmp_path / "run"
+    session.frames_dir = session.output_dir / "frames"
+    session.frames_dir.mkdir(parents=True)
+    monkeypatch.setattr(session, "preview_open", lambda: True)
+
+    def broken_solve(**_kwargs):
+        raise RuntimeError("no usable frames")
+
+    monkeypatch.setattr(capture, "solve_from_frames", broken_solve)
+    with pytest.raises(RuntimeError):
+        session.solve()
+    assert session.status()["state"] == "paused"
+
+
+def test_resume_after_stop_does_not_pretend_to_capture(tmp_path):
+    session = CaptureSession(runs_dir=tmp_path)
+    session.output_dir = tmp_path / "run"
+    session._state = "solved"
+    session._set_status(state="solved")
+    status = session.resume()
+    assert status["state"] == "solved"
+    assert "open the preview" in status["message"]
 
 
 def _offline_session(tmp_path, monkeypatch, report):

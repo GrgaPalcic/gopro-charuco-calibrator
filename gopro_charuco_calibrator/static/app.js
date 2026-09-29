@@ -86,6 +86,7 @@ let firewallDismissed = false;
 let lastFirewallCmd = "";
 let autoSolved = false;
 let currentState = "idle";
+let currentLive = false;
 let lastStatus = null;
 // The empty-preview copy, restored once an error message has replaced it.
 const previewEmptyHTML = previewEmpty.innerHTML;
@@ -197,6 +198,10 @@ function syncGoproVisibility() {
   const enabled = form.elements["gopro.enabled"];
   if (!enabled) return;
   if (goproControls) goproControls.hidden = !enabled.checked;
+  for (const id of ["connectionDetails", "recordingDetails"]) {
+    const el = document.getElementById(id);
+    if (el) el.hidden = !enabled.checked; // GoPro-only settings
+  }
   // Device and pixel format matter only for a plain camera: show them then.
   if (deviceDetails && !enabled.checked) deviceDetails.open = true;
 }
@@ -238,6 +243,14 @@ function num(value, digits = 2) {
 
 // ---- Stream ----
 
+// Whether the camera is streaming. The state names describe the run, and a run
+// can be solved after Stop, so the server reports this separately.
+function isLive(status) {
+  const state = status.state || "idle";
+  if (state === "error") return false;
+  return status.preview_open ?? state !== "idle";
+}
+
 function setStreamStatus(state, text) {
   // Both this and the readout are live regions: touch them only on a change,
   // or a screen reader re-announces them on every poll.
@@ -275,9 +288,8 @@ function startFallback() {
   }, 500);
 }
 
-function syncStream(state) {
-  const previewOpen = !["idle", "error"].includes(state);
-  if (previewOpen) startStream();
+function syncStream(live) {
+  if (live) startStream();
   else stopStream();
 }
 
@@ -304,6 +316,10 @@ function renderFirewall(bridge, fwCmd) {
     firewallPanel.hidden = true;
     return;
   }
+  // role="alert": rewriting it on every poll would make screen readers repeat it.
+  const signature = JSON.stringify(bridge) + fwCmd;
+  if (!firewallPanel.hidden && firewallPanel.dataset.signature === signature) return;
+  firewallPanel.dataset.signature = signature;
   firewallPanel.hidden = false;
   firewallHint.textContent =
     bridge.firewall_hint ||
@@ -344,7 +360,9 @@ function renderReadout(gopro, live) {
   const autoSetup = form.elements["gopro.enabled"]?.checked
     && form.elements["gopro.apply_on_preview"]?.checked;
   const labels = gopro?.camera_state?.labels;
-  if (live && labels && Object.keys(labels).length) {
+  if (gopro?.enabled && gopro.ok === false) {
+    chips.push(chip("GoPro setup failed: details at the bottom of the page", {kind: "warn"}));
+  } else if (live && labels && Object.keys(labels).length) {
     for (const [field, label] of Object.entries(labels)) {
       chips.push(chip(label, {key: READOUT_KEYS[field] || field}));
     }
@@ -366,24 +384,30 @@ function renderReadout(gopro, live) {
 
 // ---- Steps ----
 
-function stepStates(state, captures, minFrames) {
-  const live = !["idle", "error"].includes(state);
-  const capturing = ["capturing", "paused"].includes(state);
+function stepStates(state, live, captures, minFrames) {
   const captured = ["complete", "solving", "solved"].includes(state);
-  let connect = live ? "done" : "current";
+  // Stopped with enough views: Solve is the next step, not reconnecting.
+  const solvable = !live && !captured && state !== "error" && captures >= minFrames;
+  const connect = live ? "done" : solvable ? "pending" : "current";
   let capture = "pending";
+  if (captured) capture = "done";
+  else if (live) capture = "current";
   let solve = "pending";
-  if (live) capture = captured ? "done" : "current";
   if (state === "solved") solve = "done";
   else if (state === "solving" || state === "complete") solve = "current";
-  else if (capturing && captures >= minFrames) solve = "current";
-  if (state === "error") connect = "current";
+  else if (solvable) solve = "current";
   return {connect, capture, solve};
 }
 
-function renderSteps(state, captures, minFrames) {
-  for (const [name, value] of Object.entries(stepStates(state, captures, minFrames))) {
-    steps[name].dataset.stepState = value;
+const STEP_NOTE = {current: ", current step", done: ", done", pending: ""};
+
+function renderSteps(states) {
+  for (const [name, value] of Object.entries(states)) {
+    const step = steps[name];
+    step.dataset.stepState = value;
+    if (value === "current") step.setAttribute("aria-current", "step");
+    else step.removeAttribute("aria-current");
+    step.querySelector("[data-step-note]").textContent = STEP_NOTE[value] || "";
   }
 }
 
@@ -416,7 +440,15 @@ function updateBars(coverage) {
 // The coverage map is the image field itself (same aspect as the stream).
 // Each captured view is drawn as its board footprint, so it is obvious whether
 // the board reached the edges, which is what decides wide-lens model quality.
-function drawCoverageMap(points, rejected, imageSize) {
+const DEFAULT_TARGETS = {x_min: 0.2, x_max: 0.8, y_min: 0.2, y_max: 0.8};
+
+// The box the board centre must reach, from the run's coverage targets.
+function targetBox(coverage) {
+  const t = {...DEFAULT_TARGETS, ...(coverage?.targets || {})};
+  return {x: t.x_min, y: t.y_min, w: t.x_max - t.x_min, h: t.y_max - t.y_min};
+}
+
+function drawCoverageMap(points, rejected, imageSize, target = targetBox(null)) {
   const {ctx, cssW, cssH} = fitCanvas(scatter);
   const [natW, natH] = imageSize?.length === 2 ? imageSize : [16, 9];
   const scale = Math.min(cssW / natW, cssH / natH);
@@ -442,11 +474,11 @@ function drawCoverageMap(points, rejected, imageSize) {
   ctx.strokeStyle = COLOR.frame;
   ctx.strokeRect(ox + 0.5, oy + 0.5, w - 1, h - 1);
 
-  // The spread the capture route asks for (0.2 to 0.8 of the frame).
+  // The spread the coverage targets ask for.
   ctx.setLineDash([6, 5]);
   ctx.strokeStyle = COLOR.signalSoft;
   ctx.lineWidth = 1.5;
-  ctx.strokeRect(px(0.2), py(0.2), 0.6 * w, 0.6 * h);
+  ctx.strokeRect(px(target.x), py(target.y), target.w * w, target.h * h);
   ctx.setLineDash([]);
 
   function footprint(point) {
@@ -506,16 +538,19 @@ function drawGuideOverlay(status) {
   ctx.strokeStyle = COLOR.signal;
   ctx.globalAlpha = 0.9;
   ctx.lineWidth = 3;
+  const target = targetBox(status.coverage);
+  const midX = target.x + target.w / 2;
+  const midY = target.y + target.h / 2;
   ctx.setLineDash([14, 10]);
-  ctx.strokeRect(px(0.2), py(0.2), imageW * 0.6, imageH * 0.6);
+  ctx.strokeRect(px(target.x), py(target.y), imageW * target.w, imageH * target.h);
   ctx.setLineDash([]);
   ctx.globalAlpha = 0.35;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(px(0.2), py(0.5));
-  ctx.lineTo(px(0.8), py(0.5));
-  ctx.moveTo(px(0.5), py(0.2));
-  ctx.lineTo(px(0.5), py(0.8));
+  ctx.moveTo(px(target.x), py(midY));
+  ctx.lineTo(px(target.x + target.w), py(midY));
+  ctx.moveTo(px(midX), py(target.y));
+  ctx.lineTo(px(midX), py(target.y + target.h));
   ctx.stroke();
   ctx.restore();
 
@@ -537,32 +572,49 @@ function drawGuideOverlay(status) {
   if (pose) dot(pose, COLOR.fail, 9);
 }
 
-function guideText(status) {
-  const guide = status.guide;
+function guideText(status, live) {
+  const guide = status.guide || {};
   const state = status.state || "idle";
-  if (state === "idle" || state === "error") return "Open preview to start.";
-  if (state === "preview") return "Start a new run, then move the board centre along the guide.";
+  const done = guide.complete_count || 0;
+  const total = guide.total_count || 0;
   if (state === "solving") return "Solving…";
   if (state === "solved") {
-    return "Solved. Check the result below; Resume to add views where the coverage map has gaps, then Solve again.";
+    return live
+      ? "Solved. Check the result below; Resume to add views where the coverage map has gaps, then Solve again."
+      : "Solved. Check the result below. Open preview to calibrate again.";
   }
-  if (guide?.complete) {
-    return `Route complete (${guide.complete_count}/${guide.total_count}). Check the result below; `
-      + "Resume to add or repeat poses, then Solve again.";
+  if (state === "error") return "Fix the problem on the status line, then Open preview again.";
+  if (!live) {
+    return (status.captures || 0) > 0 && status.run_id
+      ? `Preview stopped. Solve this run's ${status.captures} views, or Open preview to start again.`
+      : "Open preview to start.";
   }
+  if (state === "preview") return "Start a new run, then move the board centre along the guide.";
   if (state === "complete") {
-    return `Capture limit reached (${status.captures} views); route ${guide?.complete_count || 0}/`
-      + `${guide?.total_count || 0}. Check the result below; Resume to add views, then Solve again.`;
+    if (guide.complete) {
+      return `Route complete (${done}/${total}). Check the result below; `
+        + "Resume to add or repeat poses, then Solve again.";
+    }
+    return `Frame cap reached (${status.captures} views) with the route at ${done}/${total}. `
+      + "Solve with these views, or raise Frame cap under Capture and solver and start a new run.";
   }
-  const current = guide?.current;
-  if (!current) return "Move the board centre along the guide.";
-  const base = `Target ${guide.complete_count + 1}/${guide.total_count}: ${current.label}`;
-  if (state === "paused") return `Paused at ${base.toLowerCase()}. Resume to keep capturing.`;
-  if (current.live_match) return `${base}. Hold still.`;
+  const paused = state === "paused";
+  if (guide.complete) {
+    // Resumed after the route was done: free capture of extra views.
+    return paused
+      ? "Paused. Resume to add more views, then Solve again."
+      : "Adding extra views: fill the gaps in the coverage map, then Solve again.";
+  }
+  const current = guide.current;
+  if (!current) return paused ? "Paused. Resume to keep capturing." : "Move the board centre along the guide.";
+  const base = `target ${done + 1}/${total}, ${current.label}`;
+  if (paused) return `Paused at ${base}. Resume to keep capturing.`;
+  const Base = `Target ${done + 1}/${total}: ${current.label}`;
+  if (current.live_match) return `${Base}. Hold still.`;
   if ((current.skew || 0) > 0) {
-    return `${base}. Move to the point, then tilt the board until the box turns green.`;
+    return `${Base}. Move to the point, then tilt the board until the box locks on and turns green.`;
   }
-  return `${base}. Put the board centre on the highlighted point and match the box size.`;
+  return `${Base}. Put the board centre on the highlighted point and match the box size.`;
 }
 
 // ---- Results ----
@@ -646,7 +698,8 @@ function renderResults(modelResults, coverage, mode) {
   recFigures.replaceChildren();
   verdictReasons.replaceChildren();
   resultsRaw.textContent = JSON.stringify(modelResults, null, 2);
-  const failed = modelResults.filter((r) => r.ok === false);
+  const solvedOk = (r) => r && r.ok !== false && (r.median_view_error_px != null || r.rms != null);
+  const failed = modelResults.filter((r) => !solvedOk(r));
   const rec = pickRecommended(modelResults);
 
   if (!rec) {
@@ -677,8 +730,10 @@ function renderResults(modelResults, coverage, mode) {
   const pass = reasons.length === 0;
   verdictBox.className = `verdict ${pass ? "pass" : "retake"}`;
   verdictBadge.textContent = pass ? "PASS" : "RETAKE";
+  // Say only what was checked: coverage, plus worst view (cv2) or alpha (Double Sphere).
+  const checked = isDS ? "alpha is clear of its limit" : "no kept view is off by more than 2.5 px";
   verdictText.textContent = pass
-    ? `${rec.model}: coverage and error look good.`
+    ? `${rec.model}: coverage targets met and ${checked}.`
     : `${rec.model} solved. Another pass would improve it:`;
   for (const reason of reasons) {
     const li = document.createElement("li");
@@ -687,7 +742,7 @@ function renderResults(modelResults, coverage, mode) {
   }
 
   recFigures.append(
-    figure(isDS ? "Error (OpenICC)" : "Median error", `${num(isDS ? rec.rms : rec.median_view_error_px)} px`, true),
+    figure(isDS ? "Reprojection RMS (OpenICC)" : "Median error", `${num(isDS ? rec.rms : rec.median_view_error_px)} px`, true),
   );
   if (!isDS) {
     recFigures.append(
@@ -706,7 +761,8 @@ function renderResults(modelResults, coverage, mode) {
 
   const modeStr = modeSummary(mode);
   if (modeStr) gridRow("Captured in", `${modeStr}. Record your data in exactly this mode.`);
-  for (const other of modelResults.filter((r) => r !== rec && r.ok !== false)) {
+  const others = modelResults.filter((r) => r !== rec && solvedOk(r));
+  for (const other of others) {
     const error = other.model === "double_sphere"
       ? `${num(other.rms)} px (OpenICC)`
       : `median ${num(other.median_view_error_px)} px, worst ${num(other.worst_view_error_px)} px`;
@@ -717,6 +773,10 @@ function renderResults(modelResults, coverage, mode) {
   }
   if (rec.yaml) gridRow("Camera info YAML", rec.yaml, "mono");
   if (rec.json) gridRow("Intrinsics JSON", rec.json, "mono");
+  // ROS camera_info exists only for the cv2 models, so list those files too.
+  for (const other of others.filter((r) => r.yaml)) {
+    gridRow(`Camera info YAML (${other.model})`, other.yaml, "mono");
+  }
   if (isDS) gridRow("Note", "Compare Double Sphere models by projecting rays, not by focal length: f, xi and alpha trade off.");
 }
 
@@ -744,28 +804,33 @@ function updateStatus(status) {
   document.getElementById("coverageOverall").textContent = percent(status.coverage?.overall);
   document.getElementById("guideCount").textContent =
     `${status.guide?.complete_count || 0}/${status.guide?.total_count || 0}`;
-  guidePrompt.textContent = guideText(status);
-  updateBars(status.coverage || {});
-  drawCoverageMap(status.coverage?.points || [], status.rejected_points || [], status.image_size);
-  drawGuideOverlay(status);
   const capturing = state === "capturing";
   const paused = state === "paused";
   const solving = state === "solving";
-  const live = !["idle", "error"].includes(state);
+  const live = isLive(status);
+  guidePrompt.textContent = guideText(status, live);
+  updateBars(status.coverage || {});
+  drawCoverageMap(
+    status.coverage?.points || [], status.rejected_points || [], status.image_size, targetBox(status.coverage),
+  );
+  drawGuideOverlay(status);
   renderReadout(status.gopro, live);
-  renderSteps(state, captures, minFrames);
+  renderSteps(stepStates(state, live, captures, minFrames));
 
   currentState = state;
+  currentLive = live;
   const done = state === "complete" || state === "solved";
+  // At the frame cap, Resume would stop again on the next frame.
+  const atCap = status.max_samples != null && captures >= status.max_samples;
   previewBtn.disabled = live;                 // open only when nothing is live
   stopBtn.disabled = !live;                    // stop only when something is live
   startRunBtn.disabled = capturing || solving; // start/restart a run otherwise
   nextCameraBtn.disabled = !live || solving;   // switch only from a live session
   // Resume re-enables capturing from paused or after the route completed/solved,
   // so the operator can add or repeat poses on the same run.
-  pauseResumeBtn.disabled = !(capturing || paused || done);
-  pauseResumeBtn.textContent = paused || done ? "Resume" : "Pause";
-  pauseResumeBtn.setAttribute("aria-pressed", String(paused));
+  const resumeLabel = paused || done;
+  pauseResumeBtn.disabled = !live || !(capturing || paused || done) || (resumeLabel && atCap);
+  pauseResumeBtn.textContent = resumeLabel ? "Resume" : "Pause";
   captureBtn.disabled = !capturing;
   solveBtn.disabled = captures < minFrames || solving;
 
@@ -776,7 +841,7 @@ function updateStatus(status) {
     runSolve();
   }
 
-  syncStream(state);
+  syncStream(live);
   previewEmpty.hidden = live;
   if (state === "error") {
     previewEmpty.replaceChildren(Object.assign(document.createElement("p"), {
@@ -870,7 +935,7 @@ function act(label, fn) {
       await fn();
     } catch (err) {
       statusLine.textContent = `${name} failed: ${err.message || err}`;
-      syncStream(currentState);
+      syncStream(currentLive);
     }
   };
 }
@@ -935,6 +1000,12 @@ async function runSolve() {
 solveBtn.addEventListener("click", runSolve);
 
 nextCameraBtn.addEventListener("click", act("Next camera", async () => {
+  const captures = lastStatus?.captures || 0;
+  const unsolved = captures > 0 && !(lastStatus?.results || []).length;
+  if (unsolved && !confirm(
+    `Next camera ends this run. Its ${captures} views stay on disk but can then be solved only `
+    + "with the solve-frames command. Continue?",
+  )) return;
   // Cleanly stop the current camera and go idle; the operator swaps the camera,
   // edits the camera name if needed, then clicks Open preview for the new one.
   firewallDismissed = false;
@@ -954,10 +1025,12 @@ nextCameraBtn.addEventListener("click", act("Next camera", async () => {
 presetLoad.addEventListener("click", () => applyPreset(presetSelect.value));
 presetSave.addEventListener("click", savePreset);
 
-form.elements["gopro.enabled"].addEventListener("change", () => {
-  syncGoproVisibility();
-  if (lastStatus) updateStatus(lastStatus);
-});
+for (const name of ["gopro.enabled", "gopro.apply_on_preview"]) {
+  form.elements[name].addEventListener("change", () => {
+    syncGoproVisibility();
+    if (lastStatus) updateStatus(lastStatus); // the idle readout depends on both
+  });
+}
 form.addEventListener("input", (event) => {
   if (event.target.name?.startsWith("board.")) updateBoardSummary();
 });
@@ -981,13 +1054,17 @@ firewallDismiss.addEventListener("click", () => {
   firewallPanel.hidden = true;
 });
 
-// Canvases are sized to their CSS box; redraw them when the layout changes.
-window.addEventListener("resize", () => {
-  if (lastStatus) {
-    drawCoverageMap(lastStatus.coverage?.points || [], lastStatus.rejected_points || [], lastStatus.image_size);
-    drawGuideOverlay(lastStatus);
-  }
-});
+// Canvases are sized to their CSS box; redraw them whenever that box changes
+// (window resize, a scrollbar appearing, the results panel opening).
+function redrawCanvases() {
+  const status = lastStatus || {};
+  drawCoverageMap(
+    status.coverage?.points || [], status.rejected_points || [], status.image_size, targetBox(status.coverage),
+  );
+  if (lastStatus) drawGuideOverlay(lastStatus);
+}
+new ResizeObserver(redrawCanvases).observe(scatter);
+new ResizeObserver(redrawCanvases).observe(guideOverlay);
 
 async function init() {
   defaults = await api("/api/defaults");
@@ -996,7 +1073,7 @@ async function init() {
   statusLine.textContent = "Ready.";
   drawCoverageMap([], [], null);
   await poll();
-  if (lastStatus && !["idle", "error"].includes(lastStatus.state)) startPolling();
+  if (lastStatus && isLive(lastStatus)) startPolling();
 }
 
 init().catch((err) => {
