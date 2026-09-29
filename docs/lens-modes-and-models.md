@@ -105,6 +105,16 @@ Background, from the sources:
 OpenCV has no built-in Double Sphere. This app drives OpenICC for it; see
 [double-sphere-backend.md](double-sphere-backend.md).
 
+The app's **Model** dropdown maps onto these as follows:
+
+| Option | Solves | Use for |
+|---|---|---|
+| Double Sphere + Kannala–Brandt fisheye | `double_sphere`, `fisheye` | the Max Lens Mod (~167°); the fisheye row is for comparison and gives a ROS YAML |
+| Double Sphere only | `double_sphere` | the Max Lens Mod, when the fisheye row is not wanted |
+| Kannala–Brandt fisheye | `fisheye` | Wide (~130°) |
+| Pinhole | `plumb_bob`, `rational_polynomial` | Linear (~90°) |
+| Pinhole + Kannala–Brandt fisheye | all three cv2 models | comparing on a lens near the boundary, as the HERO11 preset does |
+
 ## Capture paths
 
 Always calibrate in the exact path, lens mode and resolution your data is recorded in, and deploy
@@ -112,7 +122,8 @@ in that same path. The same optics come out differently over each one.
 
 | Path | Resolution | Lens control | Verdict |
 |---|---|---|---|
-| **USB webcam** | **1080p max** (res 4 / 7 / 12) | Wide, Narrow, SuperView, Linear; no "Max" modes | What this app uses, and how the Ludis dataset was recorded. With the mod fitted, Wide gives a circular fisheye with black corners that Double Sphere calibrates at 0.617 px. It is also a live deploy path: the policy sees the same image it was trained on. |
+| **USB webcam** | **1080p max** (res 4 / 7 / 12) | Wide, Narrow, SuperView, Linear; no "Max" modes | What this app uses, and how the Ludis dataset was recorded. With the mod fitted, Wide gives a circular fisheye with black corners. Double Sphere fits it: 1.11 px in the app, 0.617 px with
+OpenICC's own extractor. It is also a live deploy path: the policy sees the same image it was trained on. |
 | Webcam over Wi-Fi | 1080p max | same as USB | The spec marks Wi-Fi webcam as not supported on HERO9, 10, 11 and 11 Mini. Same modes, so nothing is gained for calibration. The app drives USB only. |
 | On-camera recording (mp4) | 4K to 5.3K | all modes, incl. Max SuperView (setting 121 = 7), Max HyperView (11), Ultra HyperView (104) | Offline only, with the GPMF IMU in the file. Calibrated at 0.82 px (1080p coordinates; Max SuperView, 4K). |
 | HDMI via Media Mod → capture card | not verified for the GoPro; UMI's code requests 3840×2160@30 from a Cam Link 4K, otherwise 1920×1080@60 | the camera's current mode | UMI's live deployment path. It is a different image from the webcam stream, so it needs its own calibration and its own training data. See [umi-and-deployment.md](umi-and-deployment.md). |
@@ -128,7 +139,8 @@ in that same path. The same optics come out differently over each one.
 - **How the app starts the webcam.** When the camera answers the legacy gpWebcam API (the HERO11
   does), the app uses `/gp/gpWebcam/START` and sets the lens with `/gp/gpWebcam/SETTINGS?fov=`.
   Otherwise it uses the Open GoPro `/gopro/webcam/start?fov=`. Either way it requests the lens
-  through `fov=` and does not write setting 43 (webcam digital lens). Afterwards it reads settings
+  through `fov=` and does not write setting 43 (webcam digital lens); the UI's **Lens** field is
+  the one that reaches the camera, and the UI has no separate field for 43. Afterwards it reads settings
   43, 189 and 135 back over the Open GoPro API, when the camera offers one. It warns if 43 differs
   from the requested lens, or if 189 differs from the requested mod when a preset asks for one.
 - **`fov=` may be ignored.** Open GoPro #459, closed as WONTFIX, reports it. **inferred**: the issue
@@ -153,7 +165,9 @@ Still **unverified**:
 The June reference capture (0.617 px) was taken **without** setting 189. The Max Lens Mod preset
 has set it since 06-16. The planned side-by-side test in
 [measurements.md](measurements.md#pending-video-vs-webcam-comparison) covers both questions. Until
-then, calibrate with 189 set the same way it was when your data was recorded.
+then, calibrate with 189 set the way it was when your data was recorded. For the Ludis dataset
+that value is not known (see
+[footguns.md](footguns.md#setting-189-changes-the-conditions-maybe-the-image)).
 
 ## GoPro Labs firmware
 
@@ -161,13 +175,15 @@ Labs adds no webcam resolution, lens or FOV command, so it cannot fix webcam `fo
 stream stops at 1080p. **verified** (Labs extensions and live-stream pages). What it does give:
 
 - **Max Shutter Angle:** a short shutter gives crisper board corners.
-- **QR-code settings:** the same custom configuration can be scanned into every camera.
+- **QR-code settings:** the same custom configuration can be scanned into every camera
+  (**assessed**: the core Labs feature, not tried on our cameras).
 - **Time and date QR, and GPS time sync,** for multi-camera recordings (see
   [umi-and-deployment.md](umi-and-deployment.md#multi-camera-sync)).
 - **`HDMI=1` (Media Mod):** switches HDMI output from Gallery to clean monitoring with no overlays.
-  In a QR command, extensions take the `oM` prefix, as in the Labs page's own example
-  `oMGAIN=12`, so this is `oMHDMI=1` (the June notes wrote `MHDMI=1`). A leading `*` makes it
-  persist across reboots.
+  In a QR command it is `oMHDMI=1` or `$HDMI=1` for the current power-on session, and
+  `!MHDMI=1` or `*HDMI=1` to store it permanently; the short `$` and `*` forms need a HERO10 or
+  newer. The June notes' `MHDMI=1` was most likely `!MHDMI=1` with the `!` lost. **verified**
+  2026-09-29 (Labs extensions page).
 - **`EXPQ` (fixed shutter) and `WBLK` (white-balance lock):** both apply to capture. Their effect on
   the webcam stream is unverified.
 

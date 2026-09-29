@@ -59,8 +59,8 @@ focal length.
 
 **Our live path is the USB webcam.** It is what the app captures and what the Ludis dataset was
 recorded from, so a robot reading the same webcam stream sees the same image the policy was
-trained on, with the same intrinsics. Timestamps come from one host clock, and the webcam
-calibrates at 0.6–1.1 px.
+trained on, with the same intrinsics. Timestamps come from one host clock. The webcam image
+calibrates at 1.11 px in the app (0.617 px with OpenICC's own extractor).
 
 **HDMI capture is UMI's path.** It is the robust option for a live feed: a stable latency, and no
 overlays once Labs clean HDMI is on. But it is a **different image** from the webcam stream. It
@@ -70,7 +70,7 @@ mix the two.
 | Piece | What it does | Without it |
 |---|---|---|
 | GoPro **Media Mod** | micro-HDMI output | no HDMI |
-| GoPro **Labs** firmware, extension `HDMI=1` (QR command `oMHDMI=1`; a leading `*` makes it persist) | clean output with no overlays | overlays and resets, unusable as a feed |
+| GoPro **Labs** firmware, extension `HDMI=1` (QR command `oMHDMI=1` for one session, `*HDMI=1` or `!MHDMI=1` to keep it) | clean output with no overlays | overlays and resets, unusable as a feed |
 | **UVC capture card** (Elgato HD60 X, or a cheap MS2109) | turns HDMI into `/dev/videoX` | the signal never reaches the computer |
 
 UMI's chain:

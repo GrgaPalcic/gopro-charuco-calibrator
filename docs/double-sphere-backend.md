@@ -66,9 +66,10 @@ it. Nothing is imported, linked or vendored, and each user builds the image them
 ## Reading a result
 
 - **Error.** OpenICC's own extractor reached 0.617 px on our webcam frames; the app reaches
-  1.11 px on the same frames. Below ~0.7 px is excellent and below ~1.2 px is fine for the app's
-  input. The gap is most likely the input: the app sends ArUco marker corners, which are less
-  precise than the ChArUco chessboard corners OpenICC's extractor uses (**inferred**).
+  1.11 px on the same frames. Those are the two reference points; the June reports called under
+  ~1 px usable, and there is no validated threshold beyond that. The gap is most likely the input:
+  the app sends ArUco marker corners, which are less precise than the ChArUco chessboard corners
+  OpenICC's extractor uses (**inferred**).
 - **alpha near 1.0** (its range is 0–1) means the board missed the edge of the circle. Capture more
   edge views. The app flags alpha ≥ 0.98.
 - **Don't compare f, xi or alpha between two solves.** They trade off: the same data has given f
@@ -110,6 +111,8 @@ a stock ChArUco board: IDs from 0, marker = ½ square, and the dictionary set by
   image. Keep the `openicc` image the app uses as it is.
 
 ```bash
+# needs `uv run gopro-charuco setup-openicc` to have fetched the source first
+rm -rf /tmp/openicc-extractor   # cp -r would nest into an existing copy, and the sed would miss
 cp -r ~/.cache/gopro-charuco-calibrator/openicc /tmp/openicc-extractor
 sed -i 's|FLAGS_checker_square_length_m / 2.0f|FLAGS_checker_square_length_m * (15.0f / 21.0f)|' \
   /tmp/openicc-extractor/applications/extract_board_to_json.cc
@@ -135,7 +138,8 @@ docker run --rm -v "$PWD":/data openicc-extractor bash -lc '
 OpenICC's 2 px view filter at a sane scale, but costs corner precision. The app instead detects at
 full resolution and only rescales coordinates.
 
-**From webcam frames** (`capture_###.jpg`), this gave the 0.617 px reference on 06-12. The extractor
+**From webcam frames** (`capture_###.jpg`), this gave the 0.617 px reference on 06-12; with the
+patched image the extractor found corners on every frame. The extractor
 reads a video, or a folder of `*.png` named by nanosecond timestamp. Hardlinking the JPGs works,
 because `cv::imread` decodes by content:
 
@@ -171,7 +175,8 @@ Instead of hardlinks you can assemble a video:
 uv run pytest tests/test_hero13_readiness.py -k double_sphere
 ```
 
-This renders 60 synthetic views through the 06-12 webcam intrinsics, solves them through the real
+This renders 60 synthetic views through the `tests/test_openicc.py` fixture intrinsics (consistent
+with the 06-12 webcam result), solves them through the real
 image, and checks the ray-to-pixel map (not f). It is skipped when the image is not built.
 
 `tests/test_openicc_integration.py` runs the same on real frames when `FRAMES_DIR` points at a run's

@@ -19,12 +19,12 @@ board were first solved with a **mirrored marker layout** (see
 
 | Dataset | Camera, lens mode | Frames | Board |
 |---|---|---|---|
-| `gopro13_umi_gripper_20260610_140106` | HERO13 + Max Lens Mod 2.0, USB webcam Wide, 1920×1080, setting 189 **not** set by the app | 108 `capture_###.jpg` | 4X4 |
+| `gopro13_umi_gripper_20260610_140106` | HERO13 + Max Lens Mod 2.0, USB webcam Wide, 1920×1080, setting 189 **not** set by the app (the camera's own value was not recorded) | 108 `capture_###.jpg` | 4X4 |
 | `GX010005.MP4` | HERO13 + Max Lens Mod 2.0, recording Max SuperView 167°, 4K 16:9, 24 fps, 89 s | video | 4X4 |
 | `gopro13_hyperview_20260610_113917` | **camera not recorded** (the name came from an old default); SuperView, 720p | run | 4X4 |
 | narrow Wide capture | **camera not recorded**; described as a flat or narrow Wide capture, possibly the HERO11 webcam stream, which looked flat | run | 5X5 |
 | HERO11 runs | HERO11, USB webcam Wide | runs | 5X5 |
-| synthetic (2026-09-29) | a Double Sphere camera with the 06-12 webcam intrinsics, 1920×1080, 60 random board poses, 0.15 px noise | 60 views | 5X5 geometry |
+| synthetic (2026-09-29) | a Double Sphere camera with the `tests/test_openicc.py` fixture intrinsics (consistent with the 06-12 webcam result; see the note on that row), 1920×1080, 60 random board poses, 0.15 px noise | 60 views | 5X5 geometry |
 
 Software:
 - **App:** opencv-contrib 4.13.0 in the app venv.
@@ -112,14 +112,17 @@ Lens Mod 2.0.
 - **Record** what the camera itself shows for every setting, including ISO, shutter and white
   balance where visible.
 
-| | Recording | Webcam, 189 not set | Webcam, 189 = 2 |
+| | Recording | Webcam, 189 = 0 (None) | Webcam, 189 = 2 |
 |---|---|---|---|
 | Lens | Max SuperView | Wide | Wide (preset `gopro13_umi_gripper_fisheye_1080p`) |
 | Resolution / fps | 4K 16:9 @ 24 | 1080p @ 30 | 1080p @ 30 |
 | Stabilisation | HyperSmooth **off**, horizon lock **off** | not applicable; check the stream is unwarped | same |
+| Setting 189 | as recorded; note it | set **Lens mod = None (0)** explicitly and confirm the **Mod** chip | the preset; confirm the **Mod** chip |
 
 The two webcam columns settle whether telling the camera the mod is fitted changes the webcam
-image. The June reference was captured without setting 189.
+image. Leaving Lens mod empty is **not** the same as 0: the app then leaves the camera's current
+value, which after a gripper-preset run is 2. The June reference was captured without the app
+setting 189, and the value the camera had then (0, 2 or 100 "Auto Detect") was not recorded.
 
 **Capture.** One 60–90 s video sweep: slow, full-field, covering edges, corners, near and far, and
 tilts. Then the same sweep through the app for each webcam column, targeting 60–100 captures.
@@ -138,7 +141,7 @@ Comparisons:
 4. **Sync rehearsal** for multi-camera recordings: the clap offset and drift (see
    [umi-and-deployment.md](umi-and-deployment.md#multi-camera-sync)).
 
-| Metric | Video 4K Max SuperView | Webcam, 189 not set | Webcam, 189 = 2 | Verdict |
+| Metric | Video 4K Max SuperView | Webcam, 189 = 0 | Webcam, 189 = 2 | Verdict |
 |---|---|---|---|---|
 | Field of view and crop | | | | |
 | Lens and mode metadata | | | | |

@@ -48,11 +48,19 @@ exactly like "this lens cannot be calibrated", and most of them are not. Terms a
 - **Cause:** the Max Lens Mod preset sets setting 189 = 2 (Max Lens 2.0) since 06-16. The June
   reference capture (0.617 px) was taken without it. Whether telling the camera the mod is fitted
   changes the webcam image is not known.
-- **Fix:** calibrate with 189 set the same way it was when your data was recorded. The camera
-  keeps the setting between sessions; the **Mod** chip shows its current value, and the app writes
-  it only when a preset or **Recording settings → Lens mod** asks for a value. The pending
-  comparison in [measurements.md](measurements.md#pending-video-vs-webcam-comparison) tests both
-  ways.
+- **Tell:** the **Mod** chip shows what the camera currently has. The app writes 189 only when a
+  preset or **Recording settings → Lens mod** asks for a value; otherwise it leaves the camera's
+  value alone. The camera most likely keeps the value across power cycles, as it does other
+  settings (**inferred**, not tested for 189).
+- **Fix:** calibrate with 189 set the way it was when your data was recorded.
+  - **For the Ludis dataset that value is unknown.** The dataset predates the read-back (added
+    2026-09-29), so its runs have no `reported_*` fields. A run's `config.json` shows only what was
+    requested (`gopro.max_lens_mod`).
+  - **How to find out:** ask whoever recorded it which preset they used and whether they changed
+    the camera's lens-mod menu, and look at the camera's own lens-mod setting. It is the recording
+    value only if nobody changed it since.
+  - The pending comparison in
+    [measurements.md](measurements.md#pending-video-vs-webcam-comparison) tests both ways.
 
 ### Stabilisation warps frames
 - **Symptom:** a solve that is unstable, or worse than it should be.

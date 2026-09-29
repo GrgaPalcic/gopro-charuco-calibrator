@@ -11,8 +11,9 @@ works one camera after another.
 
 ## Why
 
-Wide GoPro lenses break the usual calibration recipe. A pinhole model can't fit Wide, OpenCV's
-fisheye model can't fit the Max Lens Mod, and SuperView cannot be fitted by any model at all.
+Wide GoPro lenses break the usual calibration recipe. A pinhole model can't fit Wide. OpenCV's
+fisheye model only looks good on the Max Lens Mod because it keeps the centre views and drops the
+edge ones. SuperView cannot be fitted by any model at all.
 This tool:
 - **picks a model that fits your lens**, and solves the Max Lens Mod with Double Sphere through
   OpenICC;
@@ -64,19 +65,25 @@ mod fitted, USB webcam Wide, 1080p.
    uv run gopro-charuco serve --config gopro_charuco_calibrator/presets/gopro13_umi_gripper_fisheye_1080p.yaml
    ```
 3. **Before capturing, check:**
-   - the preview is a **round image with black corners**. An image that fills the frame means an
-     anamorphic mode, which cannot be calibrated;
+   - the preview is a **round image with black corners**. If it isn't, stop and check the Lens and
+     Mod chips before capturing: the mod may be off, the lens mode wrong, or the lens-mod setting
+     different from your data's (see below);
    - the readout shows **Lens Wide (0)** and **Mod Max Lens 2.0 (2)**, with no **Check** chip.
 4. **Capture,** pushing the board into the curved edge of the circle, near and far, with plenty
    of tilt.
-5. **A good result** is `double_sphere` at about 0.6–1.1 px with alpha clearly below 1.0. alpha at
-   its limit means the board missed the edge: Resume, add edge views, solve again.
+5. **Check the result.** The app has reached 1.11 px for `double_sphere` on these cameras
+   (OpenICC's own extractor reached 0.617 px on the same frames). alpha should sit clearly below
+   1.0. alpha at its limit means the board missed the edge: Resume, add edge views, solve again.
 
-The preset tells the camera the mod is fitted (setting 189 = Max Lens 2.0). The June reference
-calibration was captured without the app setting that, and whether it changes the webcam image is
-untested. Calibrate with the camera's lens-mod setting as it was when your data was recorded: the
-**Mod** chip shows the current value. The camera keeps the setting, and the app writes it only
-when **Lens mod** under **Recording settings** is set
+The preset tells the camera the mod is fitted (setting 189 = Max Lens 2.0). Two things are not
+known yet:
+- whether that changes the webcam image (the June reference calibration was captured without the
+  app setting it);
+- what 189 was when the Ludis dataset was recorded.
+
+The app writes 189 only when **Lens mod** under **Recording settings** has a value. Otherwise the
+camera keeps whatever it already has, and the **Mod** chip shows it. Calibrate with the lens-mod
+setting your data was recorded with
 ([details](docs/footguns.md#setting-189-changes-the-conditions-maybe-the-image)).
 
 Calibrate every camera and mod pair separately, and again after refitting a mod. To compare two
