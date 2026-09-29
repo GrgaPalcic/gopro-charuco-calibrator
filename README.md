@@ -37,6 +37,9 @@ uv run gopro-charuco serve --config gopro_charuco_calibrator/presets/gopro13_wid
 Open http://localhost:8765. The first `uv run` fetches Python 3.12 and every dependency. Nothing
 needs `sudo`, except possibly a one-time [firewall rule](#firewall).
 
+Calibrating a Max Lens Mod for UMI? Do step 1 of
+[that section](#hero13-with-the-max-lens-mod-20) (`setup-openicc`) first.
+
 Then work through the four steps across the top. The amber button is always the next thing to
 click, and a greyed-out button tells you why when you hover over it.
 
@@ -53,8 +56,8 @@ click, and a greyed-out button tells you why when you hover over it.
    each one is for. Its badge says:
    - **PASS:** the coverage targets are met and the recommended model looks sound;
    - **RETAKE:** click **Resume**, add the views it asks for, and solve again;
-   - **INCOMPLETE:** a model the setup asked for did not solve, for example because the OpenICC
-     image is not built; the result says how to fix it;
+   - **INCOMPLETE:** Double Sphere or the UMI file (Kannala–Brandt) did not solve, for example
+     because the OpenICC image is not built; the result says how to fix it;
    - **FAILED:** no model solved; the reasons are listed.
 
 For the next camera, click **Next camera** in step 4. It ends the run. Plug in the next GoPro, give
@@ -90,25 +93,30 @@ mod fitted, USB webcam Wide, 1080p.
      Resume, add edge views, solve again.
    - The **For UMI** row reads "Kannala–Brandt for UMI: matches Double Sphere within X px out to
      Y°". Y is the widest angle the board reached. If the two disagree by more than 1 px (at
-     1080p), the row carries a warning: solve again, and add views near the edge of the circle if
-     the gap stays.
+     1080p), the result turns RETAKE and lists the gap: click **Solve** again first, and add views
+     near the edge of the circle only if the gap stays. A warning about the aspect ratio only adds
+     a note under PASS ("See the note on the For UMI row").
    - For scale: on simulated Max Lens Mod views, where the true lens is known, both models landed
      within 0.5 px of it out to the widest angle the board reached
      ([measurements](docs/measurements.md#synthetic-max-lens-mod-through-openicc-2026-09-29)).
      On real webcam frames the only in-app Double Sphere result so far is 1.11 px RMS, made in June
      with the older unpatched solver.
-6. **Use the files.** For UMI, use `<camera>_kannala_brandt.json`. For UMI's ORB-SLAM3, merge
-   `<camera>_kannala_brandt_orbslam3.yaml` into your settings file, keeping its IMU block
-   ([how](docs/umi-and-deployment.md#loading-our-calibration-in-umi)). The Double Sphere JSON is
-   the reference fit for tools that take that model.
+6. **Use the files.** For UMI, use `<camera>_kannala_brandt.json`: UMI reads a fixed file name,
+   so copy it as `gopro_intrinsics_2_7k.json` into a calibration folder that also holds
+   `aruco_config.yaml`, and run `run_slam_pipeline.py -c <that folder>`. For UMI's ORB-SLAM3,
+   `<camera>_kannala_brandt_orbslam3.yaml` replaces the camera lines of UMI's own settings file,
+   `gopro10_maxlens_fisheye_setting_v1_720.yaml`, which sits inside UMI's SLAM Docker image
+   ([how, and what we have not checked](docs/umi-and-deployment.md#loading-our-calibration-in-umi)).
+   The Double Sphere JSON is the reference fit for tools that take that model.
 
 The Max Lens Mod preset sets setting 189 = Max Lens 2.0, which tells the camera the mod is fitted.
 Calibrate and record with the same preset
 ([details](docs/footguns.md#setting-189-tells-the-camera-the-mod-is-fitted)).
 
 Calibrate every camera and mod pair separately, and again after refitting a mod. To compare two
-Double Sphere results, project rays through both; the focal lengths alone can differ by over 50 px at
-the same error ([why](docs/footguns.md#double-sphere-parameters-are-not-unique)).
+Double Sphere results, project rays through both; the focal lengths alone can differ by nearly
+30 px at the same error, and by over 50 px with the old unpatched image
+([why](docs/footguns.md#double-sphere-parameters-are-not-unique)).
 
 ## Presets
 

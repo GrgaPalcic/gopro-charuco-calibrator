@@ -92,7 +92,7 @@ angle, 48 directions on each), with Kannala–Brandt evaluated as UMI loads it (
 views; this says whether it found the right lens, which only a synthetic test can.
 
 **Patched vs unpatched solver.** Solved on a workstation CPU on 2026-09-29, 5 runs of each
-model per scene with each image, one OpenICC run per model (4–27 s each), with a one-off script
+model per scene with each image, one OpenICC run per model (3–27 s each), with a one-off script
 over the test scenes. The patched image is `gopro-charuco-openicc:d75dda5-p1`, the unpatched one
 the old `openicc` build of the same commit.
 
@@ -100,12 +100,23 @@ the old `openicc` build of the same commit.
 |---|---|---|---|
 | Rim (90 views, reach 83.5°) | Double Sphere, out to the rim | 0.09–0.32 px | 0.91–4.24 px |
 | Rim | Kannala–Brandt, out to the rim | 0.11–0.32 px | 1.93–3.93 px |
-| Rim | Kannala–Brandt vs Double Sphere, as the **For UMI** row measures it | 0.13–0.28 px | 2.49–5.16 px |
+| Rim | Kannala–Brandt vs Double Sphere (the **For UMI** comparison, counted over every ray out to the reach) | 0.13–0.28 px | 2.49–5.16 px |
 | Base (60 views, reach 64.4°) | Double Sphere, out to 70° | 0.17–0.24 px | 0.64–0.79 px |
 | Base | Kannala–Brandt, out to the reach | 0.23–0.44 px | 0.60–0.81 px |
+| Base | Kannala–Brandt vs Double Sphere (the **For UMI** comparison, counted over every ray out to the reach) | 0.11–0.33 px | 0.28–0.69 px |
 
 The RMS hardly moves: 0.184–0.186 px patched, 0.185–0.201 px unpatched. OpenICC kept 46–53 views
-per solve. So a low RMS did not reveal the unpatched solver's error. What the patch changes is in
+per solve. So a low RMS did not reveal the unpatched solver's error, and on the base scene
+neither did the gap between the two models: unpatched, both were 0.6–0.8 px off the true lens,
+but they stayed within 0.28–0.69 px of each other, under the app's 1 px limit.
+
+The app's **For UMI** check counts only the rays that land on the sensor and compares with the
+Double Sphere it solved, not the true lens. A rerun on 2026-09-30 with the unpatched image
+computed the gap that way, 3 runs per scene, with a one-off script: rim 3.01, 3.36 and 3.03 px
+(all three warn; 3.01, 3.56 and 3.03 px over every ray), base 0.37, 0.34 and 2.79 px (one
+warns). So with the old image the row warned mostly when the board reached the rim.
+
+What the patch changes is in
 [double-sphere-backend.md](double-sphere-backend.md#the-source-patch).
 
 **Kannala–Brandt over 13 patched runs** (these 5, plus 8 more from the test runs that day):
@@ -120,8 +131,7 @@ board reached.** It has not been measured on real frames yet.
 
 The Docker tests in `tests/test_hero13_readiness.py` assert these bounds with margin: under 1 px
 for both models on both scenes (Double Sphere on the base scene out to 70°, the others out to the
-reach), and for Kannala–Brandt on the base scene under 2 px out to 70°. The **For UMI** check on real runs counts only rays that land on
-the sensor; the figures above count every ray out to the angle.
+reach), and for Kannala–Brandt on the base scene under 2 px out to 70°.
 
 **Double Sphere parameters still spread with the patch.** Five patched runs on the base scene
 (2026-09-30): f 597.6–625.5 px (true 629.19), xi −0.049 to −0.004, alpha 0.687–0.706, at 0.185 px
@@ -170,7 +180,7 @@ Comparisons:
    crop, field of view, black corners and sharpness. Extract the video frame with
    `ffmpeg -i GX*.MP4 -vf "select=eq(n\,100)" -vframes 1 video.png`.
 2. **Metadata.** Run `exiftool -a -G1 GX*.MP4 | grep -iE "lens|fov|field|projection|stab"` and read
-   the GPMF stream (`exiftool -ee`); the HERO13 records lens and mode metadata. Compare with each
+   the GPMF stream (`exiftool -ee`); the HERO13 records lens and mode metadata. Compare with
    the webcam run's `acquisition_mode`, including the `reported_*` fields.
 3. **Solvers.** Run plumb_bob, fisheye, double_sphere and kannala_brandt on both. Compare RMS,
    views kept and alpha. Compare the models by projecting the same rays through each, after scaling pixels by the

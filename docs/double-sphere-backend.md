@@ -72,7 +72,7 @@ The patch touches only `calibrate_camera`. The app never uses OpenICC's board ex
    - run once more if `calibrate_camera` crashes (it segfaulted once in about 165 runs on
      2026-09-29, in the `FISHEYE` start-up, and the same input solved on every other run).
 
-   One solve takes 4–20 s per model on synthetic 1080p views (workstation CPU, 2026-09-29).
+   One solve takes about 4–20 s per model on synthetic 1080p views (workstation CPU, 2026-09-29).
 3. **It scales coordinates, not images.** Inputs taller than 1080 px are divided down for the solve,
    because OpenICC drops views at an absolute ~2 px. Focal length, principal point and error are
    scaled back afterwards; xi, alpha and k1–k4 have no scale and stay as they are.
@@ -91,8 +91,9 @@ The patch touches only `calibrate_camera`. The app never uses OpenICC's board ex
      says to merge it into an existing settings file, whose IMU block is not calibrated here;
    - `calibrate_camera.log` in each model's folder, with the full command and output.
 5. **Every failure becomes a result row.** No Docker, image not built, no permission, timeout, no
-   convergence, or fewer than 10 usable views: each one gives a failed row for that model, whose
-   message names the model and the fix. The other models still solve.
+   convergence, or fewer than 10 usable views: each one gives a failed row labelled with that
+   model. The message says what went wrong and, for setup problems, the fix. The other models
+   still solve.
 
 The UI shows the camera matrix `[[f, skew, cx], [0, f·aspect, cy], [0, 0, 1]]` and "distortion"
 `[xi, alpha]` for Double Sphere, or `[k1, k2, k3, k4]` for Kannala–Brandt.
@@ -131,12 +132,18 @@ it. Nothing is imported, linked or vendored, and each user builds the image them
     angle, counting only rays that land on the sensor, with Kannala–Brandt evaluated as UMI loads
     it (fy = fx);
   - above 1 px (at 1080p; the limit scales with the image height), both rows get a warning to
-    solve again. The reference is Double Sphere as solved, not the true lens, so either one can
-    be the one that is off;
-  - an `aspect_ratio` more than 0.5 % from 1 gets a warning too, because UMI drops it.
+    solve again. Double Sphere is the recommended model, so its warning turns the result RETAKE.
+    Click **Solve** again first; add views near the edge of the circle only if the gap stays.
+    The reference is Double Sphere as solved, not the true lens, so either one can be the one
+    that is off;
+  - an `aspect_ratio` more than 0.5 % from 1 gets a note on the For UMI row only,
+    because UMI drops it. A PASS then says "See the note on the For UMI row".
 
-  On synthetic views the gap was 0.13–0.28 px with the patched solver and 2.5–5.2 px unpatched
-  (rim scene, 5 runs each, 2026-09-29).
+  On synthetic views, the For UMI comparison counted over every ray out to the reach (not only
+  the rays on the sensor) was 0.13–0.28 px with the patched solver and 2.5–5.2 px unpatched (rim
+  scene, 5 runs each, 2026-09-29). Without rim views the unpatched gap stayed under 1 px even
+  though both models were off, so no warning does not rule out the old image (see
+  [measurements.md](measurements.md#synthetic-max-lens-mod-through-openicc-2026-09-29)).
 
 ## On-camera recordings
 

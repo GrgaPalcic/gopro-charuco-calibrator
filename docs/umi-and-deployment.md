@@ -50,6 +50,14 @@ detections as Double Sphere, and writes two files for UMI:
   `solve_downsample_factor` field that UMI ignores. **verified** by a test that runs a copy of
   UMI's loader on our file, and by a test that `cv2.fisheye.projectPoints` agrees with the app's
   own Kannala–Brandt projection.
+- **UMI finds the file by a fixed name.** `run_slam_pipeline.py` reads
+  `<calibration_dir>/gopro_intrinsics_2_7k.json` and `aruco_config.yaml` next to it, from the
+  folder given by `-c` (default `example/calibration`), and passes the json to
+  `scripts_slam_pipeline/04_detect_aruco.py` as `--camera_intrinsics`. So copy our file as
+  `gopro_intrinsics_2_7k.json` into a calibration folder that also holds your
+  `aruco_config.yaml`, and run `run_slam_pipeline.py -c <that folder>`. Under any other name the
+  pipeline stops on a missing file, or, without `-c`, keeps using UMI's HERO9 file. **verified**
+  from UMI's code on 2026-09-30, not from a run.
 - **`aspect_ratio` is ignored.** UMI reads `focal_length` for both fx and fy. The app therefore
   evaluates the KB model with fy = fx in its checks, and warns when the solved aspect ratio is more
   than 0.5 % from 1.
@@ -59,9 +67,25 @@ detections as Double Sphere, and writes two files for UMI:
   conversion a no-op.
 - **`<camera>_kannala_brandt_orbslam3.yaml` is only the camera block.** It holds
   `Camera.type: "KannalaBrandt8"`, `Camera1.fx/fy/cx/cy`, `Camera1.k1`–`k4`, width, height and fps,
-  with fx = fy. Merge it into your existing ORB-SLAM3 settings file in place of its camera lines,
-  and keep that file's IMU block, which this app does not calibrate. How you get the edited file
-  into UMI's SLAM container depends on your setup; we have not run UMI's SLAM with it yet.
+  with fx = fy, in the same key names UMI's file uses. What UMI's SLAM needs around it, **verified**
+  from UMI's and `cheng-chi/ORB_SLAM3`'s code on 2026-09-30:
+  - **The file to edit.** UMI's only settings file is inside the `chicheng/orb_slam3` Docker image,
+    at `/ORB_SLAM3/Examples/Monocular-Inertial/gopro10_maxlens_fisheye_setting_v1_720.yaml`. Its
+    path is written into `scripts_slam_pipeline/02_create_map.py` and
+    `scripts_slam_pipeline/03_batch_slam.py` as `--setting`. To use our block, put it in place of
+    that file's camera lines, mount the edited file into the container, and change the path in
+    those two scripts.
+  - **The block's size sets SLAM's frame size.** UMI's `gopro_slam.cc` resizes every frame to
+    `Camera.width` × `Camera.height`. UMI's file is 960×720; our block is 1920×1080, so SLAM
+    runs on full-size frames. To keep a smaller size, scale fx, fy, cx and cy by the same factor
+    as the width and height; k1–k4 stay as they are.
+  - **The IMU block is not ours.** Its `IMU.T_b_c1` and noise values were calibrated with OpenICC
+    for UMI's HERO10. Whether they fit a HERO13 is not known (**inferred** that they need their own
+    calibration), and this app does not calibrate them.
+  - **The IMU track.** UMI's SLAM is inertial and reads the IMU from the GPMF track of on-camera
+    mp4 recordings. Whether a webcam-stream recording can supply it has not been checked.
+
+  We have not run UMI's SLAM with our files yet.
 
 **How well Kannala–Brandt holds at 167°.** On synthetic Max Lens Mod views, OpenICC's KB (with the
 [patched solver](double-sphere-backend.md#the-source-patch)) landed within 0.49 px of the true
@@ -72,9 +96,12 @@ been solved on real frames yet. So sweep the board right into the edge of the ci
 
 **The For UMI row** in the result checks each real solve: "Kannala–Brandt for UMI: matches Double
 Sphere within X px out to Y°", where Y is the widest angle the board reached and only rays that
-land on the sensor count. Over 1 px at 1080p, it warns: solve again, and add edge views if the gap
-stays. The comparison is with Double Sphere as solved, not the true lens, so either can be the one
-that is off.
+land on the sensor count. Over 1 px at 1080p, it warns, and because the warning also goes on
+Double Sphere, the recommended model, the result turns RETAKE. Click **Solve** again first, and add
+views near the edge of the circle only if the gap stays. The comparison is with Double Sphere as
+solved, not the true lens, so either can be the one that is off. With the old unpatched image the
+row did not always warn (see
+[footguns.md](footguns.md#an-old-openicc-image-is-off-at-a-good-rms)).
 
 OpenCV's own Kannala–Brandt (`fisheye`) is not a substitute for the UMI file. It solved the webcam
 frames at 1.19 px only over centre-weighted views, failed on the 4K recording once edge views were

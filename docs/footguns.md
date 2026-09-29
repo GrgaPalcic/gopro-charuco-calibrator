@@ -52,7 +52,11 @@ exactly like "this lens cannot be calibrated", and most of them are not. Terms a
   camera's value alone. The camera most likely keeps the value across power cycles, as it does
   other settings (**inferred**, not tested for 189).
 - **Fix:** calibrate and record with the same preset. The **Mod** chip shows what the camera has,
-  and the run's `config.json` records it as `reported_max_lens_mod`.
+  and the run's `config.json` records it as `reported_max_lens_mod`. A preset or setting you
+  choose while the preview is live reaches the camera when you click **Start new run**, so the
+  chip can differ until then. If it is still wrong after that, the camera did not take the
+  setting: click **Stop**, then **Open preview** again, and check the lens mod setting in the
+  camera's own menu (**inferred**, not tried).
 
 ### Stabilisation warps frames
 - **Symptom:** a solve that is unstable, or worse than it should be.
@@ -135,7 +139,7 @@ This was the most expensive bug. It made a good lens look impossible for days.
 - **Cause:** its frame selection kept ~50 centre-weighted views and dropped the edge ones. The
   far periphery, which is exactly where UMI's side mirrors sit, is then unchecked. On the 4K
   recording, with edge views included, it fails outright. The model itself is not the problem:
-  OpenICC's Kannala–Brandt (`kannala_brandt`), solved on every view, landed within 0.5 px of the
+  OpenICC's Kannala–Brandt (`kannala_brandt`), given every view, landed within 0.5 px of the
   true lens out to the board's reach on synthetic Max Lens Mod views (patched solver, see
   [measurements.md](measurements.md#synthetic-max-lens-mod-through-openicc-2026-09-29)).
 - **Fix:** Double Sphere is the reference model for the Max Lens Mod. The app recommends
@@ -177,16 +181,19 @@ This was the most expensive bug. It made a good lens look impossible for days.
   lose precision.
 
 ### An old OpenICC image is off at a good RMS
-- **Symptom:** with the old `openicc` image (set through `OPENICC_DOCKER_IMAGE`), the **For UMI**
-  row says the two fisheye solves disagree by a few pixels, while both report a fine RMS. With the
+- **Symptom:** with the old `openicc` image (set through `OPENICC_DOCKER_IMAGE`), both fisheye
+  solves report a fine RMS, but the **For UMI** row may warn that they disagree, mostly when the
+  board reached the rim of the circle (2.5–5.2 px on synthetic rim views). Without rim views the
+  gap often stays under the 1 px limit, so no warning does not rule out the old image. With the
   current app and only the old image built, the Double Sphere and Kannala–Brandt rows instead say
   the image is not built.
 - **Cause:** at the pinned commit, OpenICC's final adjustment leaves the Double Sphere and
   Kannala–Brandt distortion fitted around the image centre instead of the real principal point.
   On synthetic Max Lens Mod views that put the unpatched solver 0.6–4.2 px off the true lens, with
   its RMS unchanged. **verified** 2026-09-29.
-- **How to tell:** `docker images` lists `openicc` but not `gopro-charuco-openicc:d75dda5-p1`, or
-  `OPENICC_DOCKER_IMAGE` points at an old image.
+- **How to tell:** this is the reliable check, not the For UMI row. `docker images` lists
+  `openicc` but not `gopro-charuco-openicc:d75dda5-p1`, or `OPENICC_DOCKER_IMAGE` points at an old
+  image.
 - **Fix:** run `uv run gopro-charuco setup-openicc`, which builds the patched image (see
   [double-sphere-backend.md](double-sphere-backend.md#the-source-patch)), and solve again. Results
   made before then (including the June 0.617 px and 1.11 px) came from the unpatched solver.
