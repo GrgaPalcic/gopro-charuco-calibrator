@@ -33,6 +33,7 @@ from gopro_charuco_calibrator.openicc import (
     OpenICCError,
     OpenICCSettings,
     apply_source_patches,
+    build_image,
     build_image_commands,
     run_calibrate_camera,
     run_double_sphere_model,
@@ -341,7 +342,7 @@ def _hero13_scene(edge_views: int = 0):
     edge_rng = np.random.default_rng(11)
     for index in range(edge_views):
         off_axis = np.radians(edge_rng.uniform(55.0, 80.0))
-        # Mostly left and right: the 1080 px height cuts the circle at ~46 deg.
+        # Mostly left and right: the 1080 px height cuts the circle at ~50 deg.
         azimuth = np.radians(edge_rng.choice([0.0, 180.0]) + edge_rng.uniform(-30.0, 30.0))
         direction = np.asarray(
             [np.sin(off_axis) * np.cos(azimuth), np.sin(off_axis) * np.sin(azimuth),
@@ -448,7 +449,7 @@ def test_kannala_brandt_solves_with_views_at_the_rim(tmp_path):
     # put KB 0.11-0.32 px from the true lens out to the rim over 13 runs (2026-09-29).
     # Unpatched, the distortion stayed fitted around the image centre and KB landed
     # 0.9-4.8 px off (18 runs) at the same noise-level rms. The four KB coefficients are
-    # not the limit: they fit this lens's curve to 0.0002 px out to 83.5 deg
+    # not the limit: they fit this lens's curve to 0.0006 px out to 83.5 deg
     # (test_kannala_brandt_can_represent_hero13_lens).
     reach, diffs = _solve_kannala_brandt_against_truth(tmp_path, edge_views=30)
     assert reach > 83.0
@@ -507,3 +508,28 @@ def test_source_patch_matches_the_pinned_checkout():
         pytest.skip("OpenICC source not fetched on this machine")
     text = (checkout / relative).read_text(encoding="utf-8")
     assert text.count(old) == 1 or new in text
+
+
+def test_build_image_patches_after_the_checkout_and_before_docker_build(tmp_path, monkeypatch):
+    # `git checkout --force` reverts the source, so the patch must land between it and
+    # `docker build`; otherwise the patched image name would hold an unpatched solver.
+    relative, old, new = OPENICC_PATCHES[0]
+    source_dir = tmp_path / "openicc"
+    ran = []
+
+    def fake_run(command, check):
+        ran.append(command[:4])
+        if "checkout" in command:
+            (source_dir / ".git").mkdir(parents=True, exist_ok=True)
+            target = source_dir / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f"// pristine\n{old}\n", encoding="utf-8")
+        if command[:2] == ["docker", "build"]:
+            text = (source_dir / relative).read_text(encoding="utf-8")
+            assert new in text and old not in text
+
+    monkeypatch.setattr("gopro_charuco_calibrator.openicc.subprocess.run", fake_run)
+    build_image(source_dir, "test-image")
+    kinds = [" ".join(command) for command in ran]
+    assert any("checkout" in kind for kind in kinds)
+    assert kinds[-1].startswith("docker build")

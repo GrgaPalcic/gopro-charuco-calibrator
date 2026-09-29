@@ -99,7 +99,7 @@ def kb_vs_double_sphere_px(
 
     UMI loads Kannala-Brandt with fy = fx (it ignores aspect_ratio), so the KB side
     is evaluated the way UMI will use it. With ``image_size`` (width, height), only
-    rays that Double Sphere puts on the sensor count: on a 16:9 frame most of a ring
+    rays that Double Sphere puts on the sensor count: on a 16:9 frame much of a ring
     at the board reach falls past the top and bottom edges, where no pixel is.
     """
     rays = rays_to_angle(max_angle_deg)

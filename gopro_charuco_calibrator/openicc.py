@@ -63,8 +63,9 @@ DEFAULT_SOURCE_DIR = Path("~/.cache/gopro-charuco-calibrator/openicc")
 # adjustment, with the principal point held at the image centre. The later stages free
 # the principal point, but the final one refines the distortion only for PINHOLE, so for
 # DOUBLE_SPHERE and FISHEYE the distortion stays fitted around the wrong centre. The
-# HERO13's principal point sits ~10 px off centre, which left both models 0.4-5.4 px off
-# the true lens on synthetic Max Lens Mod data (2026-09-29). The patch lets the final
+# HERO13's principal point sits ~10 px off centre, which left both models 0.6-4.2 px off
+# the true lens on synthetic Max Lens Mod data (5 runs per scene, 2026-09-29; patched:
+# 0.1-0.5 px; the ranges are in tests/test_hero13_readiness.py). The patch lets the final
 # adjustment refine the distortion for every model except PINHOLE_RADIAL_TANGENTIAL,
 # which keeps its own tangential-only branch.
 OPENICC_PATCHES = [
