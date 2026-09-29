@@ -5,16 +5,19 @@
 Only the camera is simulated. The script renders the calib.io 5X5 board as a
 HERO13 + Max Lens Mod 2.0 would see it (a Double Sphere camera with the
 intrinsics measured on 2026-06-12, black outside the lens circle), runs the
-app's own detector and solver on those frames (double_sphere needs the openicc
-image), and serves the resulting session states to the real UI through
-Playwright routes. The app itself runs unmodified in this process.
+app's own detector and solver on those frames with the gripper preset's models
+(double_sphere and kannala_brandt need the OpenICC image), and serves the
+resulting session states to the real UI through Playwright routes. The app
+itself runs unmodified in this process.
 
 It also checks layout facts a person would otherwise have to eyeball: no
 horizontal page scroll, key panels visible, no text spilling out of buttons,
-chips or figures, and no browser console errors. It exits non-zero if any fail.
+chips or figures, exactly one enabled amber (primary) button where a state has a
+next action, nothing drawn over the idle preview, no discarded or surplus boxes in
+the coverage legend, and no browser console errors. It exits non-zero if any fail.
 
-Output: docs/screenshot.png (solved, desktop) and docs/screenshot-mobile.png
-(solved, 390 px wide), plus idle/capturing review shots in --review-dir.
+Output: docs/screenshot.png (solved, desktop). The idle, preview, capturing and
+390 px mobile shots are for review only and go to --review-dir.
 """
 
 from __future__ import annotations
@@ -225,6 +228,19 @@ def build_states(config, workdir, views):
     targets = config.coverage_targets
     poses = [detection.pose for _frame, detection in views]
 
+    # Preview: the camera streams and the board is in view, no run started yet.
+    first = views[0]
+    preview = base_status(config, "preview", f"{first[1].marker_count} markers", gopro)
+    preview.update(
+        run_id=None,
+        guide=guide_status([], first[1].pose, targets),
+        markers=first[1].marker_count,
+        pose=first[1].pose.as_dict(),
+    )
+    preview_frame = draw_detection(
+        first[0], first[1], f"{first[1].marker_count} markers", selected=True
+    )
+
     # Capturing: part of the route done, the live board sitting on the next target.
     done, live = poses[:16], views[16]
     capturing = base_status(config, "capturing", "saved capture_016.jpg", gopro)
@@ -271,13 +287,17 @@ def build_states(config, workdir, views):
     solved_frame = draw_detection(
         last[0], last[1], f"{last[1].marker_count} markers", selected=True
     )
-    return {"capturing": (capturing, capturing_frame), "solved": (solved, solved_frame)}
+    return {
+        "preview": (preview, preview_frame),
+        "capturing": (capturing, capturing_frame),
+        "solved": (solved, solved_frame),
+    }
 
 
 # ---- browser ------------------------------------------------------------
 
 LAYOUT_CHECK = """
-(expect) => {
+({expect, primary, overlayEmpty, mustSay}) => {
   const problems = [];
   const vw = document.documentElement.clientWidth;
   if (document.documentElement.scrollWidth > vw + 1) {
@@ -308,12 +328,40 @@ LAYOUT_CHECK = """
   if (expect.includes("#preview") && !(img.complete && img.naturalWidth > 0)) {
     problems.push("preview image not loaded");
   }
+  // One obvious next action: the enabled amber buttons are exactly the expected one.
+  const shown = (el) => el.offsetParent && el.getBoundingClientRect().width > 0;
+  const primaries = [...document.querySelectorAll(".btn-primary")]
+    .filter((el) => shown(el) && !el.disabled)
+    .map((el) => `#${el.id}`);
+  const want = primary ? [primary] : [];
+  if (JSON.stringify(primaries) !== JSON.stringify(want)) {
+    problems.push(`primary buttons ${JSON.stringify(primaries)}, expected ${JSON.stringify(want)}`);
+  }
+  for (const el of document.querySelectorAll(".btn:disabled")) {
+    if (shown(el) && !el.title) problems.push(`disabled #${el.id} does not say why`);
+  }
+  if (overlayEmpty) {
+    const canvas = document.getElementById("guideOverlay");
+    const data = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+    let drawn = 0;
+    for (let i = 3; i < data.length; i += 4) drawn += data[i] > 0;
+    if (drawn) problems.push(`guide overlay draws ${drawn} pixels over the idle preview`);
+  }
+  const legend = document.querySelector(".coverage .legend").textContent;
+  const oldSwatch = document.querySelector(".swatch-error, .swatch-surplus");
+  if (oldSwatch || /discard|left out/i.test(legend)) {
+    problems.push("coverage legend still lists discarded or surplus views");
+  }
+  const body = document.body.innerText;
+  for (const text of mustSay) {
+    if (!body.includes(text)) problems.push(`missing text: "${text}"`);
+  }
   return problems;
 }
 """
 
 
-def shoot(browser, base_url, status, jpeg, path, viewport, expect, text_path=None):
+def shoot(browser, base_url, status, jpeg, path, viewport, checks, text_path=None):
     errors = []
     page = browser.new_page(viewport=viewport, device_scale_factor=1)
     page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
@@ -336,7 +384,7 @@ def shoot(browser, base_url, status, jpeg, path, viewport, expect, text_path=Non
     if status is not None:
         page.evaluate("() => updateStatus(lastStatus)")  # redraw once the image has decoded
         page.wait_for_timeout(200)
-    problems = page.evaluate(LAYOUT_CHECK, expect) + [f"console: {e}" for e in errors]
+    problems = page.evaluate(LAYOUT_CHECK, checks) + [f"console: {e}" for e in errors]
     page.screenshot(path=str(path), full_page=True)
     if text_path is not None:
         steps = page.evaluate(
@@ -390,49 +438,75 @@ def main() -> int:
     base_url = f"http://127.0.0.1:{port}/"
 
     common = [".steps", "#scatter", ".setup", ".previewWrap"]
+    desktop = {"width": 1440, "height": 900}
+    solved_texts = ["Kannala–Brandt for UMI: matches Double Sphere", "UMI intrinsics JSON"]
+
+    def checks(expect, primary, overlay_empty=False, texts=()):
+        return {
+            "expect": common + expect,
+            "primary": primary,
+            "overlayEmpty": overlay_empty,
+            "mustSay": list(texts),
+        }
+
+    review = args.review_dir
     shots = [
         (
             "idle",
             None,
             b"",
-            args.review_dir / "idle.png",
-            {"width": 1440, "height": 900},
-            common + ["#previewEmpty"],
+            review / "idle.png",
+            desktop,
+            checks(["#previewEmpty"], "#previewBtn", overlay_empty=True),
+        ),
+        (
+            "preview",
+            *states["preview"],
+            review / "preview.png",
+            desktop,
+            checks(["#preview", "#cameraReadout .chip", "#guideLegend"], "#startRunBtn"),
         ),
         (
             "capturing",
             *states["capturing"],
-            args.review_dir / "capturing.png",
-            {"width": 1440, "height": 900},
-            common + ["#preview", "#cameraReadout .chip"],
+            review / "capturing.png",
+            desktop,
+            checks(["#preview", "#cameraReadout .chip", "#guideLegend"], None),
         ),
         (
             "solved",
             *states["solved"],
             args.out_dir / "screenshot.png",
-            {"width": 1440, "height": 900},
-            common + ["#preview", "#cameraReadout .chip", "#resultsPanel", ".figure"],
+            desktop,
+            checks(
+                ["#preview", "#cameraReadout .chip", "#resultsPanel", ".figure"],
+                "#nextCameraBtn",
+                texts=solved_texts,
+            ),
         ),
         (
+            # Layout check only: the page must still work at phone width.
             "solved-mobile",
             *states["solved"],
-            args.out_dir / "screenshot-mobile.png",
+            review / "solved-mobile.png",
             {"width": 390, "height": 844},
-            common + ["#preview", "#resultsPanel"],
+            checks(["#preview", "#resultsPanel"], "#nextCameraBtn", texts=solved_texts),
         ),
     ]
     failures = 0
     launch = {"executable_path": shutil.which("chromium")} if shutil.which("chromium") else {}
     with sync_playwright() as pw:
         browser = pw.chromium.launch(**launch)
-        for name, status, frame, path, viewport, expect in shots:
+        for name, status, frame, path, viewport, shot_checks in shots:
             jpeg = (
                 cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 88])[1].tobytes()
                 if len(frame)
                 else b""
             )
             text_path = args.review_dir / f"{name}.txt"
-            problems = shoot(browser, base_url, status, jpeg, path, viewport, expect, text_path)
+            problems = shoot(
+                browser, base_url, status, jpeg, path, viewport, shot_checks, text_path
+            )
             print(f"{name}: {path}  {'ok' if not problems else 'PROBLEMS'}")
             for problem in problems:
                 print(f"  - {problem}")
