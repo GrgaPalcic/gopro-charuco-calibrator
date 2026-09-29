@@ -70,7 +70,7 @@ mix the two.
 | Piece | What it does | Without it |
 |---|---|---|
 | GoPro **Media Mod** | micro-HDMI output | no HDMI |
-| GoPro **Labs** firmware, extension `HDMI=1` (QR command `oMHDMI=1` for one session, `*HDMI=1` or `!MHDMI=1` to keep it) | clean output with no overlays | overlays and resets, unusable as a feed |
+| GoPro **Labs** firmware, extension `HDMI=1` (QR command `oMHDMI=1` for one session, `!MHDMI=1` to keep it; the short `*HDMI=1` needs HERO10+) | clean output with no overlays | overlays and resets, unusable as a feed |
 | **UVC capture card** (Elgato HD60 X, or a cheap MS2109) | turns HDMI into `/dev/videoX` | the signal never reaches the computer |
 
 UMI's chain:

@@ -36,7 +36,8 @@ exactly like "this lens cannot be calibrated", and most of them are not. Terms a
   Open GoPro), and does not write setting 43. `fov=` is reported unreliable (Open GoPro #459,
   WONTFIX). On a HERO11, Wide and SuperView both looked flat over webcam.
 - **How to tell:** after the webcam starts, the readout chips show what the camera reports:
-  **Lens** is setting 43, **Mod** is 189 and **HyperSmooth** is 135. A **Check** chip appears if 43
+  the **Lens** chip is setting 43 as reported (not the form's **Lens** setting, which is what was
+  requested), **Mod** is 189 and **HyperSmooth** is 135. A **Check** chip appears if 43
   differs from the requested lens, or if 189 differs from the requested mod when the preset asks
   for one. HyperSmooth is recorded but not compared. The values are saved as `reported_*` in
   `config.json` and the solve summary. A camera without the Open GoPro API reports nothing.
