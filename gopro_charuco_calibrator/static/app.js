@@ -87,6 +87,8 @@ let lastFirewallCmd = "";
 let autoSolved = false;
 let currentState = "idle";
 let lastStatus = null;
+// The empty-preview copy, restored once an error message has replaced it.
+const previewEmptyHTML = previewEmpty.innerHTML;
 
 function setDeep(obj, path, value) {
   const parts = path.split(".");
@@ -214,7 +216,14 @@ async function api(path, options = {}) {
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || response.statusText);
+    let message = text || response.statusText;
+    try {
+      const detail = JSON.parse(text).detail; // FastAPI's HTTPException body
+      if (detail) message = typeof detail === "string" ? detail : JSON.stringify(detail);
+    } catch {
+      // not JSON: keep the raw text
+    }
+    throw new Error(message);
   }
   return response.json();
 }
@@ -230,6 +239,9 @@ function num(value, digits = 2) {
 // ---- Stream ----
 
 function setStreamStatus(state, text) {
+  // Both this and the readout are live regions: touch them only on a change,
+  // or a screen reader re-announces them on every poll.
+  if (streamStatus.dataset.state === state && streamStatusText.textContent === text) return;
   streamStatus.dataset.state = state;
   streamStatusText.textContent = text;
 }
@@ -325,22 +337,30 @@ function chip(text, {key = "", kind = ""} = {}) {
 }
 
 // What the camera itself reported after the webcam started (read back, never
-// assumed), plus any mismatch with what was requested.
-function renderReadout(gopro, config) {
+// assumed), plus any mismatch with what was requested. Only a live session has
+// a report worth showing; otherwise say when one will appear.
+function renderReadout(gopro, live) {
   const chips = [];
+  const autoSetup = form.elements["gopro.enabled"]?.checked
+    && form.elements["gopro.apply_on_preview"]?.checked;
   const labels = gopro?.camera_state?.labels;
-  if (labels && Object.keys(labels).length) {
+  if (live && labels && Object.keys(labels).length) {
     for (const [field, label] of Object.entries(labels)) {
       chips.push(chip(label, {key: READOUT_KEYS[field] || field}));
     }
-  } else if (gopro?.enabled) {
+  } else if (live && gopro?.enabled) {
     chips.push(chip("camera did not report its settings", {kind: "muted"}));
-  } else if (config?.gopro?.enabled) {
+  } else if (!live && autoSetup) {
     chips.push(chip("camera settings appear after Open preview", {kind: "muted"}));
   }
-  for (const warning of gopro?.warnings || []) {
-    chips.push(chip(warning, {key: "Check", kind: "warn"}));
+  if (live) {
+    for (const warning of gopro?.warnings || []) {
+      chips.push(chip(warning, {key: "Check", kind: "warn"}));
+    }
   }
+  const signature = chips.map((el) => el.textContent).join("|");
+  if (cameraReadout.dataset.signature === signature) return;
+  cameraReadout.dataset.signature = signature;
   cameraReadout.replaceChildren(...chips);
 }
 
@@ -526,9 +546,13 @@ function guideText(status) {
   if (state === "solved") {
     return "Solved. Check the result below; Resume to add views where the coverage map has gaps, then Solve again.";
   }
-  if (guide?.complete || state === "complete") {
-    return `Route complete (${guide?.complete_count}/${guide?.total_count}). Check the result below; `
+  if (guide?.complete) {
+    return `Route complete (${guide.complete_count}/${guide.total_count}). Check the result below; `
       + "Resume to add or repeat poses, then Solve again.";
+  }
+  if (state === "complete") {
+    return `Capture limit reached (${status.captures} views); route ${guide?.complete_count || 0}/`
+      + `${guide?.total_count || 0}. Check the result below; Resume to add views, then Solve again.`;
   }
   const current = guide?.current;
   if (!current) return "Move the board centre along the guide.";
@@ -578,11 +602,15 @@ function coverageReasons(cov) {
 function modeSummary(mode) {
   if (!mode) return "";
   const parts = [];
-  if (mode.lens_fov) parts.push(`lens ${mode.lens_fov}`);
-  if (mode.max_lens_mod) parts.push(`mod ${mode.max_lens_mod}`);
+  // What the camera reported beats what was requested.
+  const lens = mode.reported_webcam_digital_lens || mode.lens_fov;
+  const mod = mode.reported_max_lens_mod || mode.max_lens_mod;
+  if (lens) parts.push(`lens ${lens}`);
+  if (mod) parts.push(`mod ${mod}`);
   if (mode.webcam_resolution) parts.push(`res ${mode.webcam_resolution}`);
   if (mode.frame_size) parts.push(mode.frame_size);
   if (mode.fps) parts.push(`${mode.fps} fps`);
+  if (mode.protocol) parts.push(`${mode.protocol} stream`);
   return parts.join(", ");
 }
 
@@ -661,13 +689,18 @@ function renderResults(modelResults, coverage, mode) {
   recFigures.append(
     figure(isDS ? "Error (OpenICC)" : "Median error", `${num(isDS ? rec.rms : rec.median_view_error_px)} px`, true),
   );
-  if (!isDS) recFigures.append(figure("Worst view", `${num(rec.worst_view_error_px)} px`));
+  if (!isDS) {
+    recFigures.append(
+      figure("Worst view", `${num(rec.worst_view_error_px)} px`),
+      figure("RMS", `${num(rec.rms)} px`),
+    );
+  }
   if (isDS) {
     recFigures.append(figure("xi", num(rec.distortion?.[0], 4)), figure("alpha", num(alpha, 3)));
   }
   recFigures.append(
     figure("Focal", `${num(cm[0]?.[0], 1)}${isDS ? "" : ` / ${num(cm[1]?.[1], 1)}`}`),
-    figure("Centre", `${num(cm[0]?.[2], 1)}, ${num(cm[1]?.[2], 1)}`),
+    figure("Centre (cx, cy)", `${num(cm[0]?.[2], 1)}, ${num(cm[1]?.[2], 1)}`),
     figure("Frames used", `${used ?? "n/a"} / ${total ?? "n/a"}`),
   );
 
@@ -715,13 +748,13 @@ function updateStatus(status) {
   updateBars(status.coverage || {});
   drawCoverageMap(status.coverage?.points || [], status.rejected_points || [], status.image_size);
   drawGuideOverlay(status);
-  renderReadout(status.gopro, defaults?.config);
-  renderSteps(state, captures, minFrames);
-
   const capturing = state === "capturing";
   const paused = state === "paused";
   const solving = state === "solving";
   const live = !["idle", "error"].includes(state);
+  renderReadout(status.gopro, live);
+  renderSteps(state, captures, minFrames);
+
   currentState = state;
   const done = state === "complete" || state === "solved";
   previewBtn.disabled = live;                 // open only when nothing is live
@@ -734,7 +767,7 @@ function updateStatus(status) {
   pauseResumeBtn.textContent = paused || done ? "Resume" : "Pause";
   pauseResumeBtn.setAttribute("aria-pressed", String(paused));
   captureBtn.disabled = !capturing;
-  solveBtn.disabled = captures < minFrames;
+  solveBtn.disabled = captures < minFrames || solving;
 
   // When the route first completes, run a checkpoint solve automatically so the
   // operator gets an early quality readout (and can then Resume to fix weak areas).
@@ -746,7 +779,11 @@ function updateStatus(status) {
   syncStream(state);
   previewEmpty.hidden = live;
   if (state === "error") {
-    previewEmpty.firstElementChild.textContent = status.message || "The camera could not be opened.";
+    previewEmpty.replaceChildren(Object.assign(document.createElement("p"), {
+      textContent: `${status.message || "The camera could not be opened."} Fix it, then Open preview again.`,
+    }));
+  } else if (previewEmpty.innerHTML !== previewEmptyHTML) {
+    previewEmpty.innerHTML = previewEmptyHTML;
   }
 
   const bridge = status.video_bridge;
@@ -824,7 +861,21 @@ async function savePreset() {
 
 // ---- Actions ----
 
-previewBtn.addEventListener("click", async () => {
+// Every button runs through here, so a failed request says what failed on the
+// status line instead of dying silently in the console.
+function act(label, fn) {
+  return async () => {
+    const name = typeof label === "function" ? label() : label;
+    try {
+      await fn();
+    } catch (err) {
+      statusLine.textContent = `${name} failed: ${err.message || err}`;
+      syncStream(currentState);
+    }
+  };
+}
+
+previewBtn.addEventListener("click", act("Open preview", async () => {
   firewallDismissed = false;
   autoSolved = false;
   startStream();
@@ -833,9 +884,9 @@ previewBtn.addEventListener("click", async () => {
     body: JSON.stringify({config: readForm()}),
   }));
   startPolling();
-});
+}));
 
-startRunBtn.addEventListener("click", async () => {
+startRunBtn.addEventListener("click", act("Start new run", async () => {
   firewallDismissed = false;
   autoSolved = false;
   results.hidden = true;
@@ -846,24 +897,24 @@ startRunBtn.addEventListener("click", async () => {
     body: JSON.stringify({config: readForm()}),
   }));
   startPolling();
-});
+}));
 
-pauseResumeBtn.addEventListener("click", async () => {
+pauseResumeBtn.addEventListener("click", act(() => pauseResumeBtn.textContent, async () => {
   const action = pauseResumeBtn.textContent === "Resume" ? "resume" : "pause";
   updateStatus(await api(`/api/session/${action}`, {method: "POST"}));
-});
+}));
 
-stopBtn.addEventListener("click", async () => {
+stopBtn.addEventListener("click", act("Stop", async () => {
   // Tear the video down first so a final stream "load" cannot flip the dot back
   // to green while the request is in flight.
   stopStream();
   clearInterval(pollTimer);
   updateStatus(await api("/api/session/stop", {method: "POST"}));
-});
+}));
 
-captureBtn.addEventListener("click", async () => {
+captureBtn.addEventListener("click", act("Capture", async () => {
   updateStatus(await api("/api/session/capture", {method: "POST"}));
-});
+}));
 
 async function runSolve() {
   statusLine.textContent = "Solving…";
@@ -874,7 +925,8 @@ async function runSolve() {
     }
     await api("/api/session/solve", {method: "POST"});
   } catch (err) {
-    statusLine.textContent = `Solve failed: ${err}`;
+    await poll(); // the session parks itself paused on a failed solve
+    statusLine.textContent = `Solve failed: ${err.message || err}`;
     return;
   }
   await poll(); // status now carries results -> updateStatus renders the panel
@@ -882,7 +934,7 @@ async function runSolve() {
 
 solveBtn.addEventListener("click", runSolve);
 
-nextCameraBtn.addEventListener("click", async () => {
+nextCameraBtn.addEventListener("click", act("Next camera", async () => {
   // Cleanly stop the current camera and go idle; the operator swaps the camera,
   // edits the camera name if needed, then clicks Open preview for the new one.
   firewallDismissed = false;
@@ -897,12 +949,15 @@ nextCameraBtn.addEventListener("click", async () => {
     method: "POST",
     body: JSON.stringify({config: readForm()}),
   }));
-});
+}));
 
 presetLoad.addEventListener("click", () => applyPreset(presetSelect.value));
 presetSave.addEventListener("click", savePreset);
 
-form.elements["gopro.enabled"].addEventListener("change", syncGoproVisibility);
+form.elements["gopro.enabled"].addEventListener("change", () => {
+  syncGoproVisibility();
+  if (lastStatus) updateStatus(lastStatus);
+});
 form.addEventListener("input", (event) => {
   if (event.target.name?.startsWith("board.")) updateBoardSummary();
 });
@@ -941,8 +996,9 @@ async function init() {
   statusLine.textContent = "Ready.";
   drawCoverageMap([], [], null);
   await poll();
+  if (lastStatus && !["idle", "error"].includes(lastStatus.state)) startPolling();
 }
 
 init().catch((err) => {
-  statusLine.textContent = String(err);
+  statusLine.textContent = `Could not load the app settings: ${err.message || err}. Is the server running?`;
 });

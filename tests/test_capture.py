@@ -1,4 +1,7 @@
-from gopro_charuco_calibrator.capture import _discarded_points
+import pytest
+
+from gopro_charuco_calibrator import capture
+from gopro_charuco_calibrator.capture import CaptureSession, _discarded_points
 
 
 def _summary():
@@ -50,3 +53,46 @@ def test_discarded_points_classifies_error_vs_surplus():
 def test_discarded_points_handles_empty():
     assert _discarded_points({"frames": [], "results": []}) == []
     assert _discarded_points({}) == []
+
+
+def test_failed_solve_parks_the_run_instead_of_sticking_in_solving(tmp_path, monkeypatch):
+    session = CaptureSession(runs_dir=tmp_path)
+    session.output_dir = tmp_path / "run"
+    session.frames_dir = session.output_dir / "frames"
+    session.frames_dir.mkdir(parents=True)
+
+    def broken_solve(**_kwargs):
+        raise RuntimeError("no usable frames")
+
+    monkeypatch.setattr(capture, "solve_from_frames", broken_solve)
+    with pytest.raises(RuntimeError, match="no usable frames"):
+        session.solve()
+    status = session.status()
+    assert status["state"] == "paused"
+    assert "solve failed: no usable frames" in status["message"]
+
+
+def _offline_session(tmp_path, monkeypatch, report):
+    # No camera on the bus: stub the two calls close() makes to it.
+    monkeypatch.setattr(capture, "stop_gopro_video_bridge", lambda _config: None)
+    monkeypatch.setattr(capture, "stop_gopro_webcam", lambda _result: None)
+    session = CaptureSession(runs_dir=tmp_path)
+    session.config.gopro.enabled = True
+    session._last_gopro_result = report
+    session._set_status(gopro=report)
+    return session
+
+
+def test_next_camera_forgets_the_previous_camera_report(tmp_path, monkeypatch):
+    session = _offline_session(tmp_path, monkeypatch, {"ok": True})
+    session.next_camera()
+    assert session.status()["gopro"] is None
+    assert session._last_gopro_result is None
+
+
+def test_stop_keeps_the_camera_report_for_a_later_solve(tmp_path, monkeypatch):
+    # Stop then Solve is a normal flow; the summary must still say what the camera applied.
+    report = {"ok": True}
+    session = _offline_session(tmp_path, monkeypatch, report)
+    session.close()
+    assert session._last_gopro_result is report

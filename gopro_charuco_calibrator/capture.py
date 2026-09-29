@@ -163,6 +163,9 @@ class CaptureSession:
                     gopro=self._last_gopro_result,
                 )
                 return self.status()
+        elif not self.config.gopro.enabled:
+            # A plain V4L2 source: nothing from an earlier GoPro describes it.
+            self._last_gopro_result = None
         if self._thread is None or not self._thread.is_alive():
             self._state = "preview"
             self._stop.clear()
@@ -232,9 +235,14 @@ class CaptureSession:
         self.output_dir = None
         self.frames_dir = None
         self.overlays_dir = None
+        # What the previous camera reported must not be shown against the next one.
+        self._last_gopro_result = None
+        self._last_bridge_result = None
         if config is not None:
             self.config = config
-        self._set_status(state="idle", message="stopped; ready for next camera")
+        self._set_status(
+            state="idle", message="stopped; ready for next camera", gopro=None, video_bridge=None
+        )
         return self.status()
 
     def close(self) -> dict[str, Any]:
@@ -305,14 +313,22 @@ class CaptureSession:
         self._paused = False
         self._state = "solving"
         self._set_status(state="solving", message="solving current run")
-        summary = solve_from_frames(
-            frames_dir=self.frames_dir,
-            output_dir=self.output_dir,
-            camera=self.config.camera,
-            board_config=self.config.board,
-            solver=self.config.solver,
-            coverage_targets=self.config.coverage_targets,
-        )
+        try:
+            summary = solve_from_frames(
+                frames_dir=self.frames_dir,
+                output_dir=self.output_dir,
+                camera=self.config.camera,
+                board_config=self.config.board,
+                solver=self.config.solver,
+                coverage_targets=self.config.coverage_targets,
+            )
+        except Exception as exc:
+            # Never leave the session stuck in "solving": park it paused on the
+            # same run, so the operator can Resume to add views or Solve again.
+            self._paused = True
+            self._state = "paused"
+            self._set_status(state="paused", message=f"solve failed: {exc}")
+            raise
         summary["gopro"] = self._last_gopro_result
         summary["video_bridge"] = self._last_bridge_result
         summary["acquisition_mode"] = describe_acquisition_mode(

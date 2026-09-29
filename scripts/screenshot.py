@@ -327,7 +327,9 @@ def shoot(browser, base_url, status, jpeg, path, viewport, expect, text_path=Non
                 pattern,
                 lambda route: route.fulfill(status=200, content_type="image/jpeg", body=jpeg),
             )
-    page.goto(base_url, wait_until="networkidle")
+    # Not "networkidle": a live session keeps polling the status every 150 ms.
+    page.goto(base_url, wait_until="load")
+    page.wait_for_function("() => lastStatus !== null")
     page.wait_for_timeout(600)
     if status is not None:
         page.evaluate("() => updateStatus(lastStatus)")  # redraw once the image has decoded
