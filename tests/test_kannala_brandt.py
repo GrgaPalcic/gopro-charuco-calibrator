@@ -359,7 +359,45 @@ def test_umi_check_warns_on_aspect_and_mismatch():
     assert "70°" in check["warnings"][1]
     # Just inside the aspect tolerance: no aspect warning.
     close = umi_check(_kb_result(aspect=1.004), _ds_result(), _corner_records(70.0))
-    assert not any("square" in warning for warning in close["warnings"])
+    assert close["warnings"] == []
+    # UMI loads KB with fy = fx, so the gap ignores the solved aspect: evaluated with
+    # fy = f * 1.004 it would be ~2.9 px here.
+    assert close["max_diff_vs_double_sphere_px"] < 0.05
+
+
+def test_umi_check_counts_only_rays_on_the_sensor():
+    # A lens with non-square pixels, as Double Sphere solves it; KB is compared as UMI
+    # loads it (fy = fx). The vertical error grows with height, and on a 1920x1080 frame
+    # a ring at 80 deg is cut by the top and bottom edges, so the off-sensor part of the
+    # ring must not count.
+    ds = _ds_result()
+    ds["camera_matrix"][1][1] *= 1.01
+    kb = _kb_result()
+    everywhere = umi_check(kb, ds, _corner_records(80.0))["max_diff_vs_double_sphere_px"]
+    kb["openicc"].update(image_width=1920, image_height=1080)
+    on_sensor = umi_check(kb, ds, _corner_records(80.0))["max_diff_vs_double_sphere_px"]
+    rays = rays_to_angle(80.0)
+    ds_pixels, valid = project_double_sphere(rays, *[
+        ds["camera_matrix"][0][0], ds["camera_matrix"][1][1], *HERO13_DS[2:]
+    ])
+    inside = valid & (ds_pixels[:, 1] >= 0) & (ds_pixels[:, 1] < 1080)
+    inside &= (ds_pixels[:, 0] >= 0) & (ds_pixels[:, 0] < 1920)
+    focal, cx, cy = kb["camera_matrix"][0][0], kb["camera_matrix"][0][2], HERO13_DS[3]
+    kb_pixels = project_kannala_brandt(rays[inside], focal, focal, cx, cy, kb["distortion"])
+    expected = np.linalg.norm(kb_pixels - ds_pixels[inside], axis=1).max()
+    assert not inside.all()
+    assert on_sensor == pytest.approx(expected)
+    assert on_sensor < everywhere
+
+
+def test_umi_check_gap_is_none_when_no_ray_compares(monkeypatch):
+    monkeypatch.setattr(
+        "gopro_charuco_calibrator.solver.kb_vs_double_sphere_px", lambda *_a: float("nan")
+    )
+    check = umi_check(_kb_result(), _ds_result(), _corner_records(70.0))
+    assert check["max_diff_vs_double_sphere_px"] is None
+    assert check["board_reach_deg"] == pytest.approx(70.0, abs=1e-3)
+    json.dumps(check, allow_nan=False)
 
 
 def test_umi_check_without_double_sphere():

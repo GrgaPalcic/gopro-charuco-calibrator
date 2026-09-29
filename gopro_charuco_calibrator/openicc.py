@@ -259,7 +259,13 @@ def apply_source_patches(source_dir: Path) -> None:
     """Apply OPENICC_PATCHES to a checkout; idempotent, and loud if the source moved."""
     for relative, old, new in OPENICC_PATCHES:
         path = source_dir / relative
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            raise OpenICCError(
+                f"Cannot patch {path}: the file is missing. The checkout is not OpenICC "
+                f"{OPENICC_COMMIT[:7]}; delete {source_dir} and run setup-openicc."
+            ) from exc
         if new in text:
             continue
         if text.count(old) != 1:
@@ -380,6 +386,8 @@ def _run_calibrate_camera_once(
             f"'{settings.docker_image}' image, or set OPENICC_BINARY to a native "
             "calibrate_camera build"
         ) from exc
+    except OSError as exc:  # e.g. OPENICC_BINARY is not executable
+        raise OpenICCError(f"Could not start '{command[0]}': {exc}") from exc
     except subprocess.TimeoutExpired as exc:
         if container_name:
             subprocess.run(

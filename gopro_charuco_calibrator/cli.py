@@ -10,7 +10,7 @@ import yaml
 
 from .app import app, set_default_config
 from .models import AppConfig, BoardConfig, CameraConfig, SolverConfig
-from .openicc import DEFAULT_SOURCE_DIR, build_image
+from .openicc import DEFAULT_DOCKER_IMAGE, DEFAULT_SOURCE_DIR, OpenICCError, build_image
 from .solver import solve_from_frames
 
 
@@ -112,6 +112,9 @@ def cmd_setup_openicc(args: argparse.Namespace) -> int:
     except subprocess.CalledProcessError as exc:
         print(f"error: `{' '.join(exc.cmd)}` failed with exit {exc.returncode}")
         return 1
+    except OpenICCError as exc:
+        print(f"error: {exc}")
+        return 1
     print("OpenICC image ready; the double_sphere and kannala_brandt models can now solve.")
     return 0
 
@@ -150,7 +153,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     setup.add_argument("--source-dir", help=f"Default: {DEFAULT_SOURCE_DIR}")
-    setup.add_argument("--image", help="Image tag (default: $OPENICC_DOCKER_IMAGE or openicc)")
+    setup.add_argument(
+        "--image", help=f"Image tag (default: $OPENICC_DOCKER_IMAGE or {DEFAULT_DOCKER_IMAGE})"
+    )
     setup.set_defaults(func=cmd_setup_openicc)
     return parser
 

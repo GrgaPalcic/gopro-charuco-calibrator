@@ -88,17 +88,31 @@ def board_reach_deg(ds_result: dict[str, Any], pixels: np.ndarray) -> float | No
 
 
 def kb_vs_double_sphere_px(
-    kb_result: dict[str, Any], ds_result: dict[str, Any], max_angle_deg: float
+    kb_result: dict[str, Any],
+    ds_result: dict[str, Any],
+    max_angle_deg: float,
+    image_size: tuple[int, int] | None = None,
 ) -> float:
     """Worst pixel distance between the two models over rays out to ``max_angle_deg``.
 
     NaN when Double Sphere projects none of those rays.
 
     UMI loads Kannala-Brandt with fy = fx (it ignores aspect_ratio), so the KB side
-    is evaluated the way UMI will use it.
+    is evaluated the way UMI will use it. With ``image_size`` (width, height), only
+    rays that Double Sphere puts on the sensor count: on a 16:9 frame most of a ring
+    at the board reach falls past the top and bottom edges, where no pixel is.
     """
     rays = rays_to_angle(max_angle_deg)
     ds_pixels, valid = project_double_sphere(rays, *_ds_params(ds_result))
+    if image_size is not None:
+        width, height = image_size
+        with np.errstate(invalid="ignore"):
+            valid &= (
+                (ds_pixels[:, 0] >= 0)
+                & (ds_pixels[:, 0] < width)
+                & (ds_pixels[:, 1] >= 0)
+                & (ds_pixels[:, 1] < height)
+            )
     matrix = kb_result["camera_matrix"]
     kb_pixels = project_kannala_brandt(
         rays, matrix[0][0], matrix[0][0], matrix[0][2], matrix[1][2], kb_result["distortion"]

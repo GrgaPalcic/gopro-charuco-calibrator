@@ -843,12 +843,13 @@ def umi_check(
     """How safely UMI can use the Kannala-Brandt result.
 
     The board reach is the largest off-axis angle any detected corner reached, read
-    through Double Sphere (valid over the whole fisheye image). Out to that angle
-    the Kannala-Brandt model, evaluated as UMI loads it (fy = fx), should land on
-    the same pixels as Double Sphere.
+    through Double Sphere (valid over the whole fisheye image). Out to that angle,
+    wherever the ray lands on the sensor, the Kannala-Brandt model evaluated as UMI
+    loads it (fy = fx) should land on the same pixels as Double Sphere.
     """
     matrix = kb_result["camera_matrix"]
-    raw_intrinsics = (kb_result.get("openicc") or {}).get("intrinsics") or {}
+    raw = kb_result.get("openicc") or {}
+    raw_intrinsics = raw.get("intrinsics") or {}
     aspect = float(raw_intrinsics.get("aspect_ratio", matrix[1][1] / matrix[0][0]))
     reach = None
     max_diff = None
@@ -861,12 +862,16 @@ def umi_check(
         if pixels:
             reach = board_reach_deg(ds_result, np.concatenate(pixels))
         if reach is not None:
-            max_diff = kb_vs_double_sphere_px(kb_result, ds_result, reach)
+            # Native size, as run_openicc_model writes it; without it every ray counts.
+            image_size = None
+            if raw.get("image_width") and raw.get("image_height"):
+                image_size = (int(raw["image_width"]), int(raw["image_height"]))
+            max_diff = kb_vs_double_sphere_px(kb_result, ds_result, reach, image_size)
             if not math.isfinite(max_diff):
                 max_diff = None
     # OpenICC solves at 1080-row scale (MAX_SOLVE_HEIGHT), so the same agreement is
     # proportionally more native pixels on a taller image: scale the threshold with it.
-    solve_scale = float((kb_result.get("openicc") or {}).get("solve_downsample_factor") or 1.0)
+    solve_scale = float(raw.get("solve_downsample_factor") or 1.0)
     max_diff_allowed = UMI_MAX_DIFF_PX * solve_scale
     warnings = []
     if abs(aspect - 1.0) > UMI_ASPECT_TOLERANCE:

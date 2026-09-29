@@ -432,9 +432,9 @@ def _solve_kannala_brandt_against_truth(tmp_path, edge_views: int = 0):
 def test_kannala_brandt_matches_true_double_sphere_on_hero13(tmp_path):
     # Does OpenICC's Kannala-Brandt (FISHEYE, the file UMI loads) hold on the ~167 deg
     # Max Lens Mod image? Solved on the same Double Sphere rendered scene as above,
-    # with the patched image (OPENICC_PATCHES), 5 runs on 2026-09-29: board reach
-    # 64.4 deg; worst distance to the true lens out to that reach 0.23-0.44 px, out to
-    # 70 deg 0.54-0.99 px (past the board, so extrapolated). Unpatched it was 0.49-0.84
+    # with the patched image (OPENICC_PATCHES), 13 runs on 2026-09-29: board reach
+    # 64.4 deg; worst distance to the true lens out to that reach 0.23-0.49 px, out to
+    # 70 deg 0.43-1.12 px (past the board, so extrapolated). Unpatched it was 0.49-0.84
     # and 0.58-1.63 px over 19 runs.
     reach, diffs = _solve_kannala_brandt_against_truth(tmp_path)
     assert reach == pytest.approx(64.4, abs=0.5)
@@ -445,7 +445,7 @@ def test_kannala_brandt_matches_true_double_sphere_on_hero13(tmp_path):
 @pytest.mark.skipif(not _openicc_image_present(), reason="needs the openicc docker image")
 def test_kannala_brandt_solves_with_views_at_the_rim(tmp_path):
     # With 30 more views out to the 83.5 deg rim, the patched image (OPENICC_PATCHES)
-    # put KB 0.11-0.32 px from the true lens out to the rim over 5 runs (2026-09-29).
+    # put KB 0.11-0.32 px from the true lens out to the rim over 13 runs (2026-09-29).
     # Unpatched, the distortion stayed fitted around the image centre and KB landed
     # 0.9-4.8 px off (18 runs) at the same noise-level rms. The four KB coefficients are
     # not the limit: they fit this lens's curve to 0.0002 px out to 83.5 deg
@@ -493,6 +493,9 @@ def test_source_patch_frees_the_distortion_in_the_final_adjustment(tmp_path):
     assert source.read_text(encoding="utf-8") == patched
     source.write_text("// some other OpenICC version\n", encoding="utf-8")
     with pytest.raises(OpenICCError, match="setup-openicc"):
+        apply_source_patches(tmp_path)
+    source.unlink()
+    with pytest.raises(OpenICCError, match="missing"):
         apply_source_patches(tmp_path)
 
 

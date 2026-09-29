@@ -6,10 +6,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from gopro_charuco_calibrator import cli
 from gopro_charuco_calibrator.boards import make_caib_board
 from gopro_charuco_calibrator.coverage import PoseParams
 from gopro_charuco_calibrator.models import BoardConfig, CameraConfig, SolverConfig
 from gopro_charuco_calibrator.openicc import (
+    DEFAULT_DOCKER_IMAGE,
     OPENICC_MIN_VIEWS,
     OpenICCError,
     OpenICCSettings,
@@ -248,6 +250,80 @@ def test_run_timeout_cleans_container(tmp_path, monkeypatch):
     assert any(cmd[:3] == ["docker", "rm", "-f"] for cmd in calls)
 
 
+def test_run_binary_not_executable(tmp_path, monkeypatch):
+    def raise_permission(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied", "/opt/cc")
+
+    monkeypatch.setattr(subprocess, "run", raise_permission)
+    with pytest.raises(OpenICCError, match="Could not start '/opt/cc'"):
+        run_calibrate_camera(tmp_path, OpenICCSettings(binary_path="/opt/cc"))
+
+
+def _fake_docker_runs(returncodes):
+    """subprocess.run stand-in: each `docker run` exits with the next code, writing an
+    out.json when it is 0."""
+    runs = []
+
+    def fake_run(cmd, **_kwargs):
+        if cmd[:2] != ["docker", "run"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        code = returncodes[len(runs)]
+        runs.append(cmd)
+        if code == 0:
+            data_dir = Path(next(arg for arg in cmd if arg.endswith(":/data")).split(":")[0])
+            (data_dir / "out.json").write_text(json.dumps(OUT_JSON), encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, code, stdout=f"run {len(runs)}", stderr="")
+
+    return fake_run, runs
+
+
+def test_run_retries_once_after_a_crash(tmp_path, monkeypatch):
+    fake_run, runs = _fake_docker_runs([139, 0])
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = run_calibrate_camera(tmp_path, OpenICCSettings())
+    assert len(runs) == 2
+    assert result["final_reproj_error"] == pytest.approx(0.617)
+    log = (tmp_path / "calibrate_camera.log").read_text()
+    assert "crashed (exit 139)" in log and "run 1" in log and "run 2" in log
+
+
+@pytest.mark.parametrize("code", [139, 134, -11])
+def test_run_crashing_twice_fails(tmp_path, monkeypatch, code):
+    fake_run, runs = _fake_docker_runs([code, code])
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(OpenICCError, match=f"exit {code}"):
+        run_calibrate_camera(tmp_path, OpenICCSettings())
+    assert len(runs) == 2
+
+
+@pytest.mark.parametrize("code", [1, 125])
+def test_run_ordinary_failure_is_not_retried(tmp_path, monkeypatch, code):
+    # 1 is calibrate_camera giving up; 125 is Docker itself failing. Neither is a crash.
+    fake_run, runs = _fake_docker_runs([code, 0])
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(OpenICCError, match=f"exit {code}"):
+        run_calibrate_camera(tmp_path, OpenICCSettings())
+    assert len(runs) == 1
+
+
+# --- setup-openicc command ---
+
+
+def test_setup_openicc_reports_a_patch_that_does_not_apply(monkeypatch, capsys):
+    def broken_build(*_args):
+        raise OpenICCError("Cannot patch camera_calibrator.cc")
+
+    monkeypatch.setattr(cli, "build_image", broken_build)
+    assert cli.main(["setup-openicc"]) == 1
+    assert capsys.readouterr().out.strip() == "error: Cannot patch camera_calibrator.cc"
+
+
+def test_setup_openicc_help_names_the_default_image():
+    setup = cli.build_parser()._subparsers._group_actions[0].choices["setup-openicc"]
+    image = next(action for action in setup._actions if action.dest == "image")
+    assert image.help.endswith(f"or {DEFAULT_DOCKER_IMAGE})")
+
+
 # --- orchestrator ---
 
 OUT_JSON = {
@@ -314,6 +390,27 @@ def test_run_double_sphere_model_success(tmp_path, monkeypatch):
 def test_run_double_sphere_model_nonfinite(tmp_path, monkeypatch):
     bad = json.loads(json.dumps(OUT_JSON))
     bad["final_reproj_error"] = float("nan")
+    monkeypatch.setattr(
+        "gopro_charuco_calibrator.openicc.run_calibrate_camera", _patched_runner(bad)
+    )
+    board_config = _small_board()
+    records, obj_by_id = _records_from_board(board_config, 12)
+    with pytest.raises(OpenICCError, match="did not converge"):
+        run_double_sphere_model(
+            output_dir=tmp_path,
+            camera=CameraConfig(),
+            board_config=board_config,
+            image_size=(1920, 1080),
+            records=records,
+            obj_by_id=obj_by_id,
+            settings=OpenICCSettings(),
+        )
+
+
+def test_run_double_sphere_model_nan_aspect_ratio(tmp_path, monkeypatch):
+    # aspect_ratio is optional, but a NaN one would reach the summary json as bare NaN.
+    bad = json.loads(json.dumps(OUT_JSON))
+    bad["intrinsics"]["aspect_ratio"] = float("nan")
     monkeypatch.setattr(
         "gopro_charuco_calibrator.openicc.run_calibrate_camera", _patched_runner(bad)
     )
