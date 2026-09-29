@@ -41,12 +41,22 @@ def _discarded_points(summary: dict[str, Any]) -> list[dict[str, Any]]:
     summary frame list.
     """
     results = summary.get("results") or []
-    successful = [result for result in results if result.get("ok") is not False]
-    if not successful:
+    # Only models that report per-frame rejections can place points; double_sphere
+    # (OpenICC selects views internally) does not, so fall back to the best cv2 one.
+    with_frames = [
+        result
+        for result in results
+        if result.get("ok") is not False
+        and "rejected_frames" in (result.get("selected") or {})
+    ]
+    if not with_frames:
         return []
-    recommended = min(
-        successful,
-        key=lambda r: r.get("median_view_error_px", r.get("rms", 1e9)) or 1e9,
+    recommended = next(
+        (result for result in with_frames if result.get("recommended")),
+        min(
+            with_frames,
+            key=lambda r: r.get("median_view_error_px", r.get("rms", 1e9)) or 1e9,
+        ),
     )
     rejected = (recommended.get("selected") or {}).get("rejected_frames") or []
     pose_by_name = {
@@ -306,7 +316,9 @@ class CaptureSession:
         )
         summary["gopro"] = self._last_gopro_result
         summary["video_bridge"] = self._last_bridge_result
-        summary["acquisition_mode"] = describe_acquisition_mode(self.config)
+        summary["acquisition_mode"] = describe_acquisition_mode(
+            self.config, self._last_gopro_result
+        )
         summary["rejected_points"] = _discarded_points(summary)
         summary_path = self.output_dir / "caib_marker_board_calibration_summary.json"
         with summary_path.open("w", encoding="utf-8") as stream:
@@ -336,7 +348,7 @@ class CaptureSession:
             return
         payload = {
             "config": self.config.model_dump(),
-            "acquisition_mode": describe_acquisition_mode(self.config),
+            "acquisition_mode": describe_acquisition_mode(self.config, self._last_gopro_result),
             "gopro_apply_result": self._last_gopro_result,
             "video_bridge_result": self._last_bridge_result,
         }

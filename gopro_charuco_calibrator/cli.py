@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from pathlib import Path
 
 import uvicorn
@@ -9,6 +10,7 @@ import yaml
 
 from .app import app, set_default_config
 from .models import AppConfig, BoardConfig, CameraConfig, SolverConfig
+from .openicc import DEFAULT_SOURCE_DIR, build_image
 from .solver import solve_from_frames
 
 
@@ -101,6 +103,19 @@ def cmd_solve_frames(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_setup_openicc(args: argparse.Namespace) -> int:
+    try:
+        build_image(Path(args.source_dir) if args.source_dir else None, args.image)
+    except FileNotFoundError as exc:
+        print(f"error: {exc.filename} not found; install git and Docker first")
+        return 1
+    except subprocess.CalledProcessError as exc:
+        print(f"error: `{' '.join(exc.cmd)}` failed with exit {exc.returncode}")
+        return 1
+    print("OpenICC image ready; the double_sphere model can now solve.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="GoPro caib.io ChArUco calibration app")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -126,6 +141,14 @@ def build_parser() -> argparse.ArgumentParser:
     solve.add_argument("--no-auto-select", action="store_true")
     _add_board_args(solve)
     solve.set_defaults(func=cmd_solve_frames)
+
+    setup = sub.add_parser(
+        "setup-openicc",
+        help="Build the OpenICC Docker image the double_sphere model needs (once, ~10 min)",
+    )
+    setup.add_argument("--source-dir", help=f"Default: {DEFAULT_SOURCE_DIR}")
+    setup.add_argument("--image", help="Image tag (default: $OPENICC_DOCKER_IMAGE or openicc)")
+    setup.set_defaults(func=cmd_setup_openicc)
     return parser
 
 

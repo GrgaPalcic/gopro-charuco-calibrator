@@ -52,6 +52,61 @@ Optional, start from a preset so the camera mode is identical every time:
 uv run gopro-charuco serve --config gopro_charuco_calibrator/presets/gopro13_wide_1080p.yaml
 ```
 
+## HERO13 + Max Lens Mod 2.0 (UMI gripper)
+
+Use this when the dataset was recorded from the HERO13 USB webcam stream with the
+Max Lens Mod 2.0 fitted. Calibrate the camera exactly as it records: mod on,
+webcam Wide, 1080p.
+
+1. One-time setup on each machine: install Docker, make sure your user can run
+   `docker` without sudo (member of the `docker` group), then build the OpenICC
+   backend (about 10 minutes, no GPU):
+
+   ```bash
+   uv run gopro-charuco setup-openicc
+   ```
+
+2. Start the app with the gripper preset:
+
+   ```bash
+   uv run gopro-charuco serve --config gopro_charuco_calibrator/presets/gopro13_umi_gripper_fisheye_1080p.yaml
+   ```
+
+3. Connect the camera over USB with the mod fitted and click `Open Preview`.
+   Check two things before capturing:
+   - the preview is a **round image with black corners**. An image that fills
+     the whole frame means a SuperView/HyperView stretch, which cannot be
+     calibrated;
+   - the status line shows `camera reports: webcam digital lens Wide (0),
+     max lens mod Max Lens 2.0 (2)` with no `WARNING`.
+4. `Start New Run` and follow the guide. Push the board into the curved edge of
+   the circle, near and far, with plenty of tilt. Edge coverage is what makes the
+   ultra-wide model accurate.
+5. `Solve`. The recommended model is `double_sphere` whenever it solves (it is
+   the only model valid over the whole circular image; the `fisheye` numbers look
+   better only because its frame selection drops the edge views). A good result
+   is about 0.6 to 1.1 px with `alpha` clearly below 1.0 in
+   `<camera_name>_double_sphere.json`. `alpha` at or near 1.0 means weak edge
+   coverage: `Resume`, add edge poses, solve again.
+
+Calibrate every camera and mod pair separately, and again whenever a mod is taken
+off and refitted. The preset expects the 11x8 `DICT_5X5_100` calib.io board
+(34 mm squares, 25 mm markers); edit the board fields if yours differs.
+
+What the camera can and cannot do (Open GoPro API v2.0, GoPro Labs):
+
+- The live webcam stream tops out at **1080p**, over USB or Wi-Fi. Labs RTMP
+  live streaming is 480p/720p/1080p too. No live path gives 4K.
+- Wi-Fi webcam works on HERO12/13 but offers the same lens modes and adds
+  compression, so it gains nothing for calibration. This app drives the USB
+  connection only.
+- 4K and 2.7K exist only as on-camera recordings. Intrinsics from a recording do
+  not transfer to the webcam stream (different crop and processing), or the
+  reverse. Calibrate the stream your data was recorded from.
+- Labs helps with sharpness and repeatability, not resolution: `Max Shutter
+  Angle` gives crisper board corners, and a Labs settings QR code locks the same
+  mode on every camera.
+
 ## Typical flow
 
 1. Connect the GoPro over USB.
@@ -76,8 +131,14 @@ on 172.x.x.51, puts the camera into webcam mode, and decodes the UDP MPEG-TS
 stream directly. Only the two settings that define the calibrated model are shown
 by default:
 
-- `Lens / FOV`: 0 is Wide, 2 is Narrow, 3 is SuperView, 4 is Linear
+- `Lens / FOV`: 0 is Wide, 2 is Narrow, 3 is SuperView, 4 is Linear. SuperView
+  is an anamorphic stretch that no camera model fits; never calibrate it.
 - `Resolution`: 4 is 480p, 7 is 720p, 12 is 1080p
+
+After the webcam starts, the app reads back what the camera actually applied
+(webcam lens, lens mod, HyperSmooth) from `/gopro/camera/state`. It shows the
+values on the status line, warns on a mismatch, and records them as `reported_*`
+in `config.json` and the solve summary. The read-back never blocks the preview.
 
 Connection toggles and the recording settings sit in collapsed advanced sections
 with safe defaults, so you normally do not touch them. To calibrate a plain USB
@@ -159,12 +220,15 @@ Ultra-wide fisheye lenses (GoPro Max Lens Mod, ~150–195°) exceed what the
 built-in pinhole/Kannala-Brandt models can fit. The `double_sphere` model covers
 them by driving [OpenImuCameraCalibrator](https://github.com/urbste/OpenImuCameraCalibrator)
 (AGPL-3.0) as an external subprocess — nothing is linked or vendored. Build its
-Docker image once:
+Docker image once (it fetches OpenICC at a pinned commit into
+`~/.cache/gopro-charuco-calibrator/openicc`):
 
 ```bash
-git clone --depth 1 https://github.com/urbste/OpenImuCameraCalibrator /tmp/openicc
-cd /tmp/openicc && docker build -t openicc .
+uv run gopro-charuco setup-openicc
 ```
+
+If the image is missing or your user cannot reach the Docker daemon, the
+double_sphere row in the results says so and names the fix.
 
 Then select **Fisheye + Double Sphere** (or **Double Sphere only**) as the
 calibration model, or put `double_sphere` in a preset's `solver.models`. The

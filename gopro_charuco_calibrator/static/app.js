@@ -417,8 +417,11 @@ function pickRecommended(results) {
     (result) => result && result.ok !== false && (result.median_view_error_px != null || result.rms != null),
   );
   if (!solved.length) return null;
-  // Lower median reprojection error wins (rational_polynomial usually wins on
-  // wide GoPro lenses); fall back to RMS.
+  // The solver marks the recommendation (double_sphere when it solved: the cv2
+  // medians are biased by dropping edge views). Older summaries lack the flag:
+  // lower median reprojection error wins, falling back to RMS.
+  const marked = solved.find((result) => result.recommended === true);
+  if (marked) return marked;
   return solved.slice().sort((a, b) => {
     const am = a.median_view_error_px ?? a.rms ?? 1e9;
     const bm = b.median_view_error_px ?? b.rms ?? 1e9;
@@ -538,8 +541,19 @@ function renderResults(modelResults, coverage, mode) {
   resultsRaw.textContent = JSON.stringify(modelResults, null, 2);
 }
 
+function cameraStateText(gopro) {
+  // What the camera reported after webcam start (read-only), plus any mismatch
+  // with the requested lens mode, so the operator can confirm the mode on screen.
+  const labels = gopro?.camera_state?.labels;
+  if (!labels || !Object.keys(labels).length) return "";
+  const parts = Object.entries(labels).map(([field, label]) => `${field.replaceAll("_", " ")} ${label}`);
+  const warnings = gopro.warnings || [];
+  return ` | camera reports: ${parts.join(", ")}${warnings.length ? ` | WARNING: ${warnings.join("; ")}` : ""}`;
+}
+
 function updateStatus(status) {
-  statusLine.textContent = `${status.state || "idle"}: ${status.message || ""}`;
+  statusLine.textContent =
+    `${status.state || "idle"}: ${status.message || ""}${cameraStateText(status.gopro)}`;
   const captures = status.captures || 0;
   const target = status.target_samples || 0;
   document.getElementById("captureCount").textContent = `${captures}/${target}`;

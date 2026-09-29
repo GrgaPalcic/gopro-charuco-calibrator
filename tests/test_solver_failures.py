@@ -58,8 +58,10 @@ def test_solve_from_frames_records_failed_model(monkeypatch, tmp_path):
             "all_frames": None,
             "selected": None,
             "diagnostics_csv": None,
+            "recommended": False,
         }
     ]
+    assert summary["recommended_model"] is None
     summary_path = tmp_path / "out" / "caib_marker_board_calibration_summary.json"
     assert json.loads(summary_path.read_text())["results"][0]["ok"] is False
 

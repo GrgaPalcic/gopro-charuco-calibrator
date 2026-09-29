@@ -17,14 +17,26 @@ SETTING_DEFS: dict[str, dict[str, Any]] = {
         "title": "Webcam Resolution",
         "options": {4: "480p", 7: "720p", 12: "1080p"},
     },
+    # SuperView/HyperView modes are an anamorphic 16:9 stretch that no camera
+    # model fits (~30px RMS measured); the labels say so to stop them being picked.
     "webcam_fov": {
         "title": "Webcam FOV",
-        "options": {0: "Wide", 2: "Narrow", 3: "SuperView", 4: "Linear"},
+        "options": {
+            0: "Wide",
+            2: "Narrow",
+            3: "SuperView (anamorphic, uncalibratable)",
+            4: "Linear",
+        },
     },
     "webcam_digital_lens": {
         "setting_id": 43,
         "title": "Webcam Digital Lens",
-        "options": {0: "Wide", 2: "Narrow", 3: "SuperView", 4: "Linear"},
+        "options": {
+            0: "Wide",
+            2: "Narrow",
+            3: "SuperView (anamorphic, uncalibratable)",
+            4: "Linear",
+        },
     },
     "video_lens": {
         "setting_id": 121,
@@ -32,15 +44,17 @@ SETTING_DEFS: dict[str, dict[str, Any]] = {
         "options": {
             0: "Wide",
             2: "Narrow",
-            3: "SuperView",
+            3: "SuperView (anamorphic, uncalibratable)",
             4: "Linear",
+            7: "Max SuperView",
             8: "Linear + Horizon Leveling",
-            9: "HyperView",
+            9: "HyperView (anamorphic, uncalibratable)",
             10: "Linear + Horizon Lock",
+            11: "Max HyperView (anamorphic, uncalibratable)",
             12: "Ultra SuperView",
             13: "Ultra Wide",
             14: "Ultra Linear",
-            104: "Ultra HyperView",
+            104: "Ultra HyperView (anamorphic, uncalibratable)",
         },
     },
     "video_resolution": {
@@ -113,6 +127,7 @@ SETTING_DEFS: dict[str, dict[str, Any]] = {
         "title": "Max Lens Mod",
         "options": {
             0: "None",
+            1: "Max Lens 1.0",
             2: "Max Lens 2.0",
             3: "Max Lens 2.5",
             4: "Macro",
@@ -122,10 +137,20 @@ SETTING_DEFS: dict[str, dict[str, Any]] = {
             8: "ND 16",
             9: "ND 32",
             10: "Standard Lens",
+            11: "ND 64",
             100: "Auto Detect",
         },
     },
+    "hypersmooth": {
+        "setting_id": 135,
+        "title": "HyperSmooth",
+        "options": {0: "Off", 1: "Low", 2: "High", 3: "Boost", 4: "Auto Boost", 100: "Standard"},
+    },
 }
+
+# Settings read back from /gopro/camera/state after the webcam starts, so a run
+# records what the camera actually applied rather than only what was requested.
+REPORTED_SETTING_FIELDS = ["webcam_digital_lens", "max_lens_mod", "hypersmooth"]
 
 CAMERA_SETTING_FIELDS = [
     "webcam_digital_lens",
@@ -249,12 +274,54 @@ def _setting_label(field: str, value: Any) -> Any:
     return f"{label} ({value})" if label else value
 
 
-def describe_acquisition_mode(config: Any) -> dict[str, Any]:
+def read_camera_state(client: GoProClient) -> dict[str, Any]:
+    """Read the lens-defining settings the camera reports, for the run record.
+
+    Never raises and never fails the preview: an unreachable or unexpected
+    /gopro/camera/state (e.g. a legacy-only camera) just yields ok=False.
+    """
+    result = client.get("/gopro/camera/state")
+    settings = result.response.get("settings") if isinstance(result.response, dict) else None
+    if not result.ok or not isinstance(settings, dict):
+        return {"ok": False, "error": result.error or "no settings in /gopro/camera/state"}
+    reported: dict[str, int] = {}
+    for field in REPORTED_SETTING_FIELDS:
+        value = settings.get(str(SETTING_DEFS[field]["setting_id"]))
+        if isinstance(value, int) and not isinstance(value, bool):
+            reported[field] = value
+    labels = {field: str(_setting_label(field, value)) for field, value in reported.items()}
+    return {"ok": True, "settings": reported, "labels": labels}
+
+
+def camera_state_warnings(config: GoProSettingsConfig, camera_state: dict[str, Any]) -> list[str]:
+    """Mismatches between the requested lens mode and what the camera reports."""
+    reported = camera_state.get("settings") or {}
+    warnings: list[str] = []
+    lens = reported.get("webcam_digital_lens")
+    if lens is not None and lens != config.webcam_fov:
+        warnings.append(
+            f"camera reports webcam lens {_setting_label('webcam_digital_lens', lens)}, "
+            f"requested {_setting_label('webcam_fov', config.webcam_fov)}; check the preview"
+        )
+    mod = reported.get("max_lens_mod")
+    if config.max_lens_mod is not None and mod is not None and mod != config.max_lens_mod:
+        warnings.append(
+            f"camera reports lens mod {_setting_label('max_lens_mod', mod)}, "
+            f"requested {_setting_label('max_lens_mod', config.max_lens_mod)}"
+        )
+    return warnings
+
+
+def describe_acquisition_mode(
+    config: Any, gopro_result: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Human-readable record of the exact capture mode, for reproducible datasets.
 
     Intrinsics are only valid for the mode used during calibration, so this is
     saved alongside the run config and the solve summary, and shown on solve, so
     later dataset recording can use the identical lens, resolution, and stream.
+    With ``gopro_result``, the settings the camera reported back are added as
+    ``reported_<field>``.
     """
     camera = config.camera
     gopro = config.gopro
@@ -281,6 +348,9 @@ def describe_acquisition_mode(config: Any) -> dict[str, Any]:
             value = getattr(gopro, field)
             if value is not None:
                 mode[field] = _setting_label(field, value)
+        camera_state = (gopro_result or {}).get("camera_state") or {}
+        for field, value in (camera_state.get("settings") or {}).items():
+            mode[f"reported_{field}"] = _setting_label(field, value)
     else:
         mode["device"] = camera.device
     return mode
@@ -465,8 +535,17 @@ def apply_gopro_settings(config: GoProSettingsConfig) -> dict[str, Any]:
             steps.append(webcam_client.set_webcam_fov(config.webcam_fov).as_dict())
         steps.append(webcam_client.webcam_status().as_dict())
 
+    # Read-only and outside `steps`, so it can never fail the preview.
+    camera_state = (
+        read_camera_state(setting_client)
+        if setting_client is not None
+        else {"ok": False, "error": "no Open GoPro settings API"}
+    )
+
     return {
         "enabled": True,
+        "camera_state": camera_state,
+        "warnings": camera_state_warnings(config, camera_state),
         "base_url": base_url,
         "api_style": setting_api_style or webcam_api_style,
         "setting_api_style": setting_api_style,

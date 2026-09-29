@@ -792,6 +792,34 @@ def detect_board_layout(
     return standard[0], standard[1], "standard"
 
 
+def recommended_model(results: list[dict[str, Any]]) -> str | None:
+    """Model the operator should use, or None when nothing solved.
+
+    double_sphere wins whenever it solved: it is the only model valid over the
+    whole ultra-wide image. Comparing error numbers across models is biased here,
+    because the cv2 models' auto-select drops the hard edge views (their median
+    then looks better) while OpenICC reports one aggregate error. Otherwise the
+    lowest median view error wins, falling back to RMS.
+    """
+    solved = [
+        result
+        for result in results
+        if result.get("ok") is not False
+        and (result.get("median_view_error_px") is not None or result.get("rms") is not None)
+    ]
+    if not solved:
+        return None
+    if any(result.get("model") == "double_sphere" for result in solved):
+        return "double_sphere"
+    best = min(
+        solved,
+        key=lambda r: (
+            r["median_view_error_px"] if r.get("median_view_error_px") is not None else r["rms"]
+        ),
+    )
+    return best.get("model")
+
+
 def solve_from_frames(
     *,
     frames_dir: Path,
@@ -846,6 +874,9 @@ def solve_from_frames(
                 )
         except (cv2.error, RuntimeError, ValueError, np.linalg.LinAlgError) as exc:
             results.append(failed_model_result(model_name, exc))
+    recommended = recommended_model(results)
+    for result in results:
+        result["recommended"] = result.get("model") == recommended
     summary = {
         "image_size": list(image_size),
         "frames": frame_summary(records),
@@ -858,6 +889,7 @@ def solve_from_frames(
         },
         "camera": camera.model_dump(),
         "selection": solver.model_dump(),
+        "recommended_model": recommended,
         "results": results,
     }
     summary_path = output_dir / "caib_marker_board_calibration_summary.json"

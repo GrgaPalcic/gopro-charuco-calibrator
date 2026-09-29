@@ -50,6 +50,11 @@ DEFAULT_GRID_SIZE = 0.1
 DEFAULT_TIMEOUT_S = 360.0
 CALIBRATE_CAMERA_BIN = "/OpenImuCameraCalibrator/build/applications/calibrate_camera"
 STDERR_TAIL_CHARS = 2000
+# Pinned so every machine builds the same calibrate_camera (verified with this
+# integration on 2026-09-29); bump deliberately, not by rebuilding HEAD.
+OPENICC_REPO = "https://github.com/urbste/OpenImuCameraCalibrator"
+OPENICC_COMMIT = "d75dda57285c6c1fda0f41e5f4ad901483f73fff"
+DEFAULT_SOURCE_DIR = Path("~/.cache/gopro-charuco-calibrator/openicc")
 
 
 class OpenICCError(RuntimeError):
@@ -200,6 +205,33 @@ def settings_from_env(environ: Mapping[str, str] | None = None) -> OpenICCSettin
     )
 
 
+def build_image_commands(source_dir: Path, image: str) -> list[list[str]]:
+    """Commands that fetch the pinned OpenICC source and build its Docker image."""
+    src = str(source_dir)
+    commands: list[list[str]] = []
+    if not (source_dir / ".git").is_dir():
+        commands += [
+            ["git", "init", "-q", src],
+            ["git", "-C", src, "remote", "add", "origin", OPENICC_REPO],
+        ]
+    commands += [
+        ["git", "-C", src, "fetch", "-q", "--depth", "1", "origin", OPENICC_COMMIT],
+        ["git", "-C", src, "checkout", "-q", "--force", "FETCH_HEAD"],
+        ["docker", "build", "-t", image, src],
+    ]
+    return commands
+
+
+def build_image(source_dir: Path | None = None, image: str | None = None) -> None:
+    """Build the OpenICC Docker image the double_sphere model runs (~10 min)."""
+    source_dir = (source_dir or DEFAULT_SOURCE_DIR).expanduser()
+    image = image or settings_from_env().docker_image
+    source_dir.parent.mkdir(parents=True, exist_ok=True)
+    for command in build_image_commands(source_dir, image):
+        print("$", " ".join(command), flush=True)
+        subprocess.run(command, check=True)
+
+
 def _calibrate_flags(corners: str, out_prefix: str, grid_size: float) -> list[str]:
     return [
         f"--input_corners={corners}",
@@ -248,6 +280,11 @@ def run_calibrate_camera(work_dir: Path, settings: OpenICCSettings) -> dict[str,
     container_name = None if settings.binary_path else f"openicc-{uuid.uuid4().hex[:12]}"
     command = build_command(work_dir, settings, container_name)
     log_path = work_dir / "calibrate_camera.log"
+    # A re-solve of the same run (auto-solve at route end, then Resume + Solve)
+    # reuses work_dir; drop old results so a run that writes none cannot be
+    # mistaken for a fresh solve.
+    for stale in [*work_dir.glob("out*.json"), *work_dir.glob("out/*.json")]:
+        stale.unlink(missing_ok=True)
     try:
         completed = subprocess.run(
             command, capture_output=True, text=True, timeout=settings.timeout_s
@@ -277,6 +314,20 @@ def run_calibrate_camera(work_dir: Path, settings: OpenICCSettings) -> dict[str,
     )
     if completed.returncode != 0:
         tail = (completed.stderr or completed.stdout or "")[-STDERR_TAIL_CHARS:]
+        if not settings.binary_path:
+            lowered = tail.lower()
+            if "unable to find image" in lowered or "pull access denied" in lowered:
+                raise OpenICCError(
+                    f"Docker image '{settings.docker_image}' is not built on this machine. "
+                    "Run `uv run gopro-charuco setup-openicc` once (about 10 minutes), "
+                    "then solve again."
+                )
+            if "permission denied" in lowered and "docker" in lowered:
+                raise OpenICCError(
+                    "This user cannot talk to the Docker daemon. Add it to the docker "
+                    "group (`sudo usermod -aG docker $USER`, then log out and back in) "
+                    "or set OPENICC_BINARY to a native calibrate_camera build."
+                )
         raise OpenICCError(
             f"OpenICC calibrate_camera failed (exit {completed.returncode}): {tail}"
         )

@@ -15,7 +15,7 @@ camera:
 gopro:
   enabled: true
   max_lens_mod: 2        # 2 = Max Lens Mod 2.0; keep the physical lens installed
-  webcam_fov: 0          # 0 = Wide (native fisheye, ~130 deg)
+  webcam_fov: 0          # 0 = Wide; with the mod on this is a ~167 deg circular fisheye
   webcam_resolution: 12  # 12 = 1080p
   webcam_port: 8554
   webcam_protocol: TS
