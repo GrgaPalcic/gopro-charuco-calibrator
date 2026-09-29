@@ -193,7 +193,7 @@ def test_settings_from_env():
     assert settings.binary_path == "/opt/calibrate_camera"
     assert settings.grid_size == 0.05
     assert settings.timeout_s == 120
-    assert settings_from_env({}).docker_image == "openicc"
+    assert settings_from_env({}).docker_image == "gopro-charuco-openicc:d75dda5-p1"
     assert settings_from_env({"OPENICC_DOCKER_ROOT": "1"}).docker_run_as_user is False
 
 

@@ -26,14 +26,18 @@ from gopro_charuco_calibrator.models import (
     GoProSettingsConfig,
 )
 from gopro_charuco_calibrator.openicc import (
+    DEFAULT_SOURCE_DIR,
     OPENICC_COMMIT,
+    OPENICC_PATCHES,
     OPENICC_REPO,
     OpenICCError,
     OpenICCSettings,
+    apply_source_patches,
     build_image_commands,
     run_calibrate_camera,
     run_double_sphere_model,
     run_openicc_model,
+    settings_from_env,
 )
 from gopro_charuco_calibrator.projection import (
     board_reach_deg,
@@ -248,7 +252,9 @@ def _openicc_image_present() -> bool:
     try:
         return (
             subprocess.run(
-                ["docker", "image", "inspect", "openicc"], capture_output=True, timeout=15
+                ["docker", "image", "inspect", settings_from_env().docker_image],
+                capture_output=True,
+                timeout=15,
             ).returncode
             == 0
         )
@@ -373,16 +379,17 @@ def test_double_sphere_recovers_measured_hero13_intrinsics(tmp_path):
     # Compare the models, not the numbers: in Double Sphere f, xi and alpha trade
     # off against each other, and OpenICC is not deterministic, so on this exact
     # data f landed anywhere in 573-626 px over ten runs (2026-09-29) at the same RMS.
-    # What must hold is that the same 3D rays land on the same pixels. Out to 70 deg
-    # that was 0.57-0.85 px in 8 of 10 runs and 2.22 / 2.68 px in the other two
-    # (2026-09-29), so the bound leaves room for those without hiding a broken solve.
+    # What must hold is that the same 3D rays land on the same pixels. Out to 70 deg:
+    # 0.17-0.24 px over 5 runs with the patched image (OPENICC_PATCHES), against
+    # 0.57-2.68 px unpatched, where the distortion stayed fitted around the image centre
+    # (2026-09-29).
     rays = rays_to_angle(70.0)
     expected, _ = project_double_sphere(rays, fx, fx, cx, cy, xi, alpha)
     recovered, valid = project_double_sphere(
         rays, matrix[0][0], matrix[1][1], matrix[0][2], matrix[1][2], *result["distortion"]
     )
     assert valid.all()
-    assert np.abs(recovered - expected).max() < 3.5
+    assert np.abs(recovered - expected).max() < 1.0
     artifact = json.loads(Path(result["json"]).read_text(encoding="utf-8"))
     assert artifact["intrinsic_type"] == "DOUBLE_SPHERE"
 
@@ -424,25 +431,76 @@ def _solve_kannala_brandt_against_truth(tmp_path, edge_views: int = 0):
 @pytest.mark.skipif(not _openicc_image_present(), reason="needs the openicc docker image")
 def test_kannala_brandt_matches_true_double_sphere_on_hero13(tmp_path):
     # Does OpenICC's Kannala-Brandt (FISHEYE, the file UMI loads) hold on the ~167 deg
-    # Max Lens Mod image? Solved on the same Double Sphere rendered scene as above.
-    # Measured over 19 runs on 2026-09-29 (OpenICC is not deterministic): board reach
-    # 64.4 deg; worst distance to the true lens out to that reach 0.49-0.84 px, out to
-    # 70 deg 0.58-1.63 px, out to 80 deg 0.84-5.42 px (past the board, extrapolated,
-    # so not asserted).
+    # Max Lens Mod image? Solved on the same Double Sphere rendered scene as above,
+    # with the patched image (OPENICC_PATCHES), 5 runs on 2026-09-29: board reach
+    # 64.4 deg; worst distance to the true lens out to that reach 0.23-0.44 px, out to
+    # 70 deg 0.54-0.99 px (past the board, so extrapolated). Unpatched it was 0.49-0.84
+    # and 0.58-1.63 px over 19 runs.
     reach, diffs = _solve_kannala_brandt_against_truth(tmp_path)
     assert reach == pytest.approx(64.4, abs=0.5)
-    assert diffs[reach] < 2.0
-    assert diffs[70.0] < 3.0
+    assert diffs[reach] < 1.0
+    assert diffs[70.0] < 2.0
 
 
 @pytest.mark.skipif(not _openicc_image_present(), reason="needs the openicc docker image")
 def test_kannala_brandt_solves_with_views_at_the_rim(tmp_path):
-    # With 30 more views out to the 83.5 deg rim, both OpenICC models still fit the
-    # corners at noise level (rms 0.19-0.21 px) but land 0.9-4.8 px (KB, 18 runs) and
-    # 0.2-3.9 px (DS, 10 runs) from the true lens, in the middle as much as at the rim
-    # (2026-09-29). The four KB coefficients are not the limit: they fit this lens's
-    # curve to 0.0002 px out to 83.5 deg (test_kannala_brandt_can_represent_hero13_lens).
-    # This bound catches a fit that falls apart at the rim, not sub-pixel drift.
+    # With 30 more views out to the 83.5 deg rim, the patched image (OPENICC_PATCHES)
+    # put KB 0.11-0.32 px from the true lens out to the rim over 5 runs (2026-09-29).
+    # Unpatched, the distortion stayed fitted around the image centre and KB landed
+    # 0.9-4.8 px off (18 runs) at the same noise-level rms. The four KB coefficients are
+    # not the limit: they fit this lens's curve to 0.0002 px out to 83.5 deg
+    # (test_kannala_brandt_can_represent_hero13_lens).
     reach, diffs = _solve_kannala_brandt_against_truth(tmp_path, edge_views=30)
     assert reach > 83.0
-    assert diffs[reach] < 10.0
+    assert diffs[reach] < 1.0
+
+
+@pytest.mark.skipif(not _openicc_image_present(), reason="needs the openicc docker image")
+def test_double_sphere_solves_with_views_at_the_rim(tmp_path):
+    # The same rim scene through Double Sphere: 0.09-0.32 px from the true lens out to
+    # the 83.5 deg rim over 5 runs with the patched image (2026-09-29); unpatched it was
+    # 0.2-3.9 px (10 runs).
+    fx, cx, cy, xi, alpha = HERO13_DS
+    image_size, board_config, obj_by_id, records = _hero13_scene(edge_views=30)
+    result = run_double_sphere_model(
+        output_dir=tmp_path,
+        camera=CameraConfig(camera_name="synthetic_hero13", width=1920, height=1080),
+        board_config=board_config,
+        image_size=image_size,
+        records=records,
+        obj_by_id=obj_by_id,
+    )
+    assert result["ok"] is True, result
+    rays = rays_to_angle(HERO13_CIRCLE_DEG)
+    expected, _ = project_double_sphere(rays, fx, fx, cx, cy, xi, alpha)
+    matrix = result["camera_matrix"]
+    recovered, valid = project_double_sphere(
+        rays, matrix[0][0], matrix[1][1], matrix[0][2], matrix[1][2], *result["distortion"]
+    )
+    assert valid.all()
+    assert np.linalg.norm(recovered - expected, axis=1).max() < 1.0
+
+
+def test_source_patch_frees_the_distortion_in_the_final_adjustment(tmp_path):
+    relative, old, new = OPENICC_PATCHES[0]
+    source = tmp_path / relative
+    source.parent.mkdir(parents=True)
+    source.write_text(f"// stage 3\n{old}\n", encoding="utf-8")
+    apply_source_patches(tmp_path)
+    patched = source.read_text(encoding="utf-8")
+    assert new in patched and old not in patched
+    apply_source_patches(tmp_path)  # a rebuild re-applies it without complaint
+    assert source.read_text(encoding="utf-8") == patched
+    source.write_text("// some other OpenICC version\n", encoding="utf-8")
+    with pytest.raises(OpenICCError, match="setup-openicc"):
+        apply_source_patches(tmp_path)
+
+
+def test_source_patch_matches_the_pinned_checkout():
+    # When the pinned source has been fetched (setup-openicc ran), the patch must apply to it.
+    checkout = DEFAULT_SOURCE_DIR.expanduser()
+    relative, old, new = OPENICC_PATCHES[0]
+    if not (checkout / relative).is_file():
+        pytest.skip("OpenICC source not fetched on this machine")
+    text = (checkout / relative).read_text(encoding="utf-8")
+    assert text.count(old) == 1 or new in text

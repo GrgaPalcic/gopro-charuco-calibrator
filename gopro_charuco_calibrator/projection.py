@@ -92,6 +92,8 @@ def kb_vs_double_sphere_px(
 ) -> float:
     """Worst pixel distance between the two models over rays out to ``max_angle_deg``.
 
+    NaN when Double Sphere projects none of those rays.
+
     UMI loads Kannala-Brandt with fy = fx (it ignores aspect_ratio), so the KB side
     is evaluated the way UMI will use it.
     """
@@ -101,4 +103,6 @@ def kb_vs_double_sphere_px(
     kb_pixels = project_kannala_brandt(
         rays, matrix[0][0], matrix[0][0], matrix[0][2], matrix[1][2], kb_result["distortion"]
     )
+    if not valid.any():
+        return float("nan")
     return float(np.linalg.norm(kb_pixels[valid] - ds_pixels[valid], axis=1).max())

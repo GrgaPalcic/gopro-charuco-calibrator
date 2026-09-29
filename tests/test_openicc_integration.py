@@ -1,6 +1,6 @@
 """End-to-end Double Sphere solve through the real OpenICC Docker image.
 
-Skipped unless the `openicc` image exists AND FRAMES_DIR points at a folder of
+Skipped unless the OpenICC image exists AND FRAMES_DIR points at a folder of
 capture_*.jpg frames of the configured board, e.g.:
 
     FRAMES_DIR=~/Downloads/gopro13_umi_gripper_20260610_140106/frames \
@@ -16,7 +16,7 @@ import pytest
 
 from gopro_charuco_calibrator.boards import make_caib_board
 from gopro_charuco_calibrator.models import BoardConfig, CameraConfig
-from gopro_charuco_calibrator.openicc import run_double_sphere_model
+from gopro_charuco_calibrator.openicc import DEFAULT_DOCKER_IMAGE, run_double_sphere_model
 from gopro_charuco_calibrator.solver import detect_frames
 
 
@@ -24,7 +24,12 @@ def _docker_image_present() -> bool:
     try:
         return (
             subprocess.run(
-                ["docker", "image", "inspect", os.environ.get("OPENICC_DOCKER_IMAGE", "openicc")],
+                [
+                    "docker",
+                    "image",
+                    "inspect",
+                    os.environ.get("OPENICC_DOCKER_IMAGE", DEFAULT_DOCKER_IMAGE),
+                ],
                 capture_output=True,
                 timeout=15,
             ).returncode

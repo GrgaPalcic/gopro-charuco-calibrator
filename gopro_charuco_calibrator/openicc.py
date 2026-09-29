@@ -11,7 +11,7 @@ directly: scene point ids are ``marker_id * 4 + corner_index`` and views are
 keyed by synthetic microsecond timestamps. Backend knobs come from environment
 variables so presets stay machine-portable:
 
-- ``OPENICC_DOCKER_IMAGE`` (default ``openicc``)
+- ``OPENICC_DOCKER_IMAGE`` (default ``gopro-charuco-openicc:d75dda5-p1``, built by setup-openicc)
 - ``OPENICC_BINARY`` (path to a native calibrate_camera; bypasses Docker)
 - ``OPENICC_GRID_SIZE`` (pose voxel filter, default 0.1)
 - ``OPENICC_TIMEOUT_S`` (default 360)
@@ -45,7 +45,10 @@ MIN_POINTS_PER_VIEW = 4
 # coordinates and scale the intrinsics back afterwards (matches the
 # downsample_factor=2 workflow OpenICC itself documents for 4K GoPro footage).
 MAX_SOLVE_HEIGHT = 1080
-DEFAULT_DOCKER_IMAGE = "openicc"
+# The image name carries the commit and the patch level, so an image built before a
+# patch was added is not silently reused: its absence triggers the "run
+# setup-openicc" message instead.
+DEFAULT_DOCKER_IMAGE = "gopro-charuco-openicc:d75dda5-p1"
 DEFAULT_GRID_SIZE = 0.1
 DEFAULT_TIMEOUT_S = 360.0
 CALIBRATE_CAMERA_BIN = "/OpenImuCameraCalibrator/build/applications/calibrate_camera"
@@ -55,6 +58,31 @@ STDERR_TAIL_CHARS = 2000
 OPENICC_REPO = "https://github.com/urbste/OpenImuCameraCalibrator"
 OPENICC_COMMIT = "d75dda57285c6c1fda0f41e5f4ad901483f73fff"
 DEFAULT_SOURCE_DIR = Path("~/.cache/gopro-charuco-calibrator/openicc")
+# Source patches applied to the pinned checkout before the image is built: (file, old,
+# new). At d75dda5, calibrate_camera fits the distortion only in its first bundle
+# adjustment, with the principal point held at the image centre. The later stages free
+# the principal point, but the final one refines the distortion only for PINHOLE, so for
+# DOUBLE_SPHERE and FISHEYE the distortion stays fitted around the wrong centre. The
+# HERO13's principal point sits ~10 px off centre, which left both models 0.4-5.4 px off
+# the true lens on synthetic Max Lens Mod data (2026-09-29). The patch lets the final
+# adjustment refine the distortion for every model except PINHOLE_RADIAL_TANGENTIAL,
+# which keeps its own tangential-only branch.
+OPENICC_PATCHES = [
+    (
+        "src/core/camera_calibrator.cc",
+        """      theia::OptimizeIntrinsicsType::ASPECT_RATIO;
+
+  if (camera_model_ == "PINHOLE") {""",
+        """      theia::OptimizeIntrinsicsType::ASPECT_RATIO;
+
+  if (camera_model_ != "PINHOLE_RADIAL_TANGENTIAL") {""",
+    ),
+]
+
+# calibrate_camera crashed with SIGSEGV (exit 139) once in ~165 runs, in the FISHEYE
+# view initialisation (2026-09-29); the same corners solved fine on every other run, so
+# a run that dies from a signal is run once more before it counts as a failure.
+CRASH_RETRIES = 1
 
 
 @dataclass(frozen=True)
@@ -227,8 +255,26 @@ def settings_from_env(environ: Mapping[str, str] | None = None) -> OpenICCSettin
     )
 
 
+def apply_source_patches(source_dir: Path) -> None:
+    """Apply OPENICC_PATCHES to a checkout; idempotent, and loud if the source moved."""
+    for relative, old, new in OPENICC_PATCHES:
+        path = source_dir / relative
+        text = path.read_text(encoding="utf-8")
+        if new in text:
+            continue
+        if text.count(old) != 1:
+            raise OpenICCError(
+                f"Cannot patch {path}: the expected code is not there once. The checkout is "
+                f"not OpenICC {OPENICC_COMMIT[:7]}; delete {source_dir} and run setup-openicc."
+            )
+        path.write_text(text.replace(old, new), encoding="utf-8")
+
+
 def build_image_commands(source_dir: Path, image: str) -> list[list[str]]:
-    """Commands that fetch the pinned OpenICC source and build its Docker image."""
+    """Commands that fetch the pinned OpenICC source and build its Docker image.
+
+    ``build_image`` applies OPENICC_PATCHES between the checkout and ``docker build``.
+    """
     src = str(source_dir)
     commands: list[list[str]] = []
     if not (source_dir / ".git").is_dir():
@@ -249,9 +295,14 @@ def build_image(source_dir: Path | None = None, image: str | None = None) -> Non
     source_dir = (source_dir or DEFAULT_SOURCE_DIR).expanduser()
     image = image or settings_from_env().docker_image
     source_dir.parent.mkdir(parents=True, exist_ok=True)
-    for command in build_image_commands(source_dir, image):
+    commands = build_image_commands(source_dir, image)
+    for command in commands[:-1]:
         print("$", " ".join(command), flush=True)
         subprocess.run(command, check=True)
+    print(f"patching {source_dir} ({len(OPENICC_PATCHES)} patch)", flush=True)
+    apply_source_patches(source_dir)
+    print("$", " ".join(commands[-1]), flush=True)
+    subprocess.run(commands[-1], check=True)
 
 
 def _calibrate_flags(
@@ -303,12 +354,17 @@ def _result_json_path(work_dir: Path) -> Path:
     )
 
 
-def run_calibrate_camera(
-    work_dir: Path, settings: OpenICCSettings, camera_model: str = "DOUBLE_SPHERE"
-) -> dict[str, Any]:
+def _died_from_signal(returncode: int) -> bool:
+    # A native binary killed by a signal reports -signal; Docker reports 128 + signal
+    # (139 = SIGSEGV). Docker's own failures are 125-127 and are not retried.
+    return returncode < 0 or returncode >= 128
+
+
+def _run_calibrate_camera_once(
+    work_dir: Path, settings: OpenICCSettings, camera_model: str
+) -> tuple[subprocess.CompletedProcess, list[str]]:
     container_name = None if settings.binary_path else f"openicc-{uuid.uuid4().hex[:12]}"
     command = build_command(work_dir, settings, container_name, camera_model)
-    log_path = work_dir / "calibrate_camera.log"
     # A re-solve of the same run (auto-solve at route end, then Resume + Solve)
     # reuses work_dir; drop old results so a run that writes none cannot be
     # mistaken for a fresh solve.
@@ -335,12 +391,24 @@ def run_calibrate_camera(
         raise OpenICCError(
             f"OpenICC calibrate_camera timed out after {settings.timeout_s:.0f}s"
         ) from exc
+    return completed, command
 
-    log_path.write_text(
-        f"$ {' '.join(command)}\n\n--- stdout ---\n{completed.stdout}\n"
-        f"--- stderr ---\n{completed.stderr}\n",
-        encoding="utf-8",
-    )
+
+def run_calibrate_camera(
+    work_dir: Path, settings: OpenICCSettings, camera_model: str = "DOUBLE_SPHERE"
+) -> dict[str, Any]:
+    log_path = work_dir / "calibrate_camera.log"
+    crash_logs = []
+    for attempt in range(CRASH_RETRIES + 1):
+        completed, command = _run_calibrate_camera_once(work_dir, settings, camera_model)
+        log = (
+            f"$ {' '.join(command)}\n\n--- stdout ---\n{completed.stdout}\n"
+            f"--- stderr ---\n{completed.stderr}\n"
+        )
+        if not _died_from_signal(completed.returncode) or attempt == CRASH_RETRIES:
+            break
+        crash_logs.append(f"--- crashed (exit {completed.returncode}), run again ---\n{log}\n")
+    log_path.write_text("".join(crash_logs) + log, encoding="utf-8")
     if completed.returncode != 0:
         tail = (completed.stderr or completed.stdout or "")[-STDERR_TAIL_CHARS:]
         if not settings.binary_path:
@@ -387,8 +455,12 @@ def _require_finite(result: Mapping[str, Any], params: Sequence[str] = ("xi", "a
     intrinsics = result.get("intrinsics")
     if not isinstance(intrinsics, Mapping):
         raise OpenICCError("OpenICC result has no 'intrinsics' object")
+    # aspect_ratio is optional (1.0 when absent), but a NaN one would reach the summary
+    # json as a bare NaN, which the browser cannot parse.
+    optional = ("aspect_ratio",) if "aspect_ratio" in intrinsics else ()
     values = [result.get("final_reproj_error")] + [
-        intrinsics.get(key) for key in ("focal_length", "principal_pt_x", "principal_pt_y", *params)
+        intrinsics.get(key)
+        for key in ("focal_length", "principal_pt_x", "principal_pt_y", *params, *optional)
     ]
     for value in values:
         if not isinstance(value, (int, float)) or not math.isfinite(value):

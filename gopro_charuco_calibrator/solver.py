@@ -864,6 +864,10 @@ def umi_check(
             max_diff = kb_vs_double_sphere_px(kb_result, ds_result, reach)
             if not math.isfinite(max_diff):
                 max_diff = None
+    # OpenICC solves at 1080-row scale (MAX_SOLVE_HEIGHT), so the same agreement is
+    # proportionally more native pixels on a taller image: scale the threshold with it.
+    solve_scale = float((kb_result.get("openicc") or {}).get("solve_downsample_factor") or 1.0)
+    max_diff_allowed = UMI_MAX_DIFF_PX * solve_scale
     warnings = []
     if abs(aspect - 1.0) > UMI_ASPECT_TOLERANCE:
         warnings.append(
@@ -872,13 +876,15 @@ def umi_check(
             "stretched. Check that the video is not scaled or cropped unevenly, then "
             "calibrate again."
         )
-    if max_diff is not None and max_diff > UMI_MAX_DIFF_PX:
+    if max_diff is not None and max_diff > max_diff_allowed:
+        # The reference is Double Sphere as solved, not the true lens: either file can be
+        # the one that is off.
         warnings.append(
-            f"The UMI (Kannala-Brandt) file differs from Double Sphere by up to "
-            f"{max_diff:.1f} px out to {reach:.0f}°, the widest angle the board reached, "
-            "so UMI may be off by about that much. The two are solved separately and can "
-            "drift apart: solve again, and if the gap stays, add views near the edge of "
-            "the circle."
+            f"The two fisheye solves disagree: the UMI file (Kannala-Brandt) and Double "
+            f"Sphere land up to {max_diff:.2f} px apart out to {reach:.0f}°, the widest "
+            f"angle the board reached (a match is within {max_diff_allowed:.1f} px at this "
+            "resolution). One of them is off. Solve again and use the files once the two "
+            "agree; if the gap stays, add views near the edge of the circle."
         )
     return {
         "board_reach_deg": reach,
@@ -892,7 +898,24 @@ def _attach_umi_check(results: list[dict[str, Any]], records: list[DetectionReco
     kb_result = _solved(results, "kannala_brandt")
     if kb_result is None:
         return
-    kb_result["umi_check"] = umi_check(kb_result, _solved(results, "double_sphere"), records)
+    ds_result = _solved(results, "double_sphere")
+    try:
+        check = umi_check(kb_result, ds_result, records)
+    except Exception as exc:  # the check is advice; never lose a finished solve to it
+        check = {
+            "board_reach_deg": None,
+            "max_diff_vs_double_sphere_px": None,
+            "aspect_ratio": None,
+            "warnings": [
+                f"Could not compare the UMI file with Double Sphere ({type(exc).__name__}: "
+                f"{exc}). The files were still written; solve again to get the check."
+            ],
+        }
+    kb_result["umi_check"] = check
+    disagree = [w for w in check["warnings"] if w.startswith("The two fisheye solves disagree")]
+    if ds_result is not None and disagree:
+        # Double Sphere is the recommended row, and it may be the one that is off.
+        ds_result.setdefault("warnings", []).extend(disagree)
 
 
 def solve_from_frames(

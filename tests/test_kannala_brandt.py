@@ -28,6 +28,7 @@ from gopro_charuco_calibrator.projection import (
 )
 from gopro_charuco_calibrator.solver import (
     DetectionRecord,
+    _attach_umi_check,
     recommended_model,
     solve_from_frames,
     umi_check,
@@ -451,3 +452,31 @@ def test_gripper_preset_solves_all_three_models():
 
     _title, config = presets.get_preset("gopro13_umi_gripper_fisheye_1080p")
     assert config.solver.models == ["double_sphere", "kannala_brandt", "fisheye"]
+
+
+def test_umi_check_threshold_follows_the_solve_scale():
+    # OpenICC solves at 1080-row scale; on a 4K run the same agreement is twice the pixels.
+    kb = _kb_result((0.0, 0.0, 0.0, 0.0))
+    diff = umi_check(kb, _ds_result(), _corner_records(70.0))["max_diff_vs_double_sphere_px"]
+    kb["openicc"]["solve_downsample_factor"] = diff + 1.0
+    scaled = umi_check(kb, _ds_result(), _corner_records(70.0))
+    assert not any("disagree" in warning for warning in scaled["warnings"])
+
+
+def test_disagreement_also_warns_on_the_double_sphere_row():
+    # Double Sphere is the recommended row, and it can be the file that is off.
+    results = [_ds_result(), _kb_result((0.0, 0.0, 0.0, 0.0))]
+    _attach_umi_check(results, _corner_records(70.0))
+    assert any("disagree" in warning for warning in results[0]["warnings"])
+    assert results[1]["umi_check"]["warnings"]
+
+
+def test_a_failing_umi_check_keeps_the_solve(monkeypatch):
+    def broken(*_args):
+        raise ValueError("no rays")
+
+    monkeypatch.setattr("gopro_charuco_calibrator.solver.umi_check", broken)
+    results = [_ds_result(), _kb_result()]
+    _attach_umi_check(results, _corner_records(70.0))
+    assert "Could not compare" in results[1]["umi_check"]["warnings"][0]
+    assert "warnings" not in results[0]
