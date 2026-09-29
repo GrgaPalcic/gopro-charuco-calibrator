@@ -8,12 +8,14 @@ const captureBtn = document.getElementById("captureBtn");
 const solveBtn = document.getElementById("solveBtn");
 const statusLine = document.getElementById("statusLine");
 const preview = document.getElementById("preview");
+const previewEmpty = document.getElementById("previewEmpty");
 const results = document.getElementById("results");
 const resultsPanel = document.getElementById("resultsPanel");
 const verdictBox = document.getElementById("verdict");
 const verdictBadge = document.getElementById("verdictBadge");
 const verdictText = document.getElementById("verdictText");
 const verdictReasons = document.getElementById("verdictReasons");
+const recFigures = document.getElementById("recFigures");
 const resultGrid = document.getElementById("resultGrid");
 const resultsRaw = document.getElementById("resultsRaw");
 const scatter = document.getElementById("scatter");
@@ -21,7 +23,15 @@ const guideOverlay = document.getElementById("guideOverlay");
 const guidePrompt = document.getElementById("guidePrompt");
 const streamStatus = document.getElementById("streamStatus");
 const streamStatusText = document.getElementById("streamStatusText");
+const cameraReadout = document.getElementById("cameraReadout");
 const goproControls = document.getElementById("goproControls");
+const deviceDetails = document.getElementById("deviceDetails");
+const boardSummary = document.getElementById("boardSummary");
+const steps = {
+  connect: document.getElementById("stepConnect"),
+  capture: document.getElementById("stepCapture"),
+  solve: document.getElementById("stepSolve"),
+};
 
 const presetSelect = document.getElementById("presetSelect");
 const presetLoad = document.getElementById("presetLoad");
@@ -41,6 +51,33 @@ const firewallDismiss = document.getElementById("firewallDismiss");
 const STREAM_URL = "/api/session/stream.mjpg";
 const FALLBACK_URL = "/api/session/latest.jpg";
 
+// Canvas colours, mirroring the CSS tokens in style.css.
+const COLOR = {
+  field: "#0b0c0e",
+  grid: "rgba(155, 154, 149, 0.14)",
+  frame: "#454a54",
+  signal: "#e9a23b",
+  signalSoft: "rgba(233, 162, 59, 0.45)",
+  ink: "rgba(232, 230, 225, 0.8)",
+  inkFill: "rgba(232, 230, 225, 0.1)",
+  muted: "rgba(155, 154, 149, 0.8)",
+  pass: "#7fbf8e",
+  fail: "#e06a5a",
+  target: "#6f9fd8",
+};
+
+// Human names for the session states, for the status line.
+const STATE_LABEL = {
+  idle: "Idle",
+  preview: "Previewing",
+  capturing: "Capturing",
+  paused: "Paused",
+  complete: "Route complete",
+  solving: "Solving",
+  solved: "Solved",
+  error: "Error",
+};
+
 let defaults = null;
 let pollTimer = null;
 let streamActive = false;
@@ -49,6 +86,7 @@ let firewallDismissed = false;
 let lastFirewallCmd = "";
 let autoSolved = false;
 let currentState = "idle";
+let lastStatus = null;
 
 function setDeep(obj, path, value) {
   const parts = path.split(".");
@@ -130,6 +168,7 @@ function populateForm(config, dicts, goproOptions) {
     setFormValue(input.name, getDeep(config, input.name));
   }
   syncGoproVisibility();
+  updateBoardSummary();
 }
 
 function readForm() {
@@ -154,7 +193,18 @@ function readForm() {
 
 function syncGoproVisibility() {
   const enabled = form.elements["gopro.enabled"];
-  if (goproControls && enabled) goproControls.hidden = !enabled.checked;
+  if (!enabled) return;
+  if (goproControls) goproControls.hidden = !enabled.checked;
+  // Device and pixel format matter only for a plain camera: show them then.
+  if (deviceDetails && !enabled.checked) deviceDetails.open = true;
+}
+
+function updateBoardSummary() {
+  const value = (name) => form.elements[name]?.value;
+  const dict = (value("board.aruco_dict") || "").replace(/^DICT_/, "");
+  boardSummary.textContent =
+    `${value("board.cols")}×${value("board.rows")} · ${dict} · `
+    + `${Number(value("board.square_m"))}/${Number(value("board.marker_m"))} mm`;
 }
 
 async function api(path, options = {}) {
@@ -173,6 +223,12 @@ function percent(value) {
   return `${Math.round((value || 0) * 100)}%`;
 }
 
+function num(value, digits = 2) {
+  return value == null || Number.isNaN(value) ? "n/a" : Number(value).toFixed(digits);
+}
+
+// ---- Stream ----
+
 function setStreamStatus(state, text) {
   streamStatus.dataset.state = state;
   streamStatusText.textContent = text;
@@ -183,7 +239,7 @@ function startStream() {
   streamActive = true;
   clearInterval(fallbackTimer);
   fallbackTimer = null;
-  setStreamStatus("connecting", "connecting...");
+  setStreamStatus("connecting", "connecting…");
   preview.src = STREAM_URL;
 }
 
@@ -223,6 +279,8 @@ preview.addEventListener("error", () => {
   if (streamActive && !fallbackTimer) startFallback();
 });
 
+// ---- Firewall ----
+
 function extractUfwFromError(error) {
   const match = /sudo ufw allow[^\n]*/.exec(error || "");
   return match ? match[0] : "";
@@ -245,6 +303,89 @@ function renderFirewall(bridge, fwCmd) {
   firewallRaw.textContent = JSON.stringify(bridge, null, 2);
 }
 
+// ---- Camera readout ----
+
+const READOUT_KEYS = {
+  webcam_digital_lens: "Lens",
+  max_lens_mod: "Mod",
+  hypersmooth: "HyperSmooth",
+};
+
+function chip(text, {key = "", kind = ""} = {}) {
+  const el = document.createElement("span");
+  el.className = `chip${kind ? ` chip-${kind}` : ""}`;
+  if (key) {
+    const k = document.createElement("span");
+    k.className = "chip-key";
+    k.textContent = key;
+    el.append(k);
+  }
+  el.append(document.createTextNode(text));
+  return el;
+}
+
+// What the camera itself reported after the webcam started (read back, never
+// assumed), plus any mismatch with what was requested.
+function renderReadout(gopro, config) {
+  const chips = [];
+  const labels = gopro?.camera_state?.labels;
+  if (labels && Object.keys(labels).length) {
+    for (const [field, label] of Object.entries(labels)) {
+      chips.push(chip(label, {key: READOUT_KEYS[field] || field}));
+    }
+  } else if (gopro?.enabled) {
+    chips.push(chip("camera did not report its settings", {kind: "muted"}));
+  } else if (config?.gopro?.enabled) {
+    chips.push(chip("camera settings appear after Open preview", {kind: "muted"}));
+  }
+  for (const warning of gopro?.warnings || []) {
+    chips.push(chip(warning, {key: "Check", kind: "warn"}));
+  }
+  cameraReadout.replaceChildren(...chips);
+}
+
+// ---- Steps ----
+
+function stepStates(state, captures, minFrames) {
+  const live = !["idle", "error"].includes(state);
+  const capturing = ["capturing", "paused"].includes(state);
+  const captured = ["complete", "solving", "solved"].includes(state);
+  let connect = live ? "done" : "current";
+  let capture = "pending";
+  let solve = "pending";
+  if (live) capture = captured ? "done" : "current";
+  if (state === "solved") solve = "done";
+  else if (state === "solving" || state === "complete") solve = "current";
+  else if (capturing && captures >= minFrames) solve = "current";
+  if (state === "error") connect = "current";
+  return {connect, capture, solve};
+}
+
+function renderSteps(state, captures, minFrames) {
+  for (const [name, value] of Object.entries(stepStates(state, captures, minFrames))) {
+    steps[name].dataset.stepState = value;
+  }
+}
+
+// ---- Canvases ----
+
+function fitCanvas(canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = Math.max(1, rect.width);
+  const cssH = Math.max(1, rect.height);
+  const pixelW = Math.round(cssW * dpr);
+  const pixelH = Math.round(cssH * dpr);
+  if (canvas.width !== pixelW || canvas.height !== pixelH) {
+    canvas.width = pixelW;
+    canvas.height = pixelH;
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+  return {ctx, cssW, cssH};
+}
+
 function updateBars(coverage) {
   document.getElementById("barX").value = coverage?.x?.progress || 0;
   document.getElementById("barY").value = coverage?.y?.progress || 0;
@@ -252,73 +393,75 @@ function updateBars(coverage) {
   document.getElementById("barSkew").value = coverage?.skew?.progress || 0;
 }
 
-function drawScatter(points, rejected) {
-  const ctx = scatter.getContext("2d");
-  const w = scatter.width;
-  const h = scatter.height;
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = "#080a0d";
-  ctx.fillRect(0, 0, w, h);
-  ctx.strokeStyle = "#46505c";
+// The coverage map is the image field itself (same aspect as the stream).
+// Each captured view is drawn as its board footprint, so it is obvious whether
+// the board reached the edges, which is what decides wide-lens model quality.
+function drawCoverageMap(points, rejected, imageSize) {
+  const {ctx, cssW, cssH} = fitCanvas(scatter);
+  const [natW, natH] = imageSize?.length === 2 ? imageSize : [16, 9];
+  const scale = Math.min(cssW / natW, cssH / natH);
+  const w = natW * scale;
+  const h = natH * scale;
+  const ox = (cssW - w) / 2;
+  const oy = (cssH - h) / 2;
+  const px = (x) => ox + x * w;
+  const py = (y) => oy + y * h;
+
+  ctx.fillStyle = COLOR.field;
+  ctx.fillRect(ox, oy, w, h);
+  ctx.strokeStyle = COLOR.grid;
   ctx.lineWidth = 1;
-  for (let i = 1; i < 5; i++) {
-    const x = (i / 5) * w;
-    const y = (i / 5) * h;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, h);
-    ctx.moveTo(0, y);
-    ctx.lineTo(w, y);
-    ctx.stroke();
+  ctx.beginPath();
+  for (let i = 1; i < 10; i++) {
+    ctx.moveTo(px(i / 10), oy);
+    ctx.lineTo(px(i / 10), oy + h);
+    ctx.moveTo(ox, py(i / 10));
+    ctx.lineTo(ox + w, py(i / 10));
   }
-  ctx.strokeStyle = "#d49a37";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(0.2 * w, 0.2 * h, 0.6 * w, 0.6 * h);
+  ctx.stroke();
+  ctx.strokeStyle = COLOR.frame;
+  ctx.strokeRect(ox + 0.5, oy + 0.5, w - 1, h - 1);
+
+  // The spread the capture route asks for (0.2 to 0.8 of the frame).
+  ctx.setLineDash([6, 5]);
+  ctx.strokeStyle = COLOR.signalSoft;
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(px(0.2), py(0.2), 0.6 * w, 0.6 * h);
+  ctx.setLineDash([]);
+
+  function footprint(point) {
+    const size = Math.max(point.size || 0, 0.03);
+    return [px(point.x) - (size * w) / 2, py(point.y) - (size * h) / 2, size * w, size * h];
+  }
+
   for (const point of points || []) {
-    const x = point.x * w;
-    const y = point.y * h;
-    const r = 3 + 8 * Math.min(point.size || 0, 0.7);
-    ctx.fillStyle = `rgba(74, 166, 255, ${0.45 + 0.45 * Math.min(point.skew || 0, 1)})`;
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fill();
+    const box = footprint(point);
+    ctx.fillStyle = COLOR.inkFill;
+    ctx.fillRect(...box);
+    ctx.strokeStyle = COLOR.ink;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(...box);
   }
-  // Frames the latest solve discarded. Red (high error) = repeat that area;
-  // muted hollow (surplus, trimmed to the frame cap) = no action needed.
   for (const point of rejected || []) {
-    const x = point.x * w;
-    const y = point.y * h;
-    const r = 4 + 8 * Math.min(point.size || 0, 0.7);
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
+    const box = footprint(point);
     if (point.kind === "surplus") {
-      ctx.lineWidth = 1.5;
-      ctx.strokeStyle = "rgba(168, 177, 187, 0.8)";
-      ctx.stroke();
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = COLOR.muted;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(...box);
+      ctx.setLineDash([]);
     } else {
-      ctx.fillStyle = "rgba(255, 79, 100, 0.9)";
-      ctx.fill();
+      ctx.fillStyle = "rgba(224, 106, 90, 0.35)";
+      ctx.fillRect(...box);
+      ctx.strokeStyle = COLOR.fail;
       ctx.lineWidth = 2;
-      ctx.strokeStyle = "#ffffff";
-      ctx.stroke();
+      ctx.strokeRect(...box);
     }
   }
 }
 
 function drawGuideOverlay(status) {
-  const ctx = guideOverlay.getContext("2d");
-  const rect = guideOverlay.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  const cssW = Math.max(1, rect.width);
-  const cssH = Math.max(1, rect.height);
-  const pixelW = Math.round(cssW * dpr);
-  const pixelH = Math.round(cssH * dpr);
-  if (guideOverlay.width !== pixelW || guideOverlay.height !== pixelH) {
-    guideOverlay.width = pixelW;
-    guideOverlay.height = pixelH;
-  }
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, cssW, cssH);
+  const {ctx, cssW, cssH} = fitCanvas(guideOverlay);
   const checkpoints = status.guide?.checkpoints || [];
   if (!checkpoints.length) return;
 
@@ -329,88 +472,76 @@ function drawGuideOverlay(status) {
   const imageH = naturalH * scale;
   const offsetX = (cssW - imageW) / 2;
   const offsetY = (cssH - imageH) / 2;
+  const px = (x) => offsetX + x * imageW;
+  const py = (y) => offsetY + y * imageH;
 
-  function px(x) {
-    return offsetX + x * imageW;
-  }
-
-  function py(y) {
-    return offsetY + y * imageH;
-  }
-
-  function drawTarget(point, color, radius) {
-    const x = px(point.x);
-    const y = py(point.y);
+  function dot(point, color, radius) {
     ctx.fillStyle = color;
     ctx.beginPath();
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.arc(px(point.x), py(point.y), radius, 0, Math.PI * 2);
     ctx.fill();
   }
 
   ctx.save();
-  ctx.strokeStyle = "rgba(255, 211, 105, 0.95)";
-  ctx.lineWidth = 4;
+  ctx.strokeStyle = COLOR.signal;
+  ctx.globalAlpha = 0.9;
+  ctx.lineWidth = 3;
   ctx.setLineDash([14, 10]);
   ctx.strokeRect(px(0.2), py(0.2), imageW * 0.6, imageH * 0.6);
   ctx.setLineDash([]);
-  ctx.strokeStyle = "rgba(255, 211, 105, 0.35)";
+  ctx.globalAlpha = 0.35;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(px(0.5), py(0.5));
-  ctx.lineTo(px(0.2), py(0.5));
-  ctx.moveTo(px(0.5), py(0.5));
+  ctx.moveTo(px(0.2), py(0.5));
   ctx.lineTo(px(0.8), py(0.5));
-  ctx.moveTo(px(0.5), py(0.5));
-  ctx.lineTo(px(0.5), py(0.2));
-  ctx.moveTo(px(0.5), py(0.5));
+  ctx.moveTo(px(0.5), py(0.2));
   ctx.lineTo(px(0.5), py(0.8));
   ctx.stroke();
   ctx.restore();
 
   for (const point of checkpoints) {
     const radius = point.current ? 12 : 7;
-    const color = point.complete ? "#53d769" : point.current ? "#ffcc4d" : "#6bb6ff";
-    drawTarget(point, color, radius);
+    const color = point.complete ? COLOR.pass : point.current ? COLOR.signal : COLOR.target;
+    dot(point, color, radius);
   }
 
   const current = status.guide?.current;
   if (current && !status.guide?.complete) {
     const boxW = Math.max(80, current.size * imageW);
     const boxH = Math.max(50, current.size * imageH);
-    const x = px(current.x) - boxW / 2;
-    const y = py(current.y) - boxH / 2;
-    ctx.strokeStyle = current.live_match ? "#53d769" : "#ffcc4d";
-    ctx.lineWidth = 5;
-    ctx.strokeRect(x, y, boxW, boxH);
+    ctx.strokeStyle = current.live_match ? COLOR.pass : COLOR.signal;
+    ctx.lineWidth = 4;
+    ctx.strokeRect(px(current.x) - boxW / 2, py(current.y) - boxH / 2, boxW, boxH);
   }
   const pose = status.pose;
-  if (pose) {
-    ctx.fillStyle = "#ff4f64";
-    ctx.beginPath();
-    ctx.arc(px(pose.x), py(pose.y), 10, 0, Math.PI * 2);
-    ctx.fill();
-  }
+  if (pose) dot(pose, COLOR.fail, 9);
 }
 
 function guideText(status) {
   const guide = status.guide;
-  if (guide?.complete) {
-    return `Route complete (${guide.complete_count}/${guide.total_count}). Quality check below; `
+  const state = status.state || "idle";
+  if (state === "idle" || state === "error") return "Open preview to start.";
+  if (state === "preview") return "Start a new run, then move the board centre along the guide.";
+  if (state === "solving") return "Solving…";
+  if (state === "solved") {
+    return "Solved. Check the result below; Resume to add views where the coverage map has gaps, then Solve again.";
+  }
+  if (guide?.complete || state === "complete") {
+    return `Route complete (${guide?.complete_count}/${guide?.total_count}). Check the result below; `
       + "Resume to add or repeat poses, then Solve again.";
   }
-  if (!guide?.current) return "Follow the guide line with the board center.";
-  const current = guide.current;
-  const base = `Route ${guide.complete_count}/${guide.total_count}: ${current.label}`;
-  if (current.live_match) return `${base}. Hold still`;
+  const current = guide?.current;
+  if (!current) return "Move the board centre along the guide.";
+  const base = `Target ${guide.complete_count + 1}/${guide.total_count}: ${current.label}`;
+  if (state === "paused") return `Paused at ${base.toLowerCase()}. Resume to keep capturing.`;
+  if (current.live_match) return `${base}. Hold still.`;
   if ((current.skew || 0) > 0) {
-    return `${base}. Move to the point, then TILT the board until the box turns green`;
+    return `${base}. Move to the point, then tilt the board until the box turns green.`;
   }
-  return `${base}. Move board center to the highlighted point and match the box size`;
+  return `${base}. Put the board centre on the highlighted point and match the box size.`;
 }
 
-function num(value, digits = 2) {
-  return value == null || Number.isNaN(value) ? "n/a" : Number(value).toFixed(digits);
-}
+// ---- Results ----
 
 function pickRecommended(results) {
   const solved = results.filter(
@@ -433,14 +564,14 @@ function coverageReasons(cov) {
   const reasons = [];
   if (!cov) return reasons;
   if ((cov.overall ?? 0) < 0.8) {
-    reasons.push(`Coverage ${Math.round((cov.overall || 0) * 100)}%, aim for 80% or more`);
+    reasons.push(`Coverage is ${Math.round((cov.overall || 0) * 100)}%; aim for 80% or more.`);
   }
-  if (cov.x && !(cov.x.low_hit && cov.x.high_hit)) reasons.push("Push the board to the left & right edges");
-  if (cov.y && !(cov.y.low_hit && cov.y.high_hit)) reasons.push("Push the board to the top & bottom edges");
+  if (cov.x && !(cov.x.low_hit && cov.x.high_hit)) reasons.push("Push the board to the left and right edges.");
+  if (cov.y && !(cov.y.low_hit && cov.y.high_hit)) reasons.push("Push the board to the top and bottom edges.");
   if (cov.size && !(cov.size.low_hit && cov.size.high_hit)) {
-    reasons.push("Add both near (large) and far (small) board views");
+    reasons.push("Add both near (large) and far (small) board views.");
   }
-  if (cov.skew && !cov.skew.hit) reasons.push("Add more tilted / skewed views");
+  if (cov.skew && !cov.skew.hit) reasons.push("Add more tilted views.");
   return reasons;
 }
 
@@ -448,11 +579,33 @@ function modeSummary(mode) {
   if (!mode) return "";
   const parts = [];
   if (mode.lens_fov) parts.push(`lens ${mode.lens_fov}`);
+  if (mode.max_lens_mod) parts.push(`mod ${mode.max_lens_mod}`);
   if (mode.webcam_resolution) parts.push(`res ${mode.webcam_resolution}`);
   if (mode.frame_size) parts.push(mode.frame_size);
   if (mode.fps) parts.push(`${mode.fps} fps`);
-  if (mode.protocol) parts.push(mode.protocol);
   return parts.join(", ");
+}
+
+function figure(key, value, primary = false) {
+  const el = document.createElement("div");
+  el.className = `figure${primary ? " figure-primary" : ""}`;
+  const k = document.createElement("span");
+  k.className = "label";
+  k.textContent = key;
+  const v = document.createElement("span");
+  v.className = "figure-value";
+  v.textContent = value;
+  el.append(k, v);
+  return el;
+}
+
+function gridRow(key, value, cls = "") {
+  const dt = document.createElement("dt");
+  dt.textContent = key;
+  const dd = document.createElement("dd");
+  if (cls) dd.className = cls;
+  dd.textContent = value;
+  resultGrid.append(dt, dd);
 }
 
 function renderResults(modelResults, coverage, mode) {
@@ -461,28 +614,25 @@ function renderResults(modelResults, coverage, mode) {
     return;
   }
   resultsPanel.hidden = false;
+  resultGrid.replaceChildren();
+  recFigures.replaceChildren();
+  verdictReasons.replaceChildren();
+  resultsRaw.textContent = JSON.stringify(modelResults, null, 2);
+  const failed = modelResults.filter((r) => r.ok === false);
   const rec = pickRecommended(modelResults);
+
   if (!rec) {
     verdictBox.className = "verdict retake";
     verdictBadge.textContent = "FAILED";
     verdictText.textContent = "No calibration model solved.";
-    verdictReasons.innerHTML = "";
-    resultGrid.innerHTML = "";
-    for (const result of modelResults) {
-      const dt = document.createElement("dt");
-      dt.textContent = `Failed (${result.model || "model"})`;
-      const dd = document.createElement("dd");
-      dd.textContent = result.error || result.error_type || "solver failed";
-      resultGrid.append(dt, dd);
+    for (const result of failed) {
+      gridRow(`${result.model || "model"} failed`, result.error || result.error_type || "solver failed", "failed");
     }
-    resultsRaw.textContent = JSON.stringify(modelResults, null, 2);
     return;
   }
+
+  const isDS = rec.model === "double_sphere";
   const cm = rec.camera_matrix || [[null, null, null], [null, null, null]];
-  const fx = cm[0]?.[0];
-  const fy = cm[1]?.[1];
-  const cx = cm[0]?.[2];
-  const cy = cm[1]?.[2];
   const selected = rec.selected || rec;
   const allFrames = rec.all_frames || {};
   const used = selected.frame_count ?? allFrames.frame_count;
@@ -490,72 +640,72 @@ function renderResults(modelResults, coverage, mode) {
 
   const reasons = coverageReasons(coverage);
   if (rec.worst_view_error_px != null && rec.worst_view_error_px > 2.5) {
-    reasons.push(`Worst reprojection ${num(rec.worst_view_error_px)} px is high`);
+    reasons.push(`The worst view is off by ${num(rec.worst_view_error_px)} px.`);
+  }
+  const alpha = isDS ? rec.distortion?.[1] : null;
+  if (alpha != null && alpha >= 0.98) {
+    reasons.push(`alpha ${num(alpha, 3)} is at its limit: the board missed the edge of the lens circle. Add edge views.`);
   }
   const pass = reasons.length === 0;
-
   verdictBox.className = `verdict ${pass ? "pass" : "retake"}`;
   verdictBadge.textContent = pass ? "PASS" : "RETAKE";
   verdictText.textContent = pass
-    ? "Coverage and reprojection look good."
-    : "Consider another pass to improve:";
-  verdictReasons.innerHTML = "";
+    ? `${rec.model}: coverage and error look good.`
+    : `${rec.model} solved. Another pass would improve it:`;
   for (const reason of reasons) {
     const li = document.createElement("li");
     li.textContent = reason;
     verdictReasons.append(li);
   }
 
-  const rows = [];
-  const modeStr = modeSummary(mode);
-  if (modeStr) rows.push(["Acquisition mode", `${modeStr} (record datasets in this exact mode)`]);
-  rows.push(
-    ["Recommended model", String(rec.model)],
-    ["Reprojection error", `median ${num(rec.median_view_error_px)} px, worst ${num(rec.worst_view_error_px)} px`],
-    ["RMS", `${num(rec.rms)} px`],
-    ["Focal length", `fx ${num(fx, 1)}, fy ${num(fy, 1)}`],
-    ["Principal point", `cx ${num(cx, 1)}, cy ${num(cy, 1)}`],
-    ["Frames used", `${used ?? "n/a"} / ${total ?? "n/a"}`],
+  recFigures.append(
+    figure(isDS ? "Error (OpenICC)" : "Median error", `${num(isDS ? rec.rms : rec.median_view_error_px)} px`, true),
   );
-  const other = modelResults.find((r) => r !== rec && r.ok !== false);
-  if (other) {
-    rows.push([
-      `Alternate (${other.model})`,
-      `median ${num(other.median_view_error_px)} px, worst ${num(other.worst_view_error_px)} px`,
-    ]);
+  if (!isDS) recFigures.append(figure("Worst view", `${num(rec.worst_view_error_px)} px`));
+  if (isDS) {
+    recFigures.append(figure("xi", num(rec.distortion?.[0], 4)), figure("alpha", num(alpha, 3)));
   }
-  for (const failed of modelResults.filter((r) => r.ok === false)) {
-    rows.push([`Failed (${failed.model || "model"})`, failed.error || failed.error_type || "solver failed"]);
-  }
-  if (rec.yaml) rows.push(["Output YAML", rec.yaml]);
-  if (rec.json) rows.push(["Output JSON", rec.json]);
+  recFigures.append(
+    figure("Focal", `${num(cm[0]?.[0], 1)}${isDS ? "" : ` / ${num(cm[1]?.[1], 1)}`}`),
+    figure("Centre", `${num(cm[0]?.[2], 1)}, ${num(cm[1]?.[2], 1)}`),
+    figure("Frames used", `${used ?? "n/a"} / ${total ?? "n/a"}`),
+  );
 
-  resultGrid.innerHTML = "";
-  for (const [key, value] of rows) {
-    const dt = document.createElement("dt");
-    dt.textContent = key;
-    const dd = document.createElement("dd");
-    dd.textContent = value;
-    resultGrid.append(dt, dd);
+  const modeStr = modeSummary(mode);
+  if (modeStr) gridRow("Captured in", `${modeStr}. Record your data in exactly this mode.`);
+  for (const other of modelResults.filter((r) => r !== rec && r.ok !== false)) {
+    const error = other.model === "double_sphere"
+      ? `${num(other.rms)} px (OpenICC)`
+      : `median ${num(other.median_view_error_px)} px, worst ${num(other.worst_view_error_px)} px`;
+    gridRow(`Also solved: ${other.model}`, error);
   }
-  resultsRaw.textContent = JSON.stringify(modelResults, null, 2);
+  for (const result of failed) {
+    gridRow(`${result.model || "model"} failed`, result.error || result.error_type || "solver failed", "failed");
+  }
+  if (rec.yaml) gridRow("Camera info YAML", rec.yaml, "mono");
+  if (rec.json) gridRow("Intrinsics JSON", rec.json, "mono");
+  if (isDS) gridRow("Note", "Compare Double Sphere models by projecting rays, not by focal length: f, xi and alpha trade off.");
 }
 
-function cameraStateText(gopro) {
-  // What the camera reported after webcam start (read-only), plus any mismatch
-  // with the requested lens mode, so the operator can confirm the mode on screen.
-  const labels = gopro?.camera_state?.labels;
-  if (!labels || !Object.keys(labels).length) return "";
-  const parts = Object.entries(labels).map(([field, label]) => `${field.replaceAll("_", " ")} ${label}`);
-  const warnings = gopro.warnings || [];
-  return ` | camera reports: ${parts.join(", ")}${warnings.length ? ` | WARNING: ${warnings.join("; ")}` : ""}`;
+// ---- Status ----
+
+function renderDiagnostics(status, fwCmd) {
+  const gopro = status.gopro;
+  const bridge = status.video_bridge;
+  let text = "";
+  if (gopro && gopro.enabled && gopro.ok === false) text = JSON.stringify(gopro, null, 2);
+  else if (bridge && bridge.enabled && bridge.ok === false && !fwCmd) text = JSON.stringify(bridge, null, 2);
+  results.textContent = text;
+  results.hidden = !text;
 }
 
 function updateStatus(status) {
-  statusLine.textContent =
-    `${status.state || "idle"}: ${status.message || ""}${cameraStateText(status.gopro)}`;
+  lastStatus = status;
+  const state = status.state || "idle";
+  statusLine.textContent = `${STATE_LABEL[state] || state}: ${status.message || ""}`;
   const captures = status.captures || 0;
   const target = status.target_samples || 0;
+  const minFrames = Math.max(3, Number(form.elements["solver.min_frames"].value || 25));
   document.getElementById("captureCount").textContent = `${captures}/${target}`;
   document.getElementById("markerCount").textContent = status.markers || 0;
   document.getElementById("coverageOverall").textContent = percent(status.coverage?.overall);
@@ -563,10 +713,11 @@ function updateStatus(status) {
     `${status.guide?.complete_count || 0}/${status.guide?.total_count || 0}`;
   guidePrompt.textContent = guideText(status);
   updateBars(status.coverage || {});
-  drawScatter(status.coverage?.points || [], status.rejected_points || []);
+  drawCoverageMap(status.coverage?.points || [], status.rejected_points || [], status.image_size);
   drawGuideOverlay(status);
+  renderReadout(status.gopro, defaults?.config);
+  renderSteps(state, captures, minFrames);
 
-  const state = status.state || "idle";
   const capturing = state === "capturing";
   const paused = state === "paused";
   const solving = state === "solving";
@@ -580,10 +731,10 @@ function updateStatus(status) {
   // Resume re-enables capturing from paused or after the route completed/solved,
   // so the operator can add or repeat poses on the same run.
   pauseResumeBtn.disabled = !(capturing || paused || done);
-  pauseResumeBtn.textContent = capturing ? "Pause" : "Resume";
+  pauseResumeBtn.textContent = paused || done ? "Resume" : "Pause";
   pauseResumeBtn.setAttribute("aria-pressed", String(paused));
   captureBtn.disabled = !capturing;
-  solveBtn.disabled = captures < Math.max(3, Number(form.elements["solver.min_frames"].value || 25));
+  solveBtn.disabled = captures < minFrames;
 
   // When the route first completes, run a checkpoint solve automatically so the
   // operator gets an early quality readout (and can then Resume to fix weak areas).
@@ -593,24 +744,21 @@ function updateStatus(status) {
   }
 
   syncStream(state);
+  previewEmpty.hidden = live;
+  if (state === "error") {
+    previewEmpty.firstElementChild.textContent = status.message || "The camera could not be opened.";
+  }
 
-  const gopro = status.gopro;
   const bridge = status.video_bridge;
   const fwCmd = bridge ? bridge.ufw_command || extractUfwFromError(bridge.error) : "";
   renderFirewall(bridge, fwCmd);
 
   if (status.results && status.results.length) {
     renderResults(status.results, status.coverage, status.acquisition_mode);
-    results.textContent = "";
+    results.hidden = true;
   } else {
     resultsPanel.hidden = true;
-    if (gopro && gopro.enabled && gopro.ok === false) {
-      results.textContent = JSON.stringify(gopro, null, 2);
-    } else if (bridge && bridge.enabled && bridge.ok === false && !fwCmd) {
-      results.textContent = JSON.stringify(bridge, null, 2);
-    } else {
-      results.textContent = "";
-    }
+    renderDiagnostics(status, fwCmd);
   }
 }
 
@@ -618,7 +766,7 @@ async function poll() {
   try {
     updateStatus(await api("/api/session/status"));
   } catch {
-    statusLine.textContent = "server not reachable (is it still running?)";
+    statusLine.textContent = "The server is not reachable. Is it still running?";
     setStreamStatus("error", "server offline");
   }
 }
@@ -630,6 +778,8 @@ function startPolling() {
   // only fetches the lightweight status JSON.
   pollTimer = setInterval(poll, 150);
 }
+
+// ---- Presets ----
 
 async function loadPresetList() {
   try {
@@ -650,27 +800,29 @@ async function applyPreset(name) {
     const preset = await api(`/api/presets/${encodeURIComponent(name)}`);
     const cfg = preset.config || preset;
     populateForm(cfg, defaults.aruco_dictionaries, defaults.gopro_options);
-    presetMsg.textContent = `Loaded preset "${preset.title || name}"`;
+    presetMsg.textContent = `Loaded "${preset.title || name}".`;
   } catch (err) {
-    presetMsg.textContent = `Could not load preset: ${err}`;
+    presetMsg.textContent = `Could not load the preset: ${err}`;
   }
 }
 
 async function savePreset() {
-  const name = prompt("Save current settings as preset name:");
+  const name = prompt("Save the current settings as a preset named:");
   if (!name) return;
   try {
     await api(`/api/presets/${encodeURIComponent(name)}`, {
       method: "POST",
       body: JSON.stringify({config: readForm()}),
     });
-    presetMsg.textContent = `Saved preset "${name}"`;
+    presetMsg.textContent = `Saved "${name}".`;
     await loadPresetList();
     presetSelect.value = name;
   } catch (err) {
-    presetMsg.textContent = `Could not save preset: ${err}`;
+    presetMsg.textContent = `Could not save the preset: ${err}`;
   }
 }
+
+// ---- Actions ----
 
 previewBtn.addEventListener("click", async () => {
   firewallDismissed = false;
@@ -686,7 +838,7 @@ previewBtn.addEventListener("click", async () => {
 startRunBtn.addEventListener("click", async () => {
   firewallDismissed = false;
   autoSolved = false;
-  results.textContent = "";
+  results.hidden = true;
   resultsPanel.hidden = true;
   startStream();
   updateStatus(await api("/api/session/run", {
@@ -714,7 +866,7 @@ captureBtn.addEventListener("click", async () => {
 });
 
 async function runSolve() {
-  statusLine.textContent = "solving...";
+  statusLine.textContent = "Solving…";
   try {
     // Pause capture first so solving from an active run is a clean, explicit stop.
     if (currentState === "capturing") {
@@ -722,7 +874,7 @@ async function runSolve() {
     }
     await api("/api/session/solve", {method: "POST"});
   } catch (err) {
-    statusLine.textContent = `solve failed: ${err}`;
+    statusLine.textContent = `Solve failed: ${err}`;
     return;
   }
   await poll(); // status now carries results -> updateStatus renders the panel
@@ -732,10 +884,10 @@ solveBtn.addEventListener("click", runSolve);
 
 nextCameraBtn.addEventListener("click", async () => {
   // Cleanly stop the current camera and go idle; the operator swaps the camera,
-  // edits the camera name if needed, then clicks Open Preview for the new one.
+  // edits the camera name if needed, then clicks Open preview for the new one.
   firewallDismissed = false;
   autoSolved = false;
-  results.textContent = "";
+  results.hidden = true;
   resultsPanel.hidden = true;
   // Tear the video down first (before awaiting) so the dot does not flip back to
   // green on the stream's final load while the camera is being stopped.
@@ -751,6 +903,9 @@ presetLoad.addEventListener("click", () => applyPreset(presetSelect.value));
 presetSave.addEventListener("click", savePreset);
 
 form.elements["gopro.enabled"].addEventListener("change", syncGoproVisibility);
+form.addEventListener("input", (event) => {
+  if (event.target.name?.startsWith("board.")) updateBoardSummary();
+});
 
 firewallCopy.addEventListener("click", async () => {
   try {
@@ -771,12 +926,20 @@ firewallDismiss.addEventListener("click", () => {
   firewallPanel.hidden = true;
 });
 
+// Canvases are sized to their CSS box; redraw them when the layout changes.
+window.addEventListener("resize", () => {
+  if (lastStatus) {
+    drawCoverageMap(lastStatus.coverage?.points || [], lastStatus.rejected_points || [], lastStatus.image_size);
+    drawGuideOverlay(lastStatus);
+  }
+});
+
 async function init() {
   defaults = await api("/api/defaults");
   populateForm(defaults.config, defaults.aruco_dictionaries, defaults.gopro_options);
   await loadPresetList();
-  statusLine.textContent = "Ready";
-  drawScatter([]);
+  statusLine.textContent = "Ready.";
+  drawCoverageMap([], [], null);
   await poll();
 }
 
