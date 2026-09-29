@@ -126,6 +126,8 @@ def test_next_camera_clears_the_previous_run_from_the_status(tmp_path, monkeypat
         results=[{"model": "fisheye"}],
         summary_path="x.json",
         rejected_points=[{"x": 0.5, "y": 0.5}],
+        markers=36,
+        pose={"x": 0.5, "y": 0.5, "size": 0.3, "skew": 0.1},
     )
     status = session.next_camera()
     assert status["run_id"] is None
@@ -134,6 +136,8 @@ def test_next_camera_clears_the_previous_run_from_the_status(tmp_path, monkeypat
     assert status["summary_path"] is None
     assert status["rejected_points"] == []
     assert status["coverage"]["count"] == 0
+    assert status["markers"] == 0
+    assert status["pose"] is None
 
 
 def test_stop_keeps_the_camera_report_for_a_later_solve(tmp_path, monkeypatch):

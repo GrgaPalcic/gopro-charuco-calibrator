@@ -275,7 +275,15 @@ class CaptureSession:
             self._jpeg_seq += 1
             self._frame_cond.notify_all()
         self._state = "idle"
-        self._set_status(state="idle", message="preview closed")
+        # Per-frame readings describe a stream that has stopped.
+        self._set_status(
+            state="idle",
+            message="preview closed",
+            markers=0,
+            pose=None,
+            motion_px=None,
+            manual_capture_pending=False,
+        )
         return self.status()
 
     def request_capture(self) -> dict[str, Any]:
@@ -393,6 +401,7 @@ class CaptureSession:
             "run_id": self.run_id,
             "run_dir": "" if self.output_dir is None else str(self.output_dir),
             "captures": self._capture_count,
+            "target_reached": False,
             "coverage": coverage_summary(self._captured_poses, self.config.coverage_targets),
             "guide": guide_status([], None, self.config.coverage_targets),
             "results": None,

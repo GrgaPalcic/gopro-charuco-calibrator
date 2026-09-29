@@ -891,7 +891,7 @@ function startPolling() {
 async function loadPresetList() {
   try {
     const data = await api("/api/presets");
-    presetSelect.innerHTML = '<option value="">none</option>';
+    presetSelect.innerHTML = '<option value="">Starting settings</option>';
     for (const preset of data.presets || []) {
       const label = preset.title ? `${preset.title}` : preset.name;
       presetSelect.append(new Option(label, preset.name));
@@ -902,7 +902,13 @@ async function loadPresetList() {
 }
 
 async function applyPreset(name) {
-  if (!name) return;
+  if (!name) {
+    // "none": back to the settings the server started with.
+    baseConfig = null;
+    populateForm(defaults.config, defaults.aruco_dictionaries, defaults.gopro_options);
+    presetMsg.textContent = "Loaded the server's starting settings.";
+    return;
+  }
   try {
     const preset = await api(`/api/presets/${encodeURIComponent(name)}`);
     const cfg = preset.config || preset;
