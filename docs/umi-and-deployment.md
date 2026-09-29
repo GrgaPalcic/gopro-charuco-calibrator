@@ -1,7 +1,7 @@
 # UMI, deployment and multi-camera recording
 
-How the reference pipeline (UMI, the Universal Manipulation Interface) uses a GoPro, what that
-means for our calibrations, which live paths exist for a robot, and how to sync several cameras.
+How the reference pipeline (UMI, the Universal Manipulation Interface) uses a GoPro, how to load
+our calibration into it, which live paths exist for a robot, and how to sync several cameras.
 Terms are explained in the [glossary](README.md#glossary).
 
 ## What UMI does
@@ -27,40 +27,67 @@ from the UMI paper and repo unless marked otherwise.
 UMI is lens-agnostic once you recalibrate (issue #41). What matters is a clean wide fisheye, and
 identical capture settings for training and deployment, not UMI's exact 155°.
 
-## Where our calibration differs
+## Loading our calibration in UMI
 
 The Ludis dataset was recorded from the **HERO13 USB webcam stream: 1080p, Wide, with the Max Lens
 Mod 2.0 fitted**. That gives a circular fisheye with black corners. It is nominally the 167° lens;
-the webcam image's exact field of view has not been measured. The app's primary model for it is
-**Double Sphere**:
-- OpenCV's Kannala–Brandt solved these frames at 1.19 px, but only over centre-weighted views.
-- It failed on the 4K recording once edge views were included.
-- It misfits the far periphery, which is where UMI's side mirrors sit.
+the webcam image's exact field of view has not been measured. The app's reference model for it is
+**Double Sphere**, the only one that is valid over the whole circle.
 
-**A Double Sphere result does not drop into UMI's pipeline.** **verified** 2026-09-29:
-- UMI's loader `umi/common/cv_util.py` does `assert json_data['intrinsic_type'] == 'FISHEYE'` and
-  reads four KB coefficients.
-- The `cheng-chi/ORB_SLAM3` fork ships only `Pinhole` and `KannalaBrandt8` camera models.
-- The app's `<camera>_double_sphere.json` uses OpenICC's layout but says
-  `intrinsic_type: DOUBLE_SPHERE`.
+**UMI loads Kannala–Brandt only.** **verified** 2026-09-29:
+- UMI's loader `parse_fisheye_intrinsics` in `umi/common/cv_util.py` asserts
+  `intrinsic_type == 'FISHEYE'` and reads four KB coefficients. It evaluates the model with
+  `cv2.fisheye`, the same theta polynomial as OpenICC's `FISHEYE`.
+- The `cheng-chi/ORB_SLAM3` fork ships only `Pinhole` and `KannalaBrandt8` camera models. UMI
+  runs it with a fixed settings YAML baked into its Docker image; nothing generates that file from
+  the json.
 
-Two ways forward. Neither is built, and neither is tested at 167°:
+So the Max Lens Mod preset also solves **`kannala_brandt`** with OpenICC `FISHEYE` on the same
+detections as Double Sphere, and writes two files for UMI:
 
-1. **Calibrate KB with OpenICC:** `--camera_model_to_calibrate=FISHEYE` (see
-   [double-sphere-backend.md](double-sphere-backend.md#manual-openicc-on-a-recording)). UMI's own
-   155° calibration came from it. Whether OpenICC's KB fit holds at 167° is unknown, and UMI's code
-   may evaluate the model through OpenCV's fisheye functions, with their limits.
-2. **Fit KB to the Double Sphere model** over the rays the board actually covered.
+- **`<camera>_kannala_brandt.json` drops straight into `parse_fisheye_intrinsics`.** It is
+  OpenICC's own output, the layout of UMI's `gopro_intrinsics_2_7k.json`, plus a
+  `solve_downsample_factor` field that UMI ignores. **verified** by a test that runs a copy of
+  UMI's loader on our file, and by a test that `cv2.fisheye.projectPoints` agrees with the app's
+  own Kannala–Brandt projection.
+- **`aspect_ratio` is ignored.** UMI reads `focal_length` for both fx and fy. The app therefore
+  evaluates the KB model with fy = fx in its checks, and warns when the solved aspect ratio is more
+  than 0.5 % from 1.
+- **Calibrate at the resolution you record.** UMI's `convert_fisheye_intrinsics_resolution`
+  rescales the intrinsics by image height and assumes the width is only cropped or padded
+  symmetrically. Calibrating the exact stream you record (here 1920×1080 webcam) keeps that
+  conversion a no-op.
+- **`<camera>_kannala_brandt_orbslam3.yaml` is only the camera block.** It holds
+  `Camera.type: "KannalaBrandt8"`, `Camera1.fx/fy/cx/cy`, `Camera1.k1`–`k4`, width, height and fps,
+  with fx = fy. Merge it into your existing ORB-SLAM3 settings file in place of its camera lines,
+  and keep that file's IMU block, which this app does not calibrate. How you get the edited file
+  into UMI's SLAM container depends on your setup; we have not run UMI's SLAM with it yet.
 
-Either way, judge the KB result by ray-projection agreement with the Double Sphere model, not by
-focal length.
+**How well Kannala–Brandt holds at 167°.** On synthetic Max Lens Mod views, OpenICC's KB (with the
+[patched solver](double-sphere-backend.md#the-source-patch)) landed within 0.49 px of the true
+lens out to the widest angle the board reached, and within 0.32 px out to the 83.5° rim when the
+board reached it. Past the board it extrapolates: up to 1.12 px about 6° beyond it (2026-09-29, see
+[measurements.md](measurements.md#synthetic-max-lens-mod-through-openicc-2026-09-29)). It has not
+been solved on real frames yet. So sweep the board right into the edge of the circle.
+
+**The For UMI row** in the result checks each real solve: "Kannala–Brandt for UMI: matches Double
+Sphere within X px out to Y°", where Y is the widest angle the board reached and only rays that
+land on the sensor count. Over 1 px at 1080p, it warns: solve again, and add edge views if the gap
+stays. The comparison is with Double Sphere as solved, not the true lens, so either can be the one
+that is off.
+
+OpenCV's own Kannala–Brandt (`fisheye`) is not a substitute for the UMI file. It solved the webcam
+frames at 1.19 px only over centre-weighted views, failed on the 4K recording once edge views were
+included, and leaves the far periphery unchecked, which is where UMI's side mirrors sit. The preset
+keeps it for its ROS camera_info YAML.
 
 ## Live deployment
 
 **Our live path is the USB webcam.** It is what the app captures and what the Ludis dataset was
 recorded from, so a robot reading the same webcam stream sees the same image the policy was
 trained on, with the same intrinsics. Timestamps come from one host clock. The webcam image
-calibrates at 1.11 px in the app (0.617 px with OpenICC's own extractor).
+calibrated at 1.11 px in the app (0.617 px with OpenICC's own extractor), both in June with the
+unpatched solver.
 
 **HDMI capture is UMI's path.** It is the robust option for a live feed: a stable latency, and no
 overlays once Labs clean HDMI is on. But it is a **different image** from the webcam stream. It

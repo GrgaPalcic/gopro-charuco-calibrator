@@ -87,7 +87,8 @@ setting 162 ("Max Lens") is for HERO9, 10 and 11. **verified** against the Open 
 | Pinhole (`plumb_bob`, 8-coefficient `rational_polynomial`) | up to ~90–95° | 1–2 px on Linear and other narrow captures. On the Max Lens Mod webcam circle it reaches 1.30 px, but only over ~25 centre-weighted views, and it cannot model the edges. The rational variant does not rescue ~130° Wide. |
 | Kannala–Brandt (`cv2.fisheye`) | good to ~140°, degrades toward 150°, cannot pass 180° | 1.12 px on a narrow Wide capture (camera not recorded). 1.19 px on the Max Lens Mod webcam circle, but only over ~50 centre-weighted views. It fails on the 4K recording once edge views are in. |
 | Mei omnidirectional (`cv2.omnidir`) | ~150–195° in theory | Unusable in OpenCV 4.13: it diverges (RMS 10⁵⁶) or keeps 1 of 18 views. |
-| **Double Sphere via OpenICC** | ~150–195° | **0.617 px** on the webcam frames and 0.82 px (at 1080p coordinates) on the 167° recording, both with OpenICC's own extractor. In-app, from our detections: 1.11 px on the webcam frames and 2.16 px native (about 1.1 px at 1080p) on the 4K recording. |
+| **Double Sphere via OpenICC** (`double_sphere`) | ~150–195° | **0.617 px** on the webcam frames and 0.82 px (at 1080p coordinates) on the 167° recording, both with OpenICC's own extractor. In-app, from our detections: 1.11 px on the webcam frames and 2.16 px native (about 1.1 px at 1080p) on the 4K recording. All four were made in June with the unpatched solver. On synthetic Max Lens Mod views the patched solver lands within 0.32 px of the true lens out to the 83.5° rim. |
+| **Kannala–Brandt via OpenICC** (`kannala_brandt`, OpenICC `FISHEYE`) | the file UMI loads; on the 167° image, good out to where the board reached | Synthetic Max Lens Mod views, patched solver: within 0.49 px of the true lens out to the board's reach, 0.32 px out to the rim when the board reached it; up to 1.12 px about 6° past the board. Not yet solved on real frames. |
 | Kalibr, Basalt (Double Sphere, EUCM, KB) | same range | Not used: their targets are AprilGrid (plus plain checkerboard), not ChArUco. |
 
 Background, from the sources:
@@ -102,18 +103,21 @@ Background, from the sources:
   Kannala–Brandt, not to the model: with a proper implementation, KB can fit a 190° lens.
   **verified** (TUM Double Sphere page)
 
-OpenCV has no built-in Double Sphere. This app drives OpenICC for it; see
-[double-sphere-backend.md](double-sphere-backend.md).
+OpenCV has no built-in Double Sphere. This app drives OpenICC for it, and for the Kannala–Brandt
+file UMI loads; see [double-sphere-backend.md](double-sphere-backend.md).
 
 The app's **Model** dropdown maps onto these as follows:
 
 | Option | Solves | Use for |
 |---|---|---|
-| Double Sphere + Kannala–Brandt fisheye | `double_sphere`, `fisheye` | the Max Lens Mod (~167°); the fisheye row is for comparison and gives a ROS YAML |
-| Double Sphere only | `double_sphere` | the Max Lens Mod, when the fisheye row is not wanted |
-| Kannala–Brandt fisheye | `fisheye` | Wide (~130°) |
-| Pinhole | `plumb_bob`, `rational_polynomial` | Linear (~90°) |
-| Pinhole + Kannala–Brandt fisheye | all three cv2 models | comparing on a lens near the boundary, as the HERO11 preset does |
+| Double Sphere + Kannala–Brandt for UMI (Max Lens Mod, ~167°) | `double_sphere`, `kannala_brandt`, `fisheye` | the Max Lens Mod. Double Sphere is the reference, `kannala_brandt` is the UMI file, and OpenCV's `fisheye` gives a ROS YAML |
+| Double Sphere only | `double_sphere` | the Max Lens Mod, when no UMI file or ROS YAML is wanted |
+| OpenCV fisheye, Kannala–Brandt (Wide, ~130°) | `fisheye` | Wide (~130°) |
+| Pinhole: plumb_bob + rational (Linear, ~90°) | `plumb_bob`, `rational_polynomial` | Linear (~90°) |
+| Pinhole + Kannala–Brandt fisheye (compare) | all three cv2 models | comparing on a lens near the boundary, as the HERO11 preset does |
+
+A saved setup from an older version with models `[fisheye, double_sphere]` shows in the UI as the
+first option, which now also solves `kannala_brandt`.
 
 ## Capture paths
 
@@ -122,7 +126,7 @@ in that same path. The same optics come out differently over each one.
 
 | Path | Resolution | Lens control | Verdict |
 |---|---|---|---|
-| **USB webcam** | **1080p max** (res 4 / 7 / 12) | Wide, Narrow, SuperView, Linear; no "Max" modes | What this app uses, and how the Ludis dataset was recorded. With the mod fitted, Wide gives a circular fisheye with black corners. Double Sphere fits it: 1.11 px in the app, 0.617 px with OpenICC's own extractor. It is also a live deploy path: the policy sees the same image it was trained on. |
+| **USB webcam** | **1080p max** (res 4 / 7 / 12) | Wide, Narrow, SuperView, Linear; no "Max" modes | What this app uses, and how the Ludis dataset was recorded. With the mod fitted, Wide gives a circular fisheye with black corners. Double Sphere fits it: 1.11 px in the app, 0.617 px with OpenICC's own extractor (June, unpatched solver). It is also a live deploy path: the policy sees the same image it was trained on. |
 | Webcam over Wi-Fi | 1080p max | same as USB | The spec marks Wi-Fi webcam as not supported on HERO9, 10, 11 and 11 Mini. Same modes, so nothing is gained for calibration. The app drives USB only. |
 | On-camera recording (mp4) | 4K to 5.3K | all modes, incl. Max SuperView (setting 121 = 7), Max HyperView (11), Ultra HyperView (104) | Offline only, with the GPMF IMU in the file. Calibrated at 0.82 px (1080p coordinates; Max SuperView, 4K). |
 | HDMI via Media Mod → capture card | not verified for the GoPro; UMI's code requests 3840×2160@30 from a Cam Link 4K, otherwise 1920×1080@60 | the camera's current mode | UMI's live deployment path. It is a different image from the webcam stream, so it needs its own calibration and its own training data. See [umi-and-deployment.md](umi-and-deployment.md). |
@@ -157,16 +161,12 @@ came from OpenCV's solvers and a board-layout bug (see [footguns.md](footguns.md
 
 Still **unverified**:
 - what the camera does internally over webcam;
-- whether telling it the mod is fitted (setting 189 = 2) changes the webcam image;
 - exactly how the webcam image differs from a Max SuperView recording (crop, black corners,
-  vignette).
+  vignette). The planned side-by-side test in
+  [measurements.md](measurements.md#pending-video-vs-webcam-comparison) covers this.
 
-The June reference capture (0.617 px) was taken **without** setting 189. The Max Lens Mod preset
-has set it since 06-16. The planned side-by-side test in
-[measurements.md](measurements.md#pending-video-vs-webcam-comparison) covers both questions. Until
-then, calibrate with 189 set the way it was when your data was recorded. For the Ludis dataset
-that value is not known (see
-[footguns.md](footguns.md#setting-189-changes-the-conditions-maybe-the-image)).
+The Max Lens Mod preset sets setting 189 = Max Lens 2.0. Calibrate and record with the same preset
+(see [footguns.md](footguns.md#setting-189-tells-the-camera-the-mod-is-fitted)).
 
 ## GoPro Labs firmware
 

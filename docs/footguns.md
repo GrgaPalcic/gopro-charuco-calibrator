@@ -44,24 +44,15 @@ exactly like "this lens cannot be calibrated", and most of them are not. Terms a
 - **Fix:** trust your eyes and the read-back, not the dropdown. With the mod fitted, the webcam
   Wide image is a circle with black corners.
 
-### Setting 189 changes the conditions, maybe the image
-- **Symptom:** none yet. It is an untested difference.
-- **Cause:** the Max Lens Mod preset sets setting 189 = 2 (Max Lens 2.0) since 06-16. The June
-  reference capture (0.617 px) was taken without it. Whether telling the camera the mod is fitted
-  changes the webcam image is not known.
-- **Tell:** the **Mod** chip shows what the camera currently has. The app writes 189 only when a
-  preset or **Recording settings → Lens mod** asks for a value; otherwise it leaves the camera's
-  value alone. The camera most likely keeps the value across power cycles, as it does other
-  settings (**inferred**, not tested for 189).
-- **Fix:** calibrate with 189 set the way it was when your data was recorded.
-  - **For the Ludis dataset that value is unknown.** The dataset predates the read-back (added
-    2026-09-29), so its runs have no `reported_*` fields. A run's `config.json` shows only what was
-    requested (`gopro.max_lens_mod`).
-  - **How to find out:** ask whoever recorded it which preset they used and whether they changed
-    the camera's lens-mod menu, and look at the camera's own lens-mod setting. It is the recording
-    value only if nobody changed it since.
-  - The pending comparison in
-    [measurements.md](measurements.md#pending-video-vs-webcam-comparison) tests both ways.
+### Setting 189 tells the camera the mod is fitted
+- **Symptom:** the **Mod** chip shows something other than Max Lens 2.0 (2), or a **Check** chip
+  appears next to it.
+- **Cause:** the Max Lens Mod preset sets setting 189 = 2 (Max Lens 2.0). The app writes 189 only
+  when a preset or **Recording settings → Lens mod** asks for a value; otherwise it leaves the
+  camera's value alone. The camera most likely keeps the value across power cycles, as it does
+  other settings (**inferred**, not tested for 189).
+- **Fix:** calibrate and record with the same preset. The **Mod** chip shows what the camera has,
+  and the run's `config.json` records it as `reported_max_lens_mod`.
 
 ### Stabilisation warps frames
 - **Symptom:** a solve that is unstable, or worse than it should be.
@@ -138,25 +129,32 @@ This was the most expensive bug. It made a good lens look impossible for days.
 
 ## Solving
 
-### Kannala–Brandt looks better than it is on the Max Lens Mod
-- **Symptom:** `fisheye` reports ~1.2 px on the Max Lens Mod circle, close to Double Sphere.
-- **Cause:** its frame selection kept ~50 centre-weighted views and dropped the edge ones. OpenCV's
-  KB misfits the far periphery, which is exactly where UMI's side mirrors sit. On the 4K recording,
-  with edge views included, it fails outright.
-- **Fix:** Double Sphere is the model for the Max Lens Mod. The app recommends `double_sphere`
-  whenever it solves, and never compares its error against a centre-weighted median. Keep
-  `fisheye` as a Docker-free cross-check only.
+### OpenCV's fisheye looks better than it is on the Max Lens Mod
+- **Symptom:** `fisheye` (OpenCV's Kannala–Brandt) reports ~1.2 px on the Max Lens Mod circle,
+  close to Double Sphere.
+- **Cause:** its frame selection kept ~50 centre-weighted views and dropped the edge ones. The
+  far periphery, which is exactly where UMI's side mirrors sit, is then unchecked. On the 4K
+  recording, with edge views included, it fails outright. The model itself is not the problem:
+  OpenICC's Kannala–Brandt (`kannala_brandt`), solved on every view, landed within 0.5 px of the
+  true lens out to the board's reach on synthetic Max Lens Mod views (patched solver, see
+  [measurements.md](measurements.md#synthetic-max-lens-mod-through-openicc-2026-09-29)).
+- **Fix:** Double Sphere is the reference model for the Max Lens Mod. The app recommends
+  `double_sphere` whenever it solves, and never compares its error against a centre-weighted
+  median. For UMI use `kannala_brandt`. Keep `fisheye` as a Docker-free cross-check and for its ROS
+  YAML.
 
 ### Double Sphere parameters are not unique
-- **Symptom:** solves of the same data disagree on focal length by up to ~53 px (573 vs 626) at the
-  same 0.185–0.186 px RMS.
+- **Symptom:** solves of the same data disagree on focal length by up to ~28 px (598 vs 626) at the
+  same 0.185 px RMS, and by up to ~53 px (573 vs 626) with the old unpatched solver.
 - **Cause:** f, xi and alpha trade off against each other, and OpenICC's view selection is not
-  deterministic. Measured 2026-09-29 over ten runs (see
-  [measurements.md](measurements.md#synthetic-double-sphere-through-openicc-2026-09-29)).
-- **How to tell:** project the same rays through both models and compare pixels. Across those runs
-  they agreed with the truth within 0.73 px out to 70° off-axis, and within 1.40 px out to 80°.
-  The last degrees before the ~83.5° lens edge are the least constrained. There is a reference
-  projection in `_project_double_sphere` in `tests/test_hero13_readiness.py`.
+  deterministic. Measured on synthetic views: ten unpatched runs on 2026-09-29, five patched runs
+  on 2026-09-30 (see
+  [measurements.md](measurements.md#synthetic-max-lens-mod-through-openicc-2026-09-29)).
+- **How to tell:** project the same rays through both models and compare pixels. With the patched
+  solver, the solves agreed with the truth within 0.24 px out to 70° off-axis on the base scene,
+  and within 0.32 px out to the ~83.5° lens edge once the board reached it. The degrees past where
+  the board went are the least constrained. The reference projection is `project_double_sphere` in
+  `gopro_charuco_calibrator/projection.py`.
 - **Fix:** compare, test and monitor Double Sphere models by ray projection, never by f, xi or alpha
   alone. That includes any focal comparison between recording and webcam.
 
@@ -164,7 +162,7 @@ This was the most expensive bug. It made a good lens look impossible for days.
 - **Symptom:** a Double Sphere result with `alpha` at or near 1.0, the top of its 0–1 range.
 - **Cause:** the board never reached the curved edge of the circle, so the edge is unconstrained.
   The recording gave 0.82 px with alpha 1.0; the better-spread webcam set gave 0.617 px with alpha
-  0.71.
+  0.71 (both June, unpatched solver).
 - **Fix:** sweep the whole circle. Even then, the black-corner periphery is never sampled, so the
   model is best where the board went. The app flags alpha ≥ 0.98.
 
@@ -177,6 +175,21 @@ This was the most expensive bug. It made a good lens look impossible for days.
   `solve_downsample_factor` is recorded in the artifact. OpenICC's own `--downsample_factor` gets
   the same effect on the threshold differently: it shrinks the image before detection, which does
   lose precision.
+
+### An old OpenICC image is off at a good RMS
+- **Symptom:** with the old `openicc` image (set through `OPENICC_DOCKER_IMAGE`), the **For UMI**
+  row says the two fisheye solves disagree by a few pixels, while both report a fine RMS. With the
+  current app and only the old image built, the Double Sphere and Kannala–Brandt rows instead say
+  the image is not built.
+- **Cause:** at the pinned commit, OpenICC's final adjustment leaves the Double Sphere and
+  Kannala–Brandt distortion fitted around the image centre instead of the real principal point.
+  On synthetic Max Lens Mod views that put the unpatched solver 0.6–4.2 px off the true lens, with
+  its RMS unchanged. **verified** 2026-09-29.
+- **How to tell:** `docker images` lists `openicc` but not `gopro-charuco-openicc:d75dda5-p1`, or
+  `OPENICC_DOCKER_IMAGE` points at an old image.
+- **Fix:** run `uv run gopro-charuco setup-openicc`, which builds the patched image (see
+  [double-sphere-backend.md](double-sphere-backend.md#the-source-patch)), and solve again. Results
+  made before then (including the June 0.617 px and 1.11 px) came from the unpatched solver.
 
 ### `cv2.fisheye` needs coaxing
 - **Flags:** use `CALIB_RECOMPUTE_EXTRINSIC | CALIB_FIX_SKEW | CALIB_CHECK_COND`, with object points
@@ -201,14 +214,11 @@ This was the most expensive bug. It made a good lens look impossible for days.
   - The `cheng-chi/ORB_SLAM3` fork UMI uses has only `Pinhole` and `KannalaBrandt8` camera models.
   - The app's `<camera>_double_sphere.json` has the same OpenICC layout but
     `intrinsic_type: DOUBLE_SPHERE`.
-- **Fix:** open. Two routes, both untested at 167°:
-  - calibrate a Kannala–Brandt model with OpenICC (UMI's own 155° calibration is OpenICC `FISHEYE`
-    at 0.29 px);
-  - fit KB to the Double Sphere model over the observed rays.
-
-  Either way, check the result by ray projection against Double Sphere, and remember that UMI's
-  code may evaluate KB through OpenCV, with OpenCV's limits. See
-  [umi-and-deployment.md](umi-and-deployment.md#where-our-calibration-differs).
+- **Fix:** use the Kannala–Brandt file. The Max Lens Mod preset also solves `kannala_brandt`
+  with OpenICC `FISHEYE`, as UMI's own 155° calibration was (0.29 px), and writes
+  `<camera>_kannala_brandt.json` in UMI's layout plus an ORB-SLAM3 camera block. The **For UMI**
+  row checks it against Double Sphere by ray projection. See
+  [umi-and-deployment.md](umi-and-deployment.md#loading-our-calibration-in-umi).
 
 ### ROS image_proc mishandles fisheye intrinsics
 - **Cause:** ROS `image_proc` pinhole rectification does not correctly consume equidistant fisheye
@@ -243,7 +253,8 @@ Kept so the same mistakes are not made twice.
 | "The board is verified correct" (06-10) | wrong in detail | The geometry was right, but the marker parity was mirrored. |
 | "The user does not own a GoPro 13" (06-10) | wrong | The 06-10 gripper run is HERO13 + Max Lens Mod 2.0. Only the `gopro13_hyperview_*` folders were mislabelled. |
 | "UMI calibrates with Double Sphere" | wrong | UMI's committed intrinsics are OpenICC `FISHEYE` (KB). OpenICC merely offers DS and EUCM. |
-| "Drop our intrinsics into UMI's .json and ORB-SLAM3 .yaml" (by 06-16) | wrong for Double Sphere | UMI and the fork accept KB only (see above). |
+| "Drop our intrinsics into UMI's .json and ORB-SLAM3 .yaml" (by 06-16) | wrong for Double Sphere | UMI and the fork accept KB only (see above). The app now writes a KB file for each. |
+| "The image is unpatched, which is correct for the app" (2026-09-29) | wrong | The stock final adjustment leaves the distortion fitted around the image centre. The app now builds a patched image. |
 | "The lens is 177°" | wrong | The usable clean mode is 167°. 177° is Max HyperView, which is anamorphic. |
 | "Pinhole is 30–40% worse, 0.150–0.235 px" | unsupported | Attributed to the Double Sphere paper's Table 1, which has no pinhole baseline. The paper only says pinhole is suboptimal above 120°. |
 | "Gyroflow says SuperView calibration fails unless reversed" | overstated | Gyroflow only says the modes are not recommended and not exactly mapped. The strong claim is Joshi's (ICRA 2022). |

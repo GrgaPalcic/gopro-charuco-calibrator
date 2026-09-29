@@ -4,7 +4,7 @@ Calibrate GoPro lenses for robotics, including the ~167° Max Lens Mod fisheye, 
 USB webcam stream, using a calib.io ChArUco board. It runs in your browser, needs no ROS, and
 works one camera after another.
 
-![The calibrator after a solve: step bar, camera readout, live preview, coverage map, setup panel and a Double Sphere result](docs/screenshot.png)
+![The calibrator after a solve: the four steps across the top, the camera readout, the live preview with the guide, the coverage map, the settings panel and a passed Double Sphere result with its files](docs/screenshot.png)
 
 <sub>A solved run on a simulated HERO13 + Max Lens Mod 2.0 feed. The frames are rendered by
 [`scripts/screenshot.py`](scripts/screenshot.py); the detection, solve and UI are the app's own.</sub>
@@ -15,8 +15,8 @@ Wide GoPro lenses break the usual calibration recipe. A pinhole model can't fit 
 fisheye model only looks good on the Max Lens Mod because it keeps the centre views and drops the
 edge ones. SuperView cannot be fitted by any model at all.
 This tool:
-- **picks a model that fits your lens**, and solves the Max Lens Mod with Double Sphere through
-  OpenICC;
+- **picks a model that fits your lens.** It solves the Max Lens Mod with Double Sphere through
+  OpenICC, and also writes a Kannala–Brandt file that UMI can load;
 - **reads back what the camera actually applied**, because the lens you request is not always
   the lens you get;
 - **shows where the board has been**, so you know the edges of the image are covered.
@@ -34,79 +34,98 @@ cd gopro-charuco-calibrator
 uv run gopro-charuco serve --config gopro_charuco_calibrator/presets/gopro13_wide_1080p.yaml
 ```
 
-Open http://localhost:8765. Connect the GoPro over USB and click **Open preview**. The first
-`uv run` fetches Python 3.12 and every dependency. Nothing needs `sudo`, except possibly a
-one-time [firewall rule](#firewall).
+Open http://localhost:8765. The first `uv run` fetches Python 3.12 and every dependency. Nothing
+needs `sudo`, except possibly a one-time [firewall rule](#firewall).
 
-Then work through the steps across the top:
+Then work through the four steps across the top. The amber button is always the next thing to
+click, and a greyed-out button tells you why when you hover over it.
 
-1. **Connect.** Open preview. The dot turns green when frames arrive, and the chips next to it
-   show the lens and lens mod the camera reports.
-2. **Capture.** Start a new run and move the board centre along the guide, matching the box size
-   and tilt. The box turns green on a match and views are captured automatically; use
-   **Capture** for any it misses.
-3. **Solve.** This runs on its own when the route completes. The result shows a pass or retake
-   verdict and the recommended model. Resume to add views where the coverage map has gaps.
+1. **Camera setup.** Pick the camera and lens you will record with, for example
+   "HERO13 + Max Lens Mod 2.0 (UMI gripper)". The settings on the right fill in at once.
+2. **Connect.** Plug the GoPro in over USB, switch it on and click **Open preview**. The dot at the
+   top turns green when frames arrive, and the chips at the top right show the lens and lens mod
+   the camera reports. **Stop** ends the webcam stream.
+3. **Capture.** Click **Start new run**, then hold the board where the orange box is, matching its
+   size and tilt. Views save automatically when the board matches; **Capture now** saves the
+   current view straight away. **Pause** stops saving views while the preview keeps running.
+4. **Solve.** This runs on its own when the guide is done, or click **Solve** once there are
+   enough views. The result names the recommended model and lists the files it wrote, with what
+   each one is for. Its badge says:
+   - **PASS:** the coverage targets are met and the recommended model looks sound;
+   - **RETAKE:** click **Resume**, add the views it asks for, and solve again;
+   - **INCOMPLETE:** a model the setup asked for did not solve, for example because the OpenICC
+     image is not built; the result says how to fix it;
+   - **FAILED:** no model solved; the reasons are listed.
 
-For the next camera, click **Next camera**, change the camera name, and open the preview again.
+For the next camera, click **Next camera** in step 4. It ends the run. Plug in the next GoPro, give
+it its own **Camera name** in Settings (it names the files), and click **Open preview**.
 
 ## HERO13 with the Max Lens Mod 2.0
 
 Calibrate the camera exactly as your data is recorded. For the UMI-style gripper cameras that is:
 mod fitted, USB webcam Wide, 1080p.
 
-1. **Once per machine,** build the Double Sphere backend. You need Docker, usable without sudo;
-   the build takes about 10 minutes and no GPU:
+1. **Once per machine,** build the OpenICC backend, which solves both Double Sphere and the
+   Kannala–Brandt file for UMI. You need Docker, usable without sudo; the build takes about
+   10 minutes and no GPU:
    ```bash
    uv run gopro-charuco setup-openicc
    ```
+   This builds the image `gopro-charuco-openicc:d75dda5-p1`. If you built the older `openicc`
+   image, run the command again: the app no longer uses that image, and its
+   solver was unpatched ([why](docs/double-sphere-backend.md#the-source-patch)).
 2. **Start with the gripper preset:**
    ```bash
    uv run gopro-charuco serve --config gopro_charuco_calibrator/presets/gopro13_umi_gripper_fisheye_1080p.yaml
    ```
+   Or pick "HERO13 + Max Lens Mod 2.0 (UMI gripper)" in step 1.
 3. **Before capturing, check:**
    - the preview is a **round image with black corners**. If it isn't, stop and check the Lens and
-     Mod chips before capturing: the mod may be off, the lens mode wrong, or the lens-mod setting
-     different from your data's (see below);
+     Mod chips: the mod may be off or the lens mode wrong;
    - the readout shows **Lens Wide (0)** and **Mod Max Lens 2.0 (2)**, with no **Check** chip.
 4. **Capture,** pushing the board into the curved edge of the circle, near and far, with plenty
    of tilt.
-5. **Check the result.** The app has reached 1.11 px for `double_sphere` on these cameras
-   (OpenICC's own extractor reached 0.617 px on the same frames). alpha should sit clearly below
-   1.0. alpha at its limit means the board missed the edge: Resume, add edge views, solve again.
+5. **Check the result.**
+   - alpha should sit clearly below 1.0. alpha at its limit means the board missed the edge:
+     Resume, add edge views, solve again.
+   - The **For UMI** row reads "Kannala–Brandt for UMI: matches Double Sphere within X px out to
+     Y°". Y is the widest angle the board reached. If the two disagree by more than 1 px (at
+     1080p), the row carries a warning: solve again, and add views near the edge of the circle if
+     the gap stays.
+   - For scale: on simulated Max Lens Mod views, where the true lens is known, both models landed
+     within 0.5 px of it out to the widest angle the board reached
+     ([measurements](docs/measurements.md#synthetic-max-lens-mod-through-openicc-2026-09-29)).
+     On real webcam frames the only in-app Double Sphere result so far is 1.11 px RMS, made in June
+     with the older unpatched solver.
+6. **Use the files.** For UMI, use `<camera>_kannala_brandt.json`. For UMI's ORB-SLAM3, merge
+   `<camera>_kannala_brandt_orbslam3.yaml` into your settings file, keeping its IMU block
+   ([how](docs/umi-and-deployment.md#loading-our-calibration-in-umi)). The Double Sphere JSON is
+   the reference fit for tools that take that model.
 
-The preset tells the camera the mod is fitted (setting 189 = Max Lens 2.0). Two things are not
-known yet:
-- whether that changes the webcam image (the June reference calibration was captured without the
-  app setting it);
-- what 189 was when the Ludis dataset was recorded.
-
-The app writes 189 only when **Lens mod** under **Recording settings** has a value. Otherwise the
-camera keeps whatever it already has, and the **Mod** chip shows it. Calibrate with the lens-mod
-setting your data was recorded with
-([details](docs/footguns.md#setting-189-changes-the-conditions-maybe-the-image)).
+The Max Lens Mod preset sets setting 189 = Max Lens 2.0, which tells the camera the mod is fitted.
+Calibrate and record with the same preset
+([details](docs/footguns.md#setting-189-tells-the-camera-the-mod-is-fitted)).
 
 Calibrate every camera and mod pair separately, and again after refitting a mod. To compare two
 Double Sphere results, project rays through both; the focal lengths alone can differ by over 50 px at
-the same error ([why](docs/footguns.md#double-sphere-parameters-are-not-unique)). A Double Sphere
-result does not drop into UMI's pipeline, which expects Kannala–Brandt
-([details](docs/umi-and-deployment.md#where-our-calibration-differs)).
+the same error ([why](docs/footguns.md#double-sphere-parameters-are-not-unique)).
 
 ## Presets
 
 Every preset uses the USB webcam at 1080p (the webcam maximum) and the 11×8 `DICT_5X5_100` board
 (34 mm squares, 25 mm markers), which never collides with 4X4 gripper markers.
 
-| Preset | Camera and lens | Models solved |
+| Preset | Shown in step 1 as | Models solved |
 |---|---|---|
-| `gopro13_umi_gripper_fisheye_1080p` | HERO13 + Max Lens Mod 2.0, Wide | `double_sphere` (recommended), `fisheye` |
-| `gopro13_wide_1080p` | HERO13, stock lens, Wide | `fisheye` |
-| `gopro13_linear_1080p` | HERO13, stock lens, Linear | `plumb_bob`, `rational_polynomial` |
-| `gopro11_wide_1080p` | HERO11, stock lens, Wide | `plumb_bob`, `rational_polynomial`, `fisheye` |
+| `gopro13_umi_gripper_fisheye_1080p` | HERO13 + Max Lens Mod 2.0 (UMI gripper) | `double_sphere` (recommended), `kannala_brandt` (the file for UMI), `fisheye` (the ROS YAML) |
+| `gopro13_wide_1080p` | HERO13 Wide 1080p (stock lens) | `fisheye` |
+| `gopro13_linear_1080p` | HERO13 Linear 1080p (stock lens) | `plumb_bob`, `rational_polynomial` |
+| `gopro11_wide_1080p` | HERO11 Wide 1080p (stock lens) | `plumb_bob`, `rational_polynomial`, `fisheye` |
 
-Pick a preset in the UI and click **Load**, or pass it with `serve --config`. **Save as…** writes
-the current settings to `~/.config/gopro-charuco-calibrator/presets/`, where they override shipped
-presets of the same name.
+Pick a preset in step 1, **Camera setup**, where it applies as soon as you choose it, or pass it
+with `serve --config`. In the Settings panel, **Save as…** writes the current settings to
+`~/.config/gopro-charuco-calibrator/presets/`, where they override shipped presets of the same name
+and appear in step 1. **Starting settings** puts back the settings the server started with.
 
 ## Lens → model
 
@@ -114,7 +133,7 @@ presets of the same name.
 |---|---|---|
 | Linear | ~90° | `plumb_bob` / `rational_polynomial` (ROS camera_info) |
 | Wide | ~123–130° | `fisheye` (Kannala–Brandt, ROS `equidistant`) |
-| Wide with the Max Lens Mod | ~167° lens | `double_sphere` (OpenICC) |
+| Wide with the Max Lens Mod | ~167° lens | `double_sphere` (OpenICC), plus `kannala_brandt` (OpenICC `FISHEYE`) for UMI |
 | SuperView, HyperView, Max HyperView | — | none: anamorphic, never calibrate these |
 
 The live stream tops out at 1080p over USB, Wi-Fi and Labs RTMP alike. 4K exists only in
@@ -134,8 +153,11 @@ overlays/capture_###.jpg                    the same views with detections drawn
 <camera>_all_frames_<model>.yaml            the same, before outlier rejection
 <camera>_<model>_frame_diagnostics.csv      per-view error and why each view was kept or dropped
 <camera>_double_sphere.json                 Double Sphere intrinsics (OpenICC layout)
-openicc/calibrate_camera.log                OpenICC's command and output
-caib_marker_board_calibration_summary.json  everything, including recommended_model
+<camera>_kannala_brandt.json                Kannala–Brandt intrinsics for UMI (its gopro_intrinsics_2_7k.json layout)
+<camera>_kannala_brandt_orbslam3.yaml       the same as an ORB-SLAM3 KannalaBrandt8 camera block
+openicc/calibrate_camera.log                OpenICC's command and output for Double Sphere
+openicc_kannala_brandt/calibrate_camera.log the same for Kannala–Brandt
+caib_marker_board_calibration_summary.json  everything, including recommended_model and the UMI check
 ```
 
 ## CLI
@@ -149,7 +171,8 @@ uv run gopro-charuco solve-frames --frames-dir runs/<run>/frames --output-dir ru
 ```
 
 The board can be given with `--cols --rows --square-mm --marker-mm --aruco-dict --start-id
---marker-count` instead. `uv run gopro-charuco setup-openicc` builds the Double Sphere backend.
+--marker-count` instead. `uv run gopro-charuco setup-openicc` builds the OpenICC backend for
+`double_sphere` and `kannala_brandt`.
 
 ## Firewall
 
@@ -169,16 +192,16 @@ firewalld and iptables variants are shown too. Run it once, then open the previe
 | [lens-modes-and-models.md](docs/lens-modes-and-models.md) | Which modes can be calibrated, model per field of view, capture paths and their limits |
 | [footguns.md](docs/footguns.md) | Traps that make a good lens look impossible, as symptom → cause → fix |
 | [measurements.md](docs/measurements.md) | Every result we measured, and the pending video-vs-webcam test |
-| [double-sphere-backend.md](docs/double-sphere-backend.md) | How the OpenICC integration works; calibrating recordings |
-| [umi-and-deployment.md](docs/umi-and-deployment.md) | UMI, HDMI capture for a live robot, multi-camera sync |
+| [double-sphere-backend.md](docs/double-sphere-backend.md) | How the OpenICC backend solves Double Sphere and Kannala–Brandt, its source patch; calibrating recordings |
+| [umi-and-deployment.md](docs/umi-and-deployment.md) | UMI, loading our files into it, HDMI capture for a live robot, multi-camera sync |
 
 ## Development
 
 ```bash
 uv sync --extra dev
 uv run ruff check .
-uv run pytest                                             # the Double Sphere test needs the openicc image
-uv run --with playwright python scripts/screenshot.py     # regenerate docs/screenshot*.png, with layout checks
+uv run pytest                                             # the OpenICC tests need the setup-openicc image
+uv run --with playwright python scripts/screenshot.py     # regenerate docs/screenshot.png, with layout checks
 ```
 
 To calibrate a plain V4L2 camera or an HDMI capture card, turn off automatic GoPro setup and set
