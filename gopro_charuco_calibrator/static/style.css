@@ -303,6 +303,7 @@ h1 {
   font-size: 13px;
   color: var(--ink-soft);
   margin-bottom: 2px;
+  overflow-wrap: anywhere; /* a long model or file name must not widen the page */
 }
 
 .step-actions select {
@@ -1122,4 +1123,9 @@ details.disclosure > .disclosure-body {
 
 .result-grid:empty {
   display: none;
+}
+
+/* No frame yet (or a failed snapshot): keep the broken-image icon off the preview. */
+#preview[data-no-frame] {
+  visibility: hidden;
 }

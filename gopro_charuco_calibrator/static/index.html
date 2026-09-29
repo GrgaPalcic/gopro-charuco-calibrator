@@ -95,7 +95,7 @@
           <li data-legend-next><span class="swatch swatch-next" aria-hidden="true"></span>Orange box: hold the board here next</li>
           <li data-legend-next><span class="swatch swatch-dot swatch-next-dot" aria-hidden="true"></span>Orange dot: put the board centre here</li>
           <li><span class="swatch swatch-dot swatch-done" aria-hidden="true"></span>Green: done</li>
-          <li><span class="swatch swatch-dot swatch-todo" aria-hidden="true"></span>Blue: still to do</li>
+          <li><span class="swatch swatch-dot swatch-todo" aria-hidden="true"></span><span id="legendTodo">Blue: still to do</span></li>
           <li><span class="swatch swatch-dot swatch-now" aria-hidden="true"></span>Red dot: where the board is now</li>
           <li><span class="swatch swatch-target" aria-hidden="true"></span>Dashed line: the board centre must reach it or beyond</li>
         </ul>
@@ -202,7 +202,7 @@
 
           <h2 class="label">Model</h2>
           <label>
-            <select name="solver.models" aria-label="Calibration model">
+            <select name="solver.models" aria-label="Calibration model" aria-describedby="modelNote">
               <option value="fisheye_ds">Double Sphere + Kannala–Brandt for UMI (Max Lens Mod, ~167°)</option>
               <option value="double_sphere">Double Sphere only</option>
               <option value="fisheye">OpenCV fisheye, Kannala–Brandt (Wide, ~130°)</option>
@@ -210,6 +210,7 @@
               <option value="both">Pinhole + Kannala–Brandt fisheye (compare)</option>
             </select>
           </label>
+          <p class="note model-note" id="modelNote" data-full-choice="solver.models"></p>
           <p class="note">Double Sphere and Kannala–Brandt for UMI need the OpenICC image (<code>gopro-charuco setup-openicc</code>). If it is missing, those models report the setup command; any other selected model still solves.</p>
 
           <h2 class="label">Board</h2>

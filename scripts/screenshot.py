@@ -19,7 +19,9 @@ coverage legend, and no browser console errors. It exits non-zero if any fail.
 
 Output: docs/screenshot.png (solved, desktop). The other shots (idle, idle with
 custom settings, preview, capturing, paused with enough views, every model
-failed, and 390 px mobile) are for review only and go to --review-dir.
+failed, OpenICC models failed, solved after the route completed, a retake after
+Stop, connecting, a stream error with views saved, after Next camera, and 390 px
+mobile) are for review only and go to --review-dir.
 """
 
 from __future__ import annotations
@@ -304,19 +306,77 @@ def build_states(config, workdir, views):
         {"model": r["model"], "ok": False, "error": f"{r['model']}: solver did not converge"}
         for r in results
     ]
+    failed["message"] = "calibration solve finished; failed models: " + ", ".join(
+        r["model"] for r in results
+    )
+    # A likely first run: the OpenICC image was never built, so Double Sphere and
+    # Kannala-Brandt fail and only OpenCV fisheye solves. No UMI file was written,
+    # so the page must ask for another Solve, not offer Next camera.
+    no_image = (
+        "Docker image 'gopro-charuco-openicc:d75dda5-p1' is not built on this machine. "
+        "Run `uv run gopro-charuco setup-openicc` once (about 10 minutes), then solve again."
+    )
+    openicc = {"double_sphere", "kannala_brandt"}
+    partial = dict(solved)
+    partial["results"] = [
+        {"model": r["model"], "ok": False, "error_type": "OpenICCError", "error": no_image}
+        if r["model"] in openicc
+        else r
+        for r in results
+    ]
+    partial["message"] = "calibration solve finished; failed models: double_sphere, kannala_brandt"
+    # The route finished before the solve: the legend still explains the dots.
+    guide = solved["guide"]
+    route_done = dict(solved)
+    route_done["guide"] = dict(
+        guide,
+        checkpoints=[dict(c, complete=True, current=False) for c in guide["checkpoints"]],
+        complete_count=guide["total_count"],
+        complete=True,
+    )
+    # Solved, then Stop, with too little spread: a stopped run cannot be resumed.
+    retake = dict(
+        solved,
+        state="idle",
+        message="preview closed",
+        preview_open=False,
+        coverage=coverage_summary(poses[:8], targets),
+        markers=0,
+        pose=None,
+    )
+    # The first seconds after Open preview: no picture yet, so no guide marks.
+    connecting = dict(preview, message="waiting for GoPro stream (4s)", markers=0, pose=None)
+    # The stream died mid-run with enough views saved: Solve them.
+    error = dict(
+        paused,
+        state="error",
+        message="ffmpeg exited early",
+        preview_open=False,
+        markers=0,
+        pose=None,
+    )
+    # After Next camera: the run is reset and the page asks for the next GoPro.
+    next_camera = base_status(config, "idle", "stopped; ready for next camera", None)
+    next_camera.update(run_id=None, video_bridge=None)
     return {
         "preview": (preview, preview_frame),
         "capturing": (capturing, capturing_frame),
         "paused": (paused, capturing_frame),
         "solved": (solved, solved_frame),
         "failed": (failed, solved_frame),
+        "partial": (partial, solved_frame),
+        "route_done": (route_done, solved_frame),
+        "retake": (retake, b""),
+        "connecting": (connecting, b""),
+        "error": (error, b""),
+        "next_camera": (next_camera, b""),
     }
 
 
 # ---- browser ------------------------------------------------------------
 
 LAYOUT_CHECK = """
-({expect, primary, overlayEmpty, mustSay, absent, steps, setupHighlighted}) => {
+({expect, primary, overlayEmpty, mustSay, mustNotSay, absent, steps, setupHighlighted}) => {
   const problems = [];
   const vw = document.documentElement.clientWidth;
   if (document.documentElement.scrollWidth > vw + 1) {
@@ -334,6 +394,23 @@ LAYOUT_CHECK = """
     if (el.offsetParent && el.scrollWidth > el.clientWidth + 1) {
       const text = el.textContent.trim().slice(0, 40);
       problems.push(`text spills out of ${el.className || el.tagName}: "${text}"`);
+    }
+  }
+  // A closed dropdown cuts its choice short without scrolling, so measure the
+  // text. A cut is allowed only when the full choice is written out next to it.
+  const measure = document.createElement("canvas").getContext("2d");
+  const ARROW_PX = 20;
+  for (const sel of document.querySelectorAll("select")) {
+    if (!sel.offsetParent || !sel.clientWidth || sel.closest("details:not([open])")) continue;
+    const cs = getComputedStyle(sel);
+    measure.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+    const text = sel.selectedOptions[0]?.text || "";
+    const pad = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+    const room = sel.clientWidth - pad - ARROW_PX;
+    if (measure.measureText(text).width <= room) continue;
+    const full = document.querySelector(`[data-full-choice="${sel.name || sel.id}"]`);
+    if (!full || !full.offsetParent || !full.textContent.includes(text)) {
+      problems.push(`dropdown ${sel.name || sel.id} cuts its choice short: "${text}"`);
     }
   }
   for (const selector of expect) {
@@ -364,7 +441,7 @@ LAYOUT_CHECK = """
     const data = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
     let drawn = 0;
     for (let i = 3; i < data.length; i += 4) drawn += data[i] > 0;
-    if (drawn) problems.push(`guide overlay draws ${drawn} pixels over the idle preview`);
+    if (drawn) problems.push(`guide overlay draws ${drawn} pixels with no live picture`);
   }
   const legend = document.querySelector(".coverage .legend").textContent;
   const oldSwatch = document.querySelector(".swatch-error, .swatch-surplus");
@@ -389,6 +466,9 @@ LAYOUT_CHECK = """
   const body = document.body.innerText;
   for (const text of mustSay) {
     if (!body.includes(text)) problems.push(`missing text: "${text}"`);
+  }
+  for (const text of mustNotSay) {
+    if (body.includes(text)) problems.push(`should not say: "${text}"`);
   }
   return problems;
 }
@@ -484,16 +564,28 @@ def main() -> int:
 
     common = [".steps", "#scatter", ".setup", ".previewWrap"]
     desktop = {"width": 1440, "height": 900}
-    solved_texts = ["Kannala–Brandt for UMI: matches Double Sphere", "UMI intrinsics JSON"]
+    solved_texts = [
+        "Kannala–Brandt for UMI: matches Double Sphere",
+        "UMI intrinsics JSON",
+        "Blue: not reached",
+    ]
 
     def checks(
-        expect, primary, overlay_empty=False, texts=(), absent=(), steps=None, setup=False
+        expect,
+        primary,
+        overlay_empty=False,
+        texts=(),
+        absent=(),
+        steps=None,
+        setup=False,
+        not_texts=(),
     ):
         return {
             "expect": common + expect,
             "primary": primary,
             "overlayEmpty": overlay_empty,
             "mustSay": list(texts),
+            "mustNotSay": list(not_texts),
             "absent": list(absent),
             "steps": steps or {},
             "setupHighlighted": setup,
@@ -533,6 +625,7 @@ def main() -> int:
                 ["#previewEmpty"],
                 None,
                 overlay_empty=True,
+                texts=["These settings match no camera setup"],
                 steps=step_row("current", "pending", "pending", "pending"),
                 setup=True,
             ),
@@ -600,8 +693,103 @@ def main() -> int:
                 [*live, "#resultsPanel"],
                 "#solveBtn",
                 texts=["FAILED", "The last solve failed", "The solve failed: no model solved."],
+                not_texts=["calibration solve complete"],
                 absent=["#nextCameraBtn"],
                 steps=step_row("done", "done", "done", "current"),
+            ),
+            False,
+        ),
+        (
+            "partial-openicc-missing",
+            *states["partial"],
+            review / "partial-openicc-missing.png",
+            desktop,
+            checks(
+                [*live, "#resultsPanel", "#nextCameraBtn"],
+                "#solveBtn",
+                texts=[
+                    "INCOMPLETE",
+                    "Calibration passed for OpenCV fisheye, but",
+                    "_kannala_brandt.json) were not written",
+                    "Calibration incomplete: Double Sphere and Kannala–Brandt for UMI did not",
+                    "setup-openicc",
+                ],
+                not_texts=["PASS", "Calibration done."],
+                steps=step_row("done", "done", "done", "current"),
+            ),
+            False,
+        ),
+        (
+            "route-complete-solved",
+            *states["route_done"],
+            review / "route-complete-solved.png",
+            desktop,
+            checks(
+                [*live, "#resultsPanel", "#guideLegend"],
+                "#nextCameraBtn",
+                texts=["Green: done"],
+                absent=["[data-legend-next]", "#legendTodo"],
+                steps=step_row("done", "done", "done", "done"),
+            ),
+            False,
+        ),
+        (
+            "retake-stopped",
+            *states["retake"],
+            review / "retake-stopped.png",
+            desktop,
+            checks(
+                ["#resultsPanel", "#previewEmpty"],
+                "#previewBtn",
+                overlay_empty=True,
+                texts=["RETAKE", "Retake: Open preview, start a new run"],
+                not_texts=["Solve again"],
+                absent=["#guideLegend"],
+                steps=step_row("done", "current", "done", "done"),
+            ),
+            False,
+        ),
+        (
+            "connecting",
+            *states["connecting"],
+            review / "connecting.png",
+            desktop,
+            checks(
+                [],
+                None,
+                overlay_empty=True,
+                texts=["Connecting to the camera"],
+                absent=["#guideLegend"],
+                steps=step_row("done", "current", "pending", "pending"),
+            ),
+            False,
+        ),
+        (
+            "error-with-views",
+            *states["error"],
+            review / "error-with-views.png",
+            desktop,
+            checks(
+                ["#previewEmpty"],
+                "#solveBtn",
+                overlay_empty=True,
+                texts=["Problem: ffmpeg exited early.", "Solve them now"],
+                steps=step_row("done", "pending", "done", "current"),
+            ),
+            False,
+        ),
+        (
+            "after-next-camera",
+            *states["next_camera"],
+            review / "after-next-camera.png",
+            desktop,
+            checks(
+                ["#previewEmpty", "#guidePrompt"],
+                "#previewBtn",
+                overlay_empty=True,
+                texts=["give it its own Camera name"],
+                absent=["#nextCameraBtn", "#guideLegend", "#resultsPanel"],
+                steps=step_row("done", "current", "pending", "pending"),
             ),
             False,
         ),
