@@ -33,6 +33,13 @@ from gopro_charuco_calibrator.openicc import (
     build_image_commands,
     run_calibrate_camera,
     run_double_sphere_model,
+    run_openicc_model,
+)
+from gopro_charuco_calibrator.projection import (
+    board_reach_deg,
+    kb_vs_double_sphere_px,
+    project_double_sphere,
+    rays_to_angle,
 )
 from gopro_charuco_calibrator.solver import DetectionRecord, recommended_model
 
@@ -258,45 +265,49 @@ def _rodrigues(rvec: np.ndarray) -> np.ndarray:
     return np.eye(3) + np.sin(theta) * kx + (1 - np.cos(theta)) * kx @ kx
 
 
-def _project_double_sphere(points, fx, fy, cx, cy, xi, alpha):
-    """Double Sphere projection (Usenko et al. 2018, eq. 40-45)."""
-    x, y, z = points[:, 0], points[:, 1], points[:, 2]
-    d1 = np.sqrt(x * x + y * y + z * z)
-    zeta = xi * d1 + z
-    d2 = np.sqrt(x * x + y * y + zeta * zeta)
-    denom = alpha * d2 + (1 - alpha) * zeta
-    w1 = alpha / (1 - alpha) if alpha <= 0.5 else (1 - alpha) / alpha
-    w2 = (w1 + xi) / np.sqrt(2 * w1 * xi + xi * xi + 1)
-    valid = z > -w2 * d1
-    return np.stack([fx * x / denom + cx, fy * y / denom + cy], axis=1), valid
+# Ground truth = the HERO13 + Max Lens Mod 2.0 webcam-Wide solve measured on
+# 2026-06-12 (0.617 px, alpha 0.708): fx = fy, cx, cy, xi, alpha.
+HERO13_DS = (629.19, 949.64, 538.89, 0.00166, 0.708)
+HERO13_DS_RESULT = {
+    "camera_matrix": [[629.19, 0.0, 949.64], [0.0, 629.19, 538.89], [0.0, 0.0, 1.0]],
+    "distortion": [0.00166, 0.708],
+}
 
 
-@pytest.mark.skipif(not _openicc_image_present(), reason="needs the openicc docker image")
-def test_double_sphere_recovers_measured_hero13_intrinsics(tmp_path):
-    # Ground truth = the HERO13 + Max Lens Mod 2.0 webcam-Wide solve measured on
-    # 2026-06-12 (0.617 px, alpha 0.708), rendered for a wide spread of poses.
-    fx, cx, cy, xi, alpha = 629.19, 949.64, 538.89, 0.00166, 0.708
+# The Max Lens Mod image is a ~167 deg circle: nothing is seen beyond 83.5 deg off-axis.
+HERO13_CIRCLE_DEG = 83.5
+
+
+def _hero13_scene(edge_views: int = 0):
+    """The measured HERO13 Double Sphere lens rendered for a wide spread of board poses.
+
+    The 60 base poses rarely reach past ~64 deg off-axis. ``edge_views`` adds views
+    with the board out towards the edge of the 167 deg circle, turned partly to
+    face the camera, as someone sweeping the board round the rim would hold it.
+    """
+    fx, cx, cy, xi, alpha = HERO13_DS
     image_size = (1920, 1080)
     board_config = BoardConfig()
     _board, obj_by_id = make_caib_board(board_config)
-    rng = np.random.default_rng(7)
     center = np.asarray([board_config.pattern_width_m / 2, board_config.pattern_height_m / 2, 0])
+    circle_px = project_double_sphere(
+        np.asarray([[np.sin(np.radians(HERO13_CIRCLE_DEG)), 0.0,
+                     np.cos(np.radians(HERO13_CIRCLE_DEG))]]),
+        fx, fx, 0.0, 0.0, xi, alpha,
+    )[0][0, 0]
 
-    records = []
-    for index in range(60):
-        rvec = rng.uniform([-0.7, -0.7, -0.5], [0.7, 0.7, 0.5])
-        tvec = rng.uniform([-0.45, -0.25, 0.28], [0.45, 0.25, 0.65])
-        rotation = _rodrigues(rvec)
+    def render(name, rotation, tvec, rng):
         corners, ids, points = [], [], []
         for marker_id, obj in obj_by_id.items():
             camera_points = (rotation @ (obj - center).T).T + tvec
-            pixels, valid = _project_double_sphere(camera_points, fx, fx, cx, cy, xi, alpha)
+            pixels, valid = project_double_sphere(camera_points, fx, fx, cx, cy, xi, alpha)
             inside = (
                 valid.all()
                 and (pixels[:, 0] > 2).all()
                 and (pixels[:, 0] < image_size[0] - 2).all()
                 and (pixels[:, 1] > 2).all()
                 and (pixels[:, 1] < image_size[1] - 2).all()
+                and (np.hypot(pixels[:, 0] - cx, pixels[:, 1] - cy) < circle_px).all()
             )
             if not inside:
                 continue
@@ -305,18 +316,46 @@ def test_double_sphere_recovers_measured_hero13_intrinsics(tmp_path):
             ids.append([marker_id])
             points.append(noisy)
         if len(corners) < 12:
-            continue
-        records.append(
-            DetectionRecord(
-                name=f"capture_{index:03d}.jpg",
-                corners=corners,
-                ids=np.asarray(ids, dtype=np.int32),
-                marker_count=len(corners),
-                pose=coverage_params(np.concatenate(points), image_size),
-            )
+            return None
+        return DetectionRecord(
+            name=name,
+            corners=corners,
+            ids=np.asarray(ids, dtype=np.int32),
+            marker_count=len(corners),
+            pose=coverage_params(np.concatenate(points), image_size),
         )
-    assert len(records) >= 25
 
+    records = []
+    rng = np.random.default_rng(7)
+    for index in range(60):
+        rvec = rng.uniform([-0.7, -0.7, -0.5], [0.7, 0.7, 0.5])
+        tvec = rng.uniform([-0.45, -0.25, 0.28], [0.45, 0.25, 0.65])
+        records.append(render(f"capture_{index:03d}.jpg", _rodrigues(rvec), tvec, rng))
+
+    edge_rng = np.random.default_rng(11)
+    for index in range(edge_views):
+        off_axis = np.radians(edge_rng.uniform(55.0, 80.0))
+        # Mostly left and right: the 1080 px height cuts the circle at ~46 deg.
+        azimuth = np.radians(edge_rng.choice([0.0, 180.0]) + edge_rng.uniform(-30.0, 30.0))
+        direction = np.asarray(
+            [np.sin(off_axis) * np.cos(azimuth), np.sin(off_axis) * np.sin(azimuth),
+             np.cos(off_axis)]
+        )
+        axis = np.cross([0.0, 0.0, 1.0], direction)
+        facing = axis / np.linalg.norm(axis) * off_axis * edge_rng.uniform(0.4, 0.9)
+        rotation = _rodrigues(facing) @ _rodrigues(edge_rng.uniform(-0.3, 0.3, 3))
+        tvec = direction * edge_rng.uniform(0.3, 0.55)
+        records.append(render(f"capture_{60 + index:03d}.jpg", rotation, tvec, edge_rng))
+
+    records = [record for record in records if record is not None]
+    assert len(records) >= 25
+    return image_size, board_config, obj_by_id, records
+
+
+@pytest.mark.skipif(not _openicc_image_present(), reason="needs the openicc docker image")
+def test_double_sphere_recovers_measured_hero13_intrinsics(tmp_path):
+    fx, cx, cy, xi, alpha = HERO13_DS
+    image_size, board_config, obj_by_id, records = _hero13_scene()
     result = run_double_sphere_model(
         output_dir=tmp_path,
         camera=CameraConfig(camera_name="synthetic_hero13", width=1920, height=1080),
@@ -334,18 +373,76 @@ def test_double_sphere_recovers_measured_hero13_intrinsics(tmp_path):
     # Compare the models, not the numbers: in Double Sphere f, xi and alpha trade
     # off against each other, and OpenICC is not deterministic, so on this exact
     # data f landed anywhere in 573-626 px over ten runs (2026-09-29) at the same RMS.
-    # What must hold is that the same 3D rays land on the same pixels.
-    theta = np.radians(np.linspace(0.0, 70.0, 36))
-    phi = np.radians(np.linspace(0.0, 360.0, 48, endpoint=False))
-    t_grid, p_grid = np.meshgrid(theta, phi)
-    rays = np.stack(
-        [np.sin(t_grid) * np.cos(p_grid), np.sin(t_grid) * np.sin(p_grid), np.cos(t_grid)], -1
-    ).reshape(-1, 3)
-    expected, _ = _project_double_sphere(rays, fx, fx, cx, cy, xi, alpha)
-    recovered, valid = _project_double_sphere(
+    # What must hold is that the same 3D rays land on the same pixels. Out to 70 deg
+    # that was 0.57-0.85 px in 8 of 10 runs and 2.22 / 2.68 px in the other two
+    # (2026-09-29), so the bound leaves room for those without hiding a broken solve.
+    rays = rays_to_angle(70.0)
+    expected, _ = project_double_sphere(rays, fx, fx, cx, cy, xi, alpha)
+    recovered, valid = project_double_sphere(
         rays, matrix[0][0], matrix[1][1], matrix[0][2], matrix[1][2], *result["distortion"]
     )
     assert valid.all()
-    assert np.abs(recovered - expected).max() < 1.5
+    assert np.abs(recovered - expected).max() < 3.5
     artifact = json.loads(Path(result["json"]).read_text(encoding="utf-8"))
     assert artifact["intrinsic_type"] == "DOUBLE_SPHERE"
+
+
+def _solve_kannala_brandt_against_truth(tmp_path, edge_views: int = 0):
+    image_size, board_config, obj_by_id, records = _hero13_scene(edge_views)
+    result = run_openicc_model(
+        model="kannala_brandt",
+        output_dir=tmp_path,
+        camera=CameraConfig(camera_name="synthetic_hero13", width=1920, height=1080),
+        board_config=board_config,
+        image_size=image_size,
+        records=records,
+        obj_by_id=obj_by_id,
+    )
+    assert result["ok"] is True, result
+    corners = np.concatenate(
+        [np.asarray(c, dtype=np.float64).reshape(-1, 2) for r in records for c in r.corners]
+    )
+    reach = board_reach_deg(HERO13_DS_RESULT, corners)
+    # Worst pixel distance to the TRUE lens over rays out to each angle, with the KB
+    # side evaluated as UMI loads it (fy = fx).
+    diffs = {
+        angle: kb_vs_double_sphere_px(result, HERO13_DS_RESULT, angle)
+        for angle in (60.0, 70.0, 80.0, reach)
+    }
+    print(
+        f"\nKB vs true DS ({len(records)} views): rms {result['rms']:.3f} px, board reach "
+        f"{reach:.1f} deg, aspect {result['openicc']['intrinsics']['aspect_ratio']:.5f}, "
+        + ", ".join(f"<= {angle:.1f} deg {diff:.2f} px" for angle, diff in diffs.items())
+    )
+    assert result["rms"] < 1.0
+    artifact = json.loads(Path(result["json"]).read_text(encoding="utf-8"))
+    assert artifact["intrinsic_type"] == "FISHEYE"
+    assert Path(result["orbslam3_yaml"]).is_file()
+    return reach, diffs
+
+
+@pytest.mark.skipif(not _openicc_image_present(), reason="needs the openicc docker image")
+def test_kannala_brandt_matches_true_double_sphere_on_hero13(tmp_path):
+    # Does OpenICC's Kannala-Brandt (FISHEYE, the file UMI loads) hold on the ~167 deg
+    # Max Lens Mod image? Solved on the same Double Sphere rendered scene as above.
+    # Measured over 19 runs on 2026-09-29 (OpenICC is not deterministic): board reach
+    # 64.4 deg; worst distance to the true lens out to that reach 0.49-0.84 px, out to
+    # 70 deg 0.58-1.63 px, out to 80 deg 0.84-5.42 px (past the board, extrapolated,
+    # so not asserted).
+    reach, diffs = _solve_kannala_brandt_against_truth(tmp_path)
+    assert reach == pytest.approx(64.4, abs=0.5)
+    assert diffs[reach] < 2.0
+    assert diffs[70.0] < 3.0
+
+
+@pytest.mark.skipif(not _openicc_image_present(), reason="needs the openicc docker image")
+def test_kannala_brandt_solves_with_views_at_the_rim(tmp_path):
+    # With 30 more views out to the 83.5 deg rim, both OpenICC models still fit the
+    # corners at noise level (rms 0.19-0.21 px) but land 0.9-4.8 px (KB, 18 runs) and
+    # 0.2-3.9 px (DS, 10 runs) from the true lens, in the middle as much as at the rim
+    # (2026-09-29). The four KB coefficients are not the limit: they fit this lens's
+    # curve to 0.0002 px out to 83.5 deg (test_kannala_brandt_can_represent_hero13_lens).
+    # This bound catches a fit that falls apart at the rim, not sub-pixel drift.
+    reach, diffs = _solve_kannala_brandt_against_truth(tmp_path, edge_views=30)
+    assert reach > 83.0
+    assert diffs[reach] < 10.0
