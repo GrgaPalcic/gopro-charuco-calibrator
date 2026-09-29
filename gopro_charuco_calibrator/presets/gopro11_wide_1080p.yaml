@@ -1,4 +1,4 @@
-title: "GoPro HERO11 Wide 1080p"
+title: "HERO11 Wide 1080p (stock lens)"
 # HERO11, stock lens, USB webcam Wide at 1080p. The HERO11 answers the legacy
 # gpWebcam API, which the app detects and uses on its own. Same stream settings as
 # the HERO13 Wide preset, so the two calibrations are comparable.

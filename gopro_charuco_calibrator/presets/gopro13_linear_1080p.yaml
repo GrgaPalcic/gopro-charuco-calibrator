@@ -1,4 +1,4 @@
-title: "GoPro HERO13 Linear 1080p"
+title: "HERO13 Linear 1080p (stock lens)"
 # Stock lens, USB webcam Linear at 1080p: the firmware de-fishes to a ~90 deg
 # rectilinear image, the only GoPro mode a pinhole model fits. Use it when the
 # consumer needs a plain ROS camera_info (plumb_bob / rational_polynomial).

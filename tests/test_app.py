@@ -26,3 +26,13 @@ def test_every_shipped_preset_loads(monkeypatch, tmp_path):
     for name in names:
         _title, config = presets.get_preset(name)
         assert config.gopro.enabled and config.gopro.webcam_resolution == 12
+
+
+def test_shipped_preset_titles_are_plain_and_short(monkeypatch, tmp_path):
+    # The titles are the choices in step 1 of the UI: words a newcomer reads, short
+    # enough to show in full in the dropdown.
+    monkeypatch.setattr(presets, "user_presets_dir", lambda: tmp_path)  # shipped only
+    for entry in presets.list_presets():
+        title = entry["title"]
+        assert title != entry["name"] and "_" not in title, title
+        assert len(title) <= 42, title

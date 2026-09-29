@@ -22,10 +22,24 @@
 
     <div class="steps" role="group" aria-label="Calibration steps">
       <ol class="step-list">
-        <li class="step" id="stepConnect" data-step-state="current">
+        <li class="step step-setup" id="stepSetup" data-step-state="current">
         <span class="step-num" aria-hidden="true">1</span>
         <div class="step-body">
+          <h2 class="step-title" id="stepSetupTitle"><label for="presetSelect">Camera setup</label><span class="sr-only" data-step-note></span></h2>
+          <p class="step-desc">Pick the camera and lens you will record with.</p>
+          <div class="step-actions">
+            <select id="presetSelect" aria-describedby="presetMsg">
+              <option value="" id="presetCustom" disabled>Custom settings (see Settings)</option>
+            </select>
+          </div>
+          <p id="presetMsg" class="note step-msg" aria-live="polite"></p>
+        </div>
+        </li>
+        <li class="step" id="stepConnect" data-step-state="pending">
+        <span class="step-num" aria-hidden="true">2</span>
+        <div class="step-body">
           <h2 class="step-title" id="stepConnectTitle">Connect<span class="sr-only" data-step-note></span></h2>
+          <p class="step-desc">Starts the GoPro webcam and shows its picture.</p>
           <div class="step-actions">
             <button type="button" id="previewBtn" class="btn btn-primary">Open preview</button>
             <button type="button" id="stopBtn" class="btn" disabled>Stop</button>
@@ -33,31 +47,32 @@
         </div>
         </li>
         <li class="step" id="stepCapture" data-step-state="pending">
-        <span class="step-num" aria-hidden="true">2</span>
+        <span class="step-num" aria-hidden="true">3</span>
         <div class="step-body">
           <h2 class="step-title" id="stepCaptureTitle">Capture<span class="sr-only" data-step-note></span></h2>
+          <p class="step-desc">Hold the board where the orange box is. Views save automatically.</p>
           <div class="step-actions">
             <button type="button" id="startRunBtn" class="btn">Start new run</button>
-            <button type="button" id="captureBtn" class="btn" disabled>Capture</button>
+            <button type="button" id="captureBtn" class="btn" disabled>Capture now</button>
             <button type="button" id="pauseResumeBtn" class="btn" disabled>Pause</button>
           </div>
         </div>
         </li>
         <li class="step" id="stepSolve" data-step-state="pending">
-        <span class="step-num" aria-hidden="true">3</span>
+        <span class="step-num" aria-hidden="true">4</span>
         <div class="step-body">
           <h2 class="step-title" id="stepSolveTitle">Solve<span class="sr-only" data-step-note></span></h2>
+          <p class="step-desc" id="solveDesc">Computes the lens calibration from the saved views.</p>
           <div class="step-actions">
             <button type="button" id="solveBtn" class="btn" disabled>Solve</button>
+            <button type="button" id="nextCameraBtn" class="btn">Next camera</button>
           </div>
         </div>
         </li>
       </ol>
-      <button type="button" id="nextCameraBtn" class="btn btn-quiet next-camera"
-              title="Ends this run and exits webcam mode, so you can plug in the next camera">Next camera</button>
     </div>
 
-    <p id="statusLine" class="status-line">Loading defaults…</p>
+    <p id="statusLine" class="status-line"><span id="statusMain">Loading the settings…</span> <span id="statusDetail" class="status-detail"></span></p>
 
     <div class="workspace">
       <section class="bench" aria-label="Live view and coverage">
@@ -65,9 +80,23 @@
           <img id="preview" alt="Live camera preview with board detections">
           <canvas id="guideOverlay" width="1280" height="720" aria-hidden="true"></canvas>
           <div class="preview-empty" id="previewEmpty">
-            <p>Connect the GoPro over USB, pick a preset, then <strong>Open preview</strong>.</p>
+            <div class="howto">
+              <p class="howto-title">How to calibrate a camera</p>
+              <ol>
+                <li>Choose the camera setup in step 1.</li>
+                <li>Plug the GoPro in over USB and switch it on.</li>
+                <li>Click <strong>Open preview</strong>, then <strong>Start new run</strong>.</li>
+                <li>Move the board to each orange box until the guide is done.</li>
+              </ol>
+            </div>
           </div>
         </div>
+        <ul class="legend guide-legend" id="guideLegend" hidden aria-label="What the marks on the preview mean">
+          <li><span class="swatch swatch-next" aria-hidden="true"></span>Orange box: hold the board here next</li>
+          <li><span class="swatch swatch-dot swatch-done" aria-hidden="true"></span>Green: done</li>
+          <li><span class="swatch swatch-dot swatch-todo" aria-hidden="true"></span>Blue: still to do</li>
+          <li><span class="swatch swatch-dot swatch-now" aria-hidden="true"></span>Red dot: where the board is now</li>
+        </ul>
         <p class="guide-prompt" id="guidePrompt">Open preview to start.</p>
 
         <div class="alert" id="firewallPanel" hidden role="alert">
@@ -95,10 +124,10 @@
         </div>
 
         <dl class="stats">
-          <div><dt>Frames saved</dt><dd id="captureCount">0/0</dd></div>
-          <div><dt>Markers in view</dt><dd id="markerCount">0</dd></div>
-          <div><dt>Coverage</dt><dd id="coverageOverall">0%</dd></div>
-          <div><dt>Route targets</dt><dd id="guideCount">0/0</dd></div>
+          <div title="Views saved into this run, and how many the run aims for"><dt>Views saved</dt><dd><span id="captureCount">0</span> <span class="dd-aside" id="captureAim">· aim 0</span></dd></div>
+          <div title="ArUco markers found in the current picture"><dt>Markers in view</dt><dd id="markerCount">0</dd></div>
+          <div title="Guide poses reached so far, out of all the poses the guide asks for"><dt>Guide</dt><dd><span id="guideCount">0 / 0</span> <span class="dd-aside">poses</span></dd></div>
+          <div id="spreadStat" title="How widely the saved views cover the lens: left–right, top–bottom, near–far and tilt range. 100 % means all four are covered."><dt>Spread</dt><dd id="coverageOverall">0 %</dd></div>
         </dl>
 
         <div class="coverage">
@@ -107,14 +136,12 @@
             <canvas id="scatter" width="640" height="360" role="img"
                     aria-label="Where in the image the board has been captured"></canvas>
             <ul class="legend">
-              <li><span class="swatch swatch-used" aria-hidden="true"></span>Captured view (box area ≈ board area)</li>
-              <li><span class="swatch swatch-error" aria-hidden="true"></span>Discarded for high error by the pinhole or fisheye fit: capture that area again</li>
-              <li><span class="swatch swatch-surplus" aria-hidden="true"></span>Left out to keep the solve within its view limit: no action needed</li>
+              <li><span class="swatch swatch-used" aria-hidden="true"></span>A saved view (box area ≈ board area)</li>
               <li><span class="swatch swatch-target" aria-hidden="true"></span>The board centre must reach this line or beyond</li>
             </ul>
           </div>
           <div class="bars">
-            <h2 class="label">Spread</h2>
+            <h2 class="label" title="The four parts that make up the Spread number">Spread, part by part</h2>
             <div class="bar"><span>Left–right</span><meter id="barX" min="0" max="1" value="0" aria-label="Left–right coverage"></meter></div>
             <div class="bar"><span>Top–bottom</span><meter id="barY" min="0" max="1" value="0" aria-label="Top–bottom coverage"></meter></div>
             <div class="bar"><span>Near–far</span><meter id="barSize" min="0" max="1" value="0" aria-label="Near–far coverage"></meter></div>
@@ -123,18 +150,17 @@
         </div>
       </section>
 
-      <aside class="setup" aria-label="Setup">
+      <aside class="setup" aria-labelledby="settingsTitle">
         <form id="configForm">
-          <div class="preset-bar">
-            <label class="preset-select">Preset
-              <select id="presetSelect"><option value="">Starting settings</option></select>
-            </label>
+          <div class="settings-head">
+            <h2 class="settings-title" id="settingsTitle">Settings <span class="hint">(the camera setup fills these in)</span></h2>
             <div class="preset-actions">
-              <button type="button" class="btn" id="presetLoad">Load</button>
-              <button type="button" class="btn btn-quiet" id="presetSave">Save as…</button>
+              <button type="button" class="btn btn-quiet" id="presetSave"
+                      title="Save these settings as a camera setup of your own, listed in step 1">Save as…</button>
+              <button type="button" class="btn btn-quiet" id="presetReset"
+                      title="Put back the settings the server started with">Starting settings</button>
             </div>
           </div>
-          <p id="presetMsg" class="note" aria-live="polite"></p>
 
           <h2 class="label">Camera</h2>
           <label>Camera name <span class="hint">names the run folder</span>
@@ -175,14 +201,14 @@
           <h2 class="label">Model</h2>
           <label>
             <select name="solver.models" aria-label="Calibration model">
-              <option value="fisheye_ds">Double Sphere + Kannala–Brandt fisheye (Max Lens Mod, ~167°)</option>
+              <option value="fisheye_ds">Double Sphere + Kannala–Brandt for UMI (Max Lens Mod, ~167°)</option>
               <option value="double_sphere">Double Sphere only</option>
-              <option value="fisheye">Kannala–Brandt fisheye (Wide, ~130°)</option>
+              <option value="fisheye">OpenCV fisheye, Kannala–Brandt (Wide, ~130°)</option>
               <option value="pinhole">Pinhole: plumb_bob + rational (Linear, ~90°)</option>
               <option value="both">Pinhole + Kannala–Brandt fisheye (compare)</option>
             </select>
           </label>
-          <p class="note">Double Sphere needs the OpenICC image (<code>gopro-charuco setup-openicc</code>). If it is missing, that model reports the setup command; any other selected model still solves.</p>
+          <p class="note">Double Sphere and Kannala–Brandt for UMI need the OpenICC image (<code>gopro-charuco setup-openicc</code>). If it is missing, those models report the setup command; any other selected model still solves.</p>
 
           <h2 class="label">Board</h2>
           <details class="disclosure board-details">
@@ -261,9 +287,12 @@
         <span class="verdict-badge" id="verdictBadge">n/a</span>
         <span class="verdict-text" id="verdictText"></span>
       </div>
+      <p class="verdict-detail" id="verdictDetail"></p>
       <ul class="verdict-reasons" id="verdictReasons"></ul>
       <div class="figures" id="recFigures"></div>
       <dl class="result-grid" id="resultGrid"></dl>
+      <h3 class="label" id="filesTitle">Files</h3>
+      <dl class="result-grid files-grid" id="filesGrid"></dl>
       <details class="disclosure">
         <summary>Raw calibration JSON</summary>
         <div class="disclosure-body"><pre class="code" id="resultsRaw"></pre></div>
