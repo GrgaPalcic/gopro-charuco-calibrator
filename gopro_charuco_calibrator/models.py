@@ -170,8 +170,9 @@ class CoverageTargets(BaseModel):
 
 
 # GoPro Labs QR codes for the lens mods (Labs QR creator source and HERO13 Labs notes):
-# oX2 selects Max Lens Mod 2.0, which the camera does not detect by itself; oX10 turns
-# on lens-mod auto detection (Labs 1.12.70), which the Ultra Wide Lens Mod needs.
+# oX2 selects Max Lens Mod 2.0, which the camera does not detect by itself; oX10 selects
+# Auto Detect for lens mods (HERO13 Labs 1.12.70), so the camera detects the Ultra Wide
+# Lens Mod. How oX10 combines with fX is unverified.
 LENS_MOD_LABS_CODES = {"ADWAL-002": "oX2", "AEWAL-001": "oX10"}
 LENS_MOD_NAMES = {"ADWAL-002": "Max Lens Mod 2.0", "AEWAL-001": "Ultra Wide Lens Mod"}
 ISO_MAX_VALUES = (100, 200, 400, 800, 1600, 3200, 6400)

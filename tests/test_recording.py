@@ -926,6 +926,140 @@ def test_retake_adds_views_and_another_camera_gets_its_own_run(
     assert saved["acquisition_mode"]["camera_name"] == "gopro13_9999"
 
 
+def test_a_camera_switch_clears_the_results_and_can_be_undone(tmp_path, fresh_job):
+    """No ffmpeg needed: the switch itself, before any view is read."""
+    fresh_job.start(_config(), tmp_path / "runs")
+    first_id, first_dir = fresh_job.run_id, fresh_job.output_dir
+    first_generation = fresh_job._generation
+    # Pretend the first camera's run solved.
+    fresh_job._set(results=[{"model": "fisheye", "ok": True}], summary_path="x/summary.json",
+                   acquisition_mode={"camera_name": "a"}, orbslam3={"path": "x"},
+                   rejected_points=[[1, 2]])
+    clip = first_dir / "clips" / "GX010003.MP4"
+    clip.write_bytes(b"x" * 100)
+
+    moved, generation = fresh_job._switch_camera(clip, "C3509999999999", "C3501234567890")
+    status = fresh_job.status()
+    assert generation != first_generation and status["run_id"].startswith("gopro13_9999_")
+    assert status["results"] is None and status["summary_path"] is None
+    assert status["acquisition_mode"] is None and status["orbslam3"] is None
+    assert status["rejected_points"] == [] and status["needs_more_views"] is False
+    # The new run knows its camera before any clip has joined it.
+    assert status["clips"] == [] and status["serial"] == "C3509999999999"
+    assert moved.is_file() and not clip.exists()
+
+    # Undone: the new run's folder goes and the first run is current again.
+    assert fresh_job._undo_switch() == first_generation
+    status = fresh_job.status()
+    assert not moved.parent.parent.exists() and first_dir.is_dir()
+    assert (fresh_job.run_id, fresh_job.output_dir) == (first_id, first_dir)
+    assert status["run_id"] == first_id and status["results"][0]["model"] == "fisheye"
+    assert status["summary_path"] == "x/summary.json" and status["serial"] is None
+
+
+@needs_ffmpeg
+def test_another_camera_never_shows_the_previous_calibration(
+    synthetic_clip, fresh_job, monkeypatch, tmp_path
+):
+    """Camera A solves. Camera B's clip then fails three ways: its folder cannot be
+    made, its views cannot be read, and it has too few views. The first two leave A's
+    run current and nothing of B on disk; the third is B's own run, with no results."""
+    real_check, real_extract = recording.check_clip, recording.extract_views
+    camera = {"serial": "C3501234567890", "extract_fails": False}
+    seen_while_extracting = []
+
+    def check_with_serial(path, rec, run_serial=None):
+        result = real_check(path, rec, run_serial)
+        result["metadata"] = {**result["metadata"], "serial": camera["serial"]}
+        return result
+
+    def extract(clip, **kwargs):
+        seen_while_extracting.append(fresh_job.status())
+        if camera["extract_fails"]:
+            raise RuntimeError("the decoder stopped")
+        return real_extract(clip, **kwargs)
+
+    monkeypatch.setattr(recording, "check_clip", check_with_serial)
+    monkeypatch.setattr(recording, "extract_views", extract)
+    client = TestClient(app_module.app)
+    runs = tmp_path / "runs"
+    client.post(
+        "/api/recording/start",
+        json={"config": _config().model_dump(), "runs_dir": str(runs)},
+    )
+    assert _upload(client, synthetic_clip.path, "GX010001.MP4").status_code == 200
+    first = _poll(client)
+    assert first["state"] == "solved" and first["results"]
+    first_dir = Path(first["output_dir"])
+    before = _tree(first_dir)
+
+    def only_the_first_run(status):
+        assert status["run_id"] == first["run_id"] and status["results"] == first["results"]
+        assert status["summary_path"] == first["summary_path"]
+        assert status["acquisition_mode"] == first["acquisition_mode"]
+        assert status["camera_name"] == "gopro13_7890" and status["serial"] == "C3501234567890"
+        assert status["captures"] == 15 and status["previous_run_id"] is None
+        assert [p.name for p in runs.iterdir()] == [first_dir.name]
+        assert _tree(first_dir) == before
+        assert fresh_job.busy is False
+
+    # 1. The other camera's folder cannot be made (a full disk): refused, not stuck.
+    camera["serial"] = "C3509999999999"
+    real_make = fresh_job._make_run_dir
+
+    def disk_full():
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(fresh_job, "_make_run_dir", disk_full)
+    assert _upload(client, synthetic_clip.path, "GX010002.MP4").status_code == 200
+    status = _poll(client)
+    assert status["state"] == "error" and status["refused_clip"]["reason"] == "no_run_folder"
+    assert status["refused_clip"]["serial"] == "C3509999999999"
+    assert "(No space left on device)" in status["message"]
+    assert f"This camera's run {first['run_id']} is still open." in status["message"]
+    only_the_first_run(status)
+    monkeypatch.setattr(fresh_job, "_make_run_dir", real_make)
+
+    # 2. No views can be read from it: its new run is removed again.
+    camera["extract_fails"] = True
+    assert _upload(client, synthetic_clip.path, "GX010002.MP4").status_code == 200
+    status = _poll(client)
+    assert seen_while_extracting[-1]["run_id"].startswith("gopro13_9999_")
+    assert seen_while_extracting[-1]["results"] is None
+    assert status["state"] == "error" and status["refused_clip"]["reason"] == "failed"
+    assert "the decoder stopped" in status["message"]
+    assert "the folder made for that camera was removed" in status["message"]
+    only_the_first_run(status)
+    camera["extract_fails"] = False
+
+    # The first camera's clip still joins the first camera's run.
+    camera["serial"] = "C3501234567890"
+    assert _upload(client, synthetic_clip.path, "GX010003.MP4").status_code == 200
+    status = _poll(client)
+    assert status["state"] == "solved" and status["run_id"] == first["run_id"]
+    assert [c["name"] for c in status["clips"]] == ["GX010001.MP4", "GX010003.MP4"]
+    first = status
+
+    # 3. Too few views: B's own run, with none of A's calibration in it.
+    camera["serial"] = "C3509999999999"
+    short = build_clip(tmp_path / "short.mp4", poses=[POSES[0], POSES[2], POSES[4]])
+    assert _upload(client, short.path, "GX010004.MP4").status_code == 200
+    other = _poll(client)
+    while_analysing = seen_while_extracting[-1]
+    assert while_analysing["run_id"] == other["run_id"] and while_analysing["results"] is None
+    assert other["state"] == "error" and other["needs_more_views"] is True
+    assert other["run_id"].startswith("gopro13_9999_") and other["captures"] == 3
+    for key in ("results", "summary_path", "acquisition_mode", "orbslam3"):
+        assert other[key] is None, key
+    assert other["rejected_points"] == []
+    assert other["previous_run_id"] == first["run_id"]
+    assert sorted(p.name for p in runs.iterdir()) == sorted([first_dir.name, other["run_id"]])
+    # A's calibration is left exactly as it was.
+    assert json.loads(Path(first["summary_path"]).read_text())["recording"]["serial"] == (
+        "C3501234567890"
+    )
+
+
 @needs_ffmpeg
 def test_a_clip_cut_short_warns_in_the_job(synthetic_clip, fresh_job, tmp_path):
     cut = _cut_short(synthetic_clip.path, tmp_path / "GX010001.MP4", 0.75)

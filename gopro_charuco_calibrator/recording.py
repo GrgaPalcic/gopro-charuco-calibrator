@@ -58,7 +58,9 @@ the card that stopped early), gets a "Whole clip read" mismatch row; what was re
 still used.
 
 One run is one camera: a clip whose serial differs from the run's starts a new run for
-its camera (``RecordingJob._switch_camera``) and leaves the previous run as it was.
+its camera (``RecordingJob._switch_camera``) and leaves the previous run as it was. If
+that new run cannot hold the clip (its folder cannot be made, or no views could be read
+from the clip), the new run's folder is removed and the previous run is open again.
 """
 
 from __future__ import annotations
@@ -106,6 +108,18 @@ MAX_NAME_STEM_BYTES = 200
 MAX_NAME_SUFFIX_BYTES = 16
 DEFAULT_CAMERA_NAME = CameraConfig().camera_name
 NOT_USED = "The clip was not used and was removed from this run's folder."
+
+
+def no_results() -> dict[str, Any]:
+    """The status's result keys for a run that has not solved (the live route's shapes)."""
+    return {
+        "results": None,
+        "summary_path": None,
+        "acquisition_mode": None,
+        "rejected_points": [],
+        "needs_more_views": False,
+        "orbslam3": None,
+    }
 NO_RECORDING_SETTINGS = (
     "This preset has no settings for recording on the camera. Pick a HERO13 lens-mod "
     "preset for the From a recording route."
@@ -698,6 +712,28 @@ def describe_recording_mode(
     return mode
 
 
+# Everything _reset_run replaces, so a camera switch can be undone (_undo_switch).
+_RUN_FIELDS = (
+    "run_id",
+    "output_dir",
+    "camera_name",
+    "named_from_serial",
+    "_timestamp",
+    "_poses",
+    "_kept",
+    "_clips",
+    "_image_size",
+    "_refused",
+    "previous_run_id",
+    "previous_output_dir",
+    "_camera_switch",
+    "_switch_serial",
+    "_before_switch",
+    "_generation",
+    "_active_generation",
+)
+
+
 class RecordingJob:
     """One recording-route run at a time, processed in a background thread.
 
@@ -736,6 +772,11 @@ class RecordingJob:
         self.previous_run_id: str | None = None
         self.previous_output_dir: Path | None = None
         self._camera_switch: dict[str, Any] | None = None
+        # The serial of the clip that started this run by a camera switch, so the run
+        # knows its camera before any clip has joined it.
+        self._switch_serial: str | None = None
+        # The previous camera's run, to put back if this one never holds a clip.
+        self._before_switch: tuple[dict[str, Any], dict[str, Any]] | None = None
         self._generation += 1
 
     @property
@@ -752,12 +793,13 @@ class RecordingJob:
         return self.state in BUSY_STATES
 
     def _run_serial(self) -> str | None:
-        """The serial of the camera this run belongs to (its first clip that has one)."""
+        """The serial of the camera this run belongs to: its first clip that has one, or
+        the clip that started the run by a camera switch."""
         for clip in self._clips:
             serial = (clip.get("metadata") or {}).get("serial")
             if serial:
                 return serial
-        return None
+        return self._switch_serial
 
     def _mismatch_sentence(self) -> str:
         """" 2 settings differ from the preset in A and B: x, y." plus a line for clips
@@ -868,12 +910,7 @@ class RecordingJob:
                 "progress": 0.0,
                 "message": message,
                 "upload": None,
-                "results": None,
-                "summary_path": None,
-                "acquisition_mode": None,
-                "rejected_points": [],
-                "needs_more_views": False,
-                "orbslam3": None,
+                **no_results(),
                 **self._run_status(),
             }
 
@@ -1069,8 +1106,12 @@ class RecordingJob:
         """Check, extract and solve. A clip from another camera starts a new run of its
         own (``_switch_camera``). A clip the run cannot use (not a video, a different
         size, or reading it failed) never joins the run: its file is deleted and it
-        shows as ``refused_clip``, so it cannot feed the mismatch warnings, the summary
-        or config.json. A missing ffmpeg is never the clip's fault: it stays."""
+        shows as ``refused_clip`` (reason ``unreadable``, ``different_size``, ``failed``,
+        or ``no_run_folder`` when another camera's run could not be opened), so it cannot
+        feed the mismatch warnings, the summary or config.json. If the refused clip had
+        started a new run by a camera switch, that run is removed and the previous one
+        is current again (``_undo_switch``). A missing ffmpeg is never the clip's fault:
+        it stays."""
         require_tools()
         rec = self.rec
         with self._lock:
@@ -1095,7 +1136,21 @@ class RecordingJob:
             )
             return
         if run_serial and serial and serial != run_serial:
-            clip, generation = self._switch_camera(clip, serial, run_serial)
+            try:
+                clip, generation = self._switch_camera(clip, serial, run_serial)
+            except OSError as exc:
+                # _switch_camera put this run back as it was.
+                self._refuse(
+                    clip, check, generation, reason="no_run_folder",
+                    message=(
+                        f"{clip.name} is from another camera (serial {serial}), but a "
+                        "folder for its calibration could not be made "
+                        f"({exc.strerror or exc}). {NOT_USED} Make room on the disk, or "
+                        "check that the runs folder can be written to, then drop the clip "
+                        f"again. This camera's run {self.run_id} is still open."
+                    ),
+                )
+                return
             # In its own run the serial is no longer a mismatch.
             rows = compare(check["probe"], check["metadata"], rec)
             check = {
@@ -1153,14 +1208,26 @@ class RecordingJob:
         except Exception as exc:  # noqa: BLE001 - the clip leaves the run, then the job ends
             with self._lock:
                 self._clips.remove(entry)
+                # A run this clip started by a camera switch would be left empty.
+                undo = self._before_switch is not None and not self._clips
             reason = str(exc) or f"{type(exc).__name__} while reading {clip.name}."
-            self._refuse(
-                clip, check, generation, reason="failed",
-                message=f"Could not pick views from {clip.name}: {reason.rstrip('.')}. "
-                f"{NOT_USED} Drop the clip again.",
+            message = (
+                f"Could not pick views from {clip.name}: {reason.rstrip('.')}. "
+                f"{NOT_USED} Drop the clip again."
             )
+            if undo:
+                generation = self._undo_switch()
+                message = (
+                    f"{clip.name} is from another camera (serial {serial}), but views could "
+                    f"not be picked from it: {reason.rstrip('.')}. The clip was not used, "
+                    "and the folder made for that camera was removed. Drop the clip again. "
+                    f"This camera's run {self.run_id} is still open."
+                )
+            self._refuse(clip, check, generation, reason="failed", message=message)
             return
         with self._lock:
+            # The clip is in the run: a run it started by a camera switch stays.
+            self._before_switch = None
             entry["counts"] = result.counts
             entry["kept"] = [view["name"] for view in result.kept]
             entry["motion_limit_px"] = round(result.motion_limit_px, 3)
@@ -1189,17 +1256,27 @@ class RecordingJob:
         """
         with self._lock:
             previous_id, previous_dir = self.run_id, self.output_dir
+            before = {name: getattr(self, name) for name in _RUN_FIELDS}
+            before_results = {key: self._status.get(key) for key in no_results()}
             self._reset_run()
+            # From here the job's writes belong to the new run, even if opening it fails.
+            self._active_generation = self._generation
+            self._before_switch = (before, before_results)
+            self._switch_serial = serial
             self.camera_name = camera_name_from_serial(serial) or self.config.camera.camera_name
             self.named_from_serial = camera_name_from_serial(serial) is not None
             self._timestamp = time.strftime("%Y%m%d_%H%M%S")
-            self._make_run_dir()
-            assert self.output_dir is not None
-            target = self.output_dir / "clips" / clip.name
             try:
-                clip.rename(target)
-            except OSError:
-                shutil.move(str(clip), target)  # another file system: still a move
+                self._make_run_dir()
+                assert self.output_dir is not None
+                target = self.output_dir / "clips" / clip.name
+                try:
+                    clip.rename(target)
+                except OSError:
+                    shutil.move(str(clip), target)  # another file system: still a move
+            except BaseException:
+                self._undo_switch()
+                raise
             message = (
                 f"This clip is from another camera (serial {serial}): started a separate "
                 f"calibration for it. The previous camera's calibration is in {previous_id}."
@@ -1214,9 +1291,26 @@ class RecordingJob:
                 "message": message,
             }
             generation = self._generation
-            self._active_generation = generation
-        self._publish(generation, message=message)
+        # Nothing of the previous camera's calibration may show under this run's name.
+        self._publish(generation, message=message, **no_results())
         return target, generation
+
+    def _undo_switch(self) -> int:
+        """Put the previous camera's run back, as it was before ``_switch_camera``, when
+        the run the switch started never held a clip; that run's folder is removed.
+        Returns the previous run's generation, which the job writes under again."""
+        with self._lock:
+            assert self._before_switch is not None
+            before, before_results = self._before_switch
+            failed_dir = self.output_dir
+            for name, value in before.items():
+                setattr(self, name, value)
+            self._status.update({**self._run_status(), **before_results})
+            generation = self._generation
+        if failed_dir is not None:
+            # A fresh folder from _unique_run_dir: only this switch wrote into it.
+            shutil.rmtree(failed_dir, ignore_errors=True)
+        return generation
 
     def _with_switch_note(self, message: str) -> str:
         """Lead with the camera-switch note while the clip that caused it is processed."""
