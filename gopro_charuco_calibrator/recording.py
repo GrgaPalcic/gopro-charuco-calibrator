@@ -1202,7 +1202,8 @@ class RecordingJob:
                 message=(
                     f"{clip.name} is {size[0]}x{size[1]} but this run's first clip was "
                     f"{self._image_size[0]}x{self._image_size[1]}. {NOT_USED} Record every "
-                    "clip of one run in the same mode, or start a new run for this one."
+                    "clip of one run in the same mode. To give this clip a run of its own, "
+                    "click Start this camera again, then drop it."
                 ),
             )
             return

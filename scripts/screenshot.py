@@ -55,7 +55,7 @@ from gopro_charuco_calibrator import presets
 from gopro_charuco_calibrator.app import app, set_default_config
 from gopro_charuco_calibrator.capture import _discarded_points
 from gopro_charuco_calibrator.clipcheck import compare
-from gopro_charuco_calibrator.coverage import coverage_summary
+from gopro_charuco_calibrator.coverage import PoseParams, coverage_summary
 from gopro_charuco_calibrator.detection import draw_detection
 from gopro_charuco_calibrator.gopro import (
     REPORTED_SETTING_FIELDS,
@@ -63,7 +63,7 @@ from gopro_charuco_calibrator.gopro import (
     _setting_label,
     describe_acquisition_mode,
 )
-from gopro_charuco_calibrator.guide import guide_status
+from gopro_charuco_calibrator.guide import default_checkpoints, guide_status
 from gopro_charuco_calibrator.labs import labs_command
 from gopro_charuco_calibrator.recording import (
     RecordingJob,
@@ -79,6 +79,7 @@ REPO = Path(__file__).resolve().parent.parent
 PRESET = "gopro13_mlm2_adwal002"
 # A shipped camera setup with no recording section (live route only).
 LIVE_ONLY_PRESET = "gopro13_wide_1080p"
+UWLM_PRESET = "gopro13_uwlm_aewal001"
 ROUTE_KEY = "gopro-charuco.route"
 
 
@@ -399,10 +400,14 @@ def build_recording_states(config, workdir, views):
         upload={"name": CLIP, "received_bytes": 602_860_000, "total_bytes": CLIP_BYTES},
         **run,
     )
+    # The job names the run after the serial straight after the clip check.
+    named_dir = {"run_id": named_run, "run_dir": f"runs/{named_run}",
+                 "output_dir": f"runs/{named_run}", "camera_name": named,
+                 "camera_named_from_serial": True}
     analysing = rec_status(
         config, "analysing", f"Picking views from {CLIP}.",
         stage="extract", progress=0.37, image_size=size, serial=DEMO_SERIAL,
-        clips=[demo_clip(rec, mismatch=False)], **run,
+        clips=[demo_clip(rec, mismatch=False)], **named_dir,
     )
 
     def solved_status(clip, kept_poses, message):
@@ -438,13 +443,39 @@ def build_recording_states(config, workdir, views):
         f"Calibration solved. 2 settings differ from the preset in {CLIP}: "
         "frame rate, hypersmooth.",
     )
-    # Too little spread from a first clip: the page asks for another clip.
-    retake = solved_status(demo_clip(rec, mismatch=False), poses[:9], "Calibration solved.")
+    def needs_more(kept_poses):
+        """The job's state when the views picked so far are too few to solve: no
+        results, and a request for another clip."""
+        counts = {**empty_counts(), **DEMO_COUNTS, "kept": len(kept_poses)}
+        counts["duplicate"] += len(poses) - len(kept_poses)
+        status = solved_status(demo_clip(rec, mismatch=False), kept_poses, "")
+        status.update(no_results())
+        status.update(
+            state="error", stage="extract", counts=counts, needs_more_views=True,
+            message=(
+                f"Only {len(kept_poses)} usable views so far; solving needs "
+                f"{config.solver.min_frames}. Record another clip that holds the board still "
+                "at more positions, and add it to this run."
+            ),
+        )
+        status["clips"] = [
+            dict(status["clips"][0], counts=counts,
+                 kept=[f"capture_{i:03d}.jpg" for i in range(1, len(kept_poses) + 1)]),
+        ]
+        return status
+
+    # A first clip with too few usable views, some positions missing.
+    retake = needs_more(poses[:9])
+    # Every position covered, one view each, but still fewer views than solving needs
+    # (23 < 25). Made up: the kept views sit exactly on the guide's positions.
+    covered = needs_more([
+        PoseParams(cp.x, cp.y, cp.size, cp.skew) for cp in default_checkpoints(targets)
+    ])
     # A second clip in another mode is refused; the run's earlier result stays.
     refused_message = (
         "GX010043.MP4 is 1920x1080 but this run's first clip was 4000x3000. The clip was not "
         "used and was removed from this run's folder. Record every clip of one run in the same "
-        "mode, or start a new run for this one."
+        "mode. To give this clip a run of its own, click Start this camera again, then drop it."
     )
     refused = dict(
         solved,
@@ -466,6 +497,7 @@ def build_recording_states(config, workdir, views):
         "analysing": analysing,
         "mismatch": mismatch,
         "retake": retake,
+        "covered": covered,
         "solved": solved,
         "refused": refused,
     }
@@ -476,7 +508,7 @@ def build_recording_states(config, workdir, views):
 LAYOUT_CHECK = """
 (checks) => {
   const {expect, primary, overlayEmpty, mustSay, mustNotSay, absent, steps} = checks;
-  const {setupHighlighted, drawn, within} = checks;
+  const {setupHighlighted, drawn, within, fold} = checks;
   const problems = [];
   const vw = document.documentElement.clientWidth;
   if (document.documentElement.scrollWidth > vw + 1) {
@@ -535,6 +567,14 @@ LAYOUT_CHECK = """
     let count = 0;
     for (let i = 3; i < data.length; i += 4) count += data[i] > 0;
     if (count < 100) problems.push(`nothing drawn on ${selector}`);
+  }
+  // Loud things must be on the first screen, not below the fold.
+  for (const selector of fold || []) {
+    const el = document.querySelector(selector);
+    const top = el ? el.getBoundingClientRect().top + window.scrollY : Infinity;
+    if (top >= window.innerHeight) {
+      problems.push(`${selector} starts at ${Math.round(top)} px, below the first screen`);
+    }
   }
   for (const [selector, texts] of Object.entries(within)) {
     const el = document.querySelector(selector);
@@ -788,12 +828,13 @@ def main() -> int:
     rec_common = [".steps", ".setup", "#recBench"]
 
     def rec_checks(expect, primary, steps, texts=(), absent=(), not_texts=(), drawn=(), within=None,
-                   setup=False):
+                   setup=False, fold=()):
         result = checks(expect, primary, texts=texts, absent=absent, steps=steps,
                         not_texts=not_texts, setup=setup)
         result["expect"] = rec_common + list(expect)
         result["drawn"] = list(drawn)
         result["within"] = within or {}
+        result["fold"] = list(fold)
         return result
 
     route_texts = [
@@ -829,6 +870,7 @@ def main() -> int:
                 ["#previewEmpty"],
                 "#previewBtn",
                 overlay_empty=True,
+                texts=["Choose From a recording in step 1 instead"],
                 absent=["#nextCameraBtn", "#guideLegend"],
                 steps=step_row("done", "current", "pending", "pending"),
             ),
@@ -1067,11 +1109,39 @@ def main() -> int:
                     calibration_qr,
                     dataset_qr,
                     "4K, aspect ratio 4:3",
+                    "If it shows another lens, set Lens to Ultra Wide by hand.",
+                    "set Shutter to 1/480 in Protune by hand.",
                 ],
-                absent=["#resultsPanel", "#clipCheck", "#recShowSettingsBtn"],
+                not_texts=["oX3"],
+                absent=["#resultsPanel", "#clipCheck", "#recShowSettingsBtn", "#labsAlternatives"],
+                within={"#labsBody thead": ["NOTES"]},  # the header is set in capitals
             ),
             False,
             {**rec, "qr": {"#qrCalibration": calibration_qr, "#qrDataset": dataset_qr}},
+        ),
+        (
+            # Review only: the Ultra Wide Lens Mod setup, with the codes still to try
+            # kept in a closed disclosure.
+            "rec-settings-uwlm",
+            None,
+            b"",
+            review / "rec-settings-uwlm.png",
+            desktop,
+            rec_checks(
+                ["#labsUnverified", "#labsAlternatives"],
+                "#recSettingsBtn",
+                rec_row("done", "current", "pending", "pending"),
+                texts=["Check the camera screen shows the Ultra Wide Lens Mod."],
+                not_texts=["oX3fX may be"],
+            ),
+            False,
+            {
+                **rec,
+                "actions": [
+                    f"() => {{ presetSelect.value = {json.dumps(UWLM_PRESET)};"
+                    " presetSelect.dispatchEvent(new Event('change')); }",
+                ],
+            },
         ),
         (
             "rec-settings-mobile",
@@ -1115,10 +1185,16 @@ def main() -> int:
             rec_checks(
                 ["#recAnim"], "#recRecordedBtn", rec_row("done", "done", "current", "pending"),
                 drawn=["#recAnim"],
-                within={"#animCaption": ["position 21/23 · tilted · upper right"]},
+                within={
+                    "#animCaption": ["position 21/23 · tilted · upper right"],
+                    "#recHint": ["finish steps 2 and 3 first"],
+                },
             ),
             False,
-            {**rec, "actions": [confirm, "() => seekAnimation(20, 0.35)"]},
+            {**rec, "actions": [
+                confirm, "() => seekAnimation(20, 0.35)",
+                "() => recDropAnywhere([{name: 'GX010042.MP4'}])",
+            ]},
         ),
         (
             # prefers-reduced-motion: a still, numbered map and the list in order.
@@ -1137,7 +1213,13 @@ def main() -> int:
                 within={"#animLegend": ["Ringed: hold the board tilted"]},
             ),
             False,
-            {**rec, "reduced_motion": True, "actions": [confirm]},
+            {**rec, "reduced_motion": True, "actions": [
+                confirm,
+                # Closed by the operator, it stays closed through the next render.
+                "() => { positionsList.open = false; renderRecording(); "
+                "if (positionsList.open) throw new Error('positions list reopened'); "
+                "positionsList.open = true; }",
+            ]},
         ),
         (
             "rec-drop",
@@ -1181,8 +1263,11 @@ def main() -> int:
                 ["#recProgress"],
                 None,
                 rec_row("done", "done", "done", "current"),
-                texts=["Picking views from the clip", "37 %"],
-                absent=["#resultsPanel", "#clipCheck", "#recMapWrap"],
+                texts=["Picking views from the clip", "37 %",
+                       "Working on the clip. Wait for the result."],
+                not_texts=["Add another clip"],
+                within={"#recChooseBtn": ["Choose clip…"]},
+                absent=["#resultsPanel", "#clipCheck", "#recMapWrap", "#recReminder"],
             ),
             False,
             {"route": "recording", "rec_status": rec_states["analysing"]},
@@ -1194,9 +1279,13 @@ def main() -> int:
             review / "rec-mismatch-pass.png",
             desktop,
             rec_checks(
-                ["#clipBanner", "#clipUnknown", "#resultsPanel", "#recMapWrap", "#recStats"],
-                "#recNextBtn",
-                rec_row("done", "done", "done", "done"),
+                ["#clipBanner", "#clipUnknown", "#resultsPanel", "#recMapWrap", "#recStats",
+                 "#recNextBtn"],
+                "#recRedoBtn",
+                rec_row("done", "done", "done", "current"),
+                fold=["#clipBanner"],
+                not_texts=["Calibration solved.", "Record your data in exactly this mode."],
+                absent=["#recReminder"],
                 texts=[
                     banner,
                     "Check every setting on the camera again, and record the clip again if any "
@@ -1206,10 +1295,15 @@ def main() -> int:
                     "The file cannot confirm these settings",
                     "Named this camera gopro13_1234 from its serial number",
                 ],
-                within={"#verdictText": [
-                    banner, "Calibration passed, but it is only valid for footage recorded "
-                    "exactly like this clip.",
-                ]},
+                within={
+                    "#verdictText": [
+                        banner, "Calibration passed, but it is only valid for footage "
+                        "recorded exactly like this clip.",
+                    ],
+                    "#recPrompt": ["click Start this camera again", "Do not add the new clip"],
+                    "#statusLine": ["Calibration done, but the clip was not recorded"],
+                    "#recDropDesc": ["see the red box"],
+                },
                 drawn=["#recMap"],
             ),
             False,
@@ -1221,8 +1315,8 @@ def main() -> int:
             b"",
             review / "rec-mismatch-mobile.png",
             {"width": 390, "height": 844},
-            rec_checks(["#clipBanner", "#resultsPanel"], "#recNextBtn",
-                       rec_row("done", "done", "done", "done"), texts=[banner]),
+            rec_checks(["#clipBanner", "#resultsPanel"], "#recRedoBtn",
+                       rec_row("done", "done", "done", "current"), texts=[banner]),
             False,
             {"route": "recording", "rec_status": rec_states["mismatch"]},
         ),
@@ -1233,16 +1327,43 @@ def main() -> int:
             review / "rec-retake.png",
             desktop,
             rec_checks(
-                ["#recMissing", "#recMissingList li", "#resultsPanel", "#recNextBtn"],
+                ["#recMissing", "#recMissingList li", "#recNextBtn"],
                 "#recChooseBtn",
                 rec_row("done", "done", "done", "current"),
-                texts=["RETAKE", "Add another clip", "Missing positions",
-                       "Retake: record another clip that covers the missing positions"],
-                absent=["#clipBanner"],
-                not_texts=["Choose clip…", "Solve again"],
+                texts=["Add another clip", "Missing positions",
+                       "Not enough views to solve yet: 9 views kept, 25 needed.",
+                       "Retake: record another clip that covers the"],
+                absent=["#clipBanner", "#resultsPanel", "#recRedoBtn", "#recAlert",
+                        "#recReminder"],
+                not_texts=["Choose clip…", "Solve again", "covers the 0 missing"],
+                within={"#recStats": ["9", "need 25"]},
             ),
             False,
             {"route": "recording", "rec_status": rec_states["retake"]},
+        ),
+        (
+            # Every position covered, but too few views to solve: the prompt asks for
+            # more still positions, not for a list of missing ones.
+            "rec-needs-more-covered",
+            None,
+            b"",
+            review / "rec-needs-more-covered.png",
+            desktop,
+            rec_checks(
+                ["#recStats", "#recMapWrap"],
+                "#recChooseBtn",
+                rec_row("done", "done", "done", "current"),
+                texts=["Not enough views to solve yet: 23 views kept, 25 needed."],
+                absent=["#recMissing", "#clipBanner", "#recRedoBtn", "#resultsPanel",
+                        "#recAlert", "#recReminder"],
+                not_texts=["0 missing", "missing positions listed"],
+                within={
+                    "#recPrompt": ["holds the board still at more positions"],
+                    "#recStats": ["23 / 23"],
+                },
+            ),
+            False,
+            {"route": "recording", "rec_status": rec_states["covered"]},
         ),
         (
             "rec-refused",
@@ -1251,11 +1372,12 @@ def main() -> int:
             review / "rec-refused.png",
             desktop,
             rec_checks(
-                ["#recAlert", "#resultsPanel"],
+                ["#recAlert", "#resultsPanel", "#recRedoBtn"],
                 "#recNextBtn",
                 rec_row("done", "done", "done", "current"),
                 texts=[
                     "GX010043.MP4 is 1920x1080 but this run's first clip was 4000x3000",
+                    "click Start this camera again, then drop it",
                     "Problem: the last clip was not used.",
                     "The calibration below still passes",
                 ],
@@ -1271,9 +1393,12 @@ def main() -> int:
             review / "rec-solved.png",
             desktop,
             rec_checks(
-                ["#resultsPanel", "#clipUnknown", "#recCamera", ".figure"],
+                ["#resultsPanel", "#clipUnknown", "#recCamera", ".figure", "#recReminder",
+                 "#qrDatasetSmall"],
                 "#recNextBtn",
                 rec_row("done", "done", "done", "done"),
+                not_texts=["Calibration solved."],
+                within={"#recPrompt": ["scan QR code 2 below"]},
                 texts=[
                     "PASS",
                     "Calibration passed. The files are listed below. Click Next camera",
@@ -1281,10 +1406,11 @@ def main() -> int:
                     "Written for 960x720 frames",
                     "Blue: not covered (not needed, the result passed)",
                 ],
-                absent=["#clipBanner", "#recMissing"],
+                absent=["#clipBanner", "#recMissing", "#recRedoBtn"],
             ),
             False,
-            {"route": "recording", "rec_status": rec_states["solved"]},
+            {"route": "recording", "rec_status": rec_states["solved"],
+             "qr": {"#qrDatasetSmall": dataset_qr}},
         ),
         (
             # A camera setup with no recording section: step 1 is next again.
@@ -1318,6 +1444,7 @@ def main() -> int:
             extra = rest[0] if rest else None
             shot_checks.setdefault("drawn", [])
             shot_checks.setdefault("within", {})
+            shot_checks.setdefault("fold", [])
             jpeg = (
                 cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 88])[1].tobytes()
                 if len(frame)

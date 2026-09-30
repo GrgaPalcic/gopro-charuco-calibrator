@@ -118,6 +118,7 @@
           <p class="step-desc" id="recDropDesc">Drop the clip here. The app picks the views and solves.</p>
           <div class="step-actions">
             <button type="button" id="recChooseBtn" class="btn">Choose clip…</button>
+            <button type="button" id="recRedoBtn" class="btn" hidden>Start this camera again</button>
             <button type="button" id="recNextBtn" class="btn" hidden>Next camera</button>
           </div>
         </div>
@@ -141,6 +142,7 @@
                 <li>Click <strong>Open preview</strong>, then <strong>Start new run</strong>.</li>
                 <li>Move the board to each orange box until the guide is done.</li>
               </ol>
+              <p class="howto-other">Recording your data on the camera, for example for UMI? Choose <strong>From a recording</strong> in step 1 instead: a USB calibration is not valid for it.</p>
             </div>
           </div>
         </div>
@@ -207,6 +209,7 @@
 
       <section class="rec-bench rec-only" id="recBench" aria-label="Recording on the camera">
         <p class="guide-prompt" id="recPrompt"></p>
+        <p class="rec-note" id="recHint" role="status" hidden></p>
         <div class="rec-back" id="recBack" hidden>
           <button type="button" class="btn btn-quiet" id="recBackBtn">Back</button>
         </div>
@@ -238,11 +241,15 @@
             <div class="unverified" id="labsUnverified" hidden>
               <p class="unverified-head">Some codes are not yet confirmed on a HERO13. Check the camera screen after scanning:</p>
               <ul id="labsUnverifiedList"></ul>
+              <details class="disclosure" id="labsAlternatives" hidden>
+                <summary>Other codes to try when confirming the codes</summary>
+                <div class="disclosure-body"><ul id="labsAlternativesList"></ul></div>
+              </details>
             </div>
             <h3 class="label">Settings to check on the camera</h3>
             <div class="table-wrap">
               <table class="checklist">
-                <thead><tr><th scope="col">Setting</th><th scope="col">Set it to</th><th scope="col">How</th></tr></thead>
+                <thead><tr><th scope="col">Setting</th><th scope="col">Set it to</th><th scope="col">Notes</th></tr></thead>
                 <tbody id="labsChecklist"></tbody>
               </table>
             </div>
@@ -278,9 +285,14 @@
           <div class="alert" id="recAlert" hidden>
             <p class="alert-body" id="recAlertText"></p>
           </div>
+          <div class="clip-banner" id="clipBanner" role="alert" hidden></div>
           <div class="dropzone" id="dropZone">
             <p class="dropzone-title" id="dropZoneTitle">Drop the clip from the camera's card here</p>
-            <p class="note" id="dropZoneNote">An .mp4 file (GX01….MP4), or several. A 90 s clip is about 1.4 GB and takes a moment to copy.</p>
+            <p class="note" id="dropZoneNote">An .mp4 file (GX01xxxx.MP4, for example GX010042.MP4), or several. A 90 s clip is about 1.4 GB and takes a moment to copy.</p>
+          </div>
+          <div class="rec-reminder" id="recReminder" hidden>
+            <img id="qrDatasetSmall" width="132" height="132" alt="QR code 2: puts the dataset settings back">
+            <p><strong>Before you record the dataset, scan this code</strong> (QR code 2 from step 2). It puts the shutter back on Auto. Or set Shutter to Auto in Protune by hand.</p>
           </div>
           <input type="file" id="recFile" accept=".mp4,.MP4,video/mp4" multiple hidden>
           <div class="rec-progress" id="recProgress" hidden>
@@ -335,7 +347,7 @@
           <label>Camera name <span class="hint">names the run folder</span>
             <input name="camera.camera_name" autocomplete="off">
           </label>
-          <p class="note rec-only">From a recording: while this is the camera setup's own name, a clip that carries the camera's serial number names the run gopro13_ and the serial's last 4 characters instead, so each file maps to one camera.</p>
+          <p class="note rec-only">From a recording: leave this as it is and the run is named after the camera's serial number, for example gopro13_1234, so each file maps to one camera.</p>
           <label class="switch live-only">
             <input name="gopro.enabled" type="checkbox">
             <span class="track" aria-hidden="true"></span>
@@ -454,7 +466,6 @@
     </div>
 
     <div class="clip-check rec-only" id="clipCheck" hidden>
-      <div class="clip-banner" id="clipBanner" role="alert" hidden></div>
       <div class="clip-unknown" id="clipUnknown" hidden>
         <p class="clip-unknown-head">The file cannot confirm these settings. Check them on the camera screen:</p>
         <ul id="clipUnknownList"></ul>

@@ -29,7 +29,13 @@ from gopro_charuco_calibrator.coverage import PoseParams
 from gopro_charuco_calibrator.detection import detect_markers
 from gopro_charuco_calibrator.gopro import camera_state_warnings
 from gopro_charuco_calibrator.guide import default_checkpoints
-from gopro_charuco_calibrator.labs import checklist, labs_command, labs_payload, unverified_codes
+from gopro_charuco_calibrator.labs import (
+    alternative_codes,
+    checklist,
+    labs_command,
+    labs_payload,
+    unverified_codes,
+)
 from gopro_charuco_calibrator.models import (
     AppConfig,
     CaptureConfig,
@@ -168,13 +174,21 @@ def test_labs_unverified_codes_and_checklist():
     assert [u["code"] for u in unverified_codes(mlm2, calibration=True)] == ["fX", "S45"]
     assert [u["code"] for u in unverified_codes(mlm2, calibration=False)] == ["fX"]
     assert [u["code"] for u in unverified_codes(uwlm, calibration=True)] == [
-        "fX", "oX10", "oX3", "S45"
+        "fX", "oX10", "S45"
     ]
+    # Each operator note ends with what to do when the camera shows something else.
     lens_note = unverified_codes(mlm2, calibration=True)[0]["note"]
     assert "Max SuperView (listed for HERO12-13)" in lens_note
-    assert "Check the lens on the camera screen." in lens_note
-    alternative = unverified_codes(uwlm, calibration=False)[2]["note"]
-    assert "oX3fX" in alternative and "oX2fX" in alternative and "uses oX10" in alternative
+    assert "check the lens on the camera screen" in lens_note
+    assert lens_note.endswith("set Lens to Ultra Wide by hand.")
+    shutter_note = unverified_codes(mlm2, calibration=True)[1]["note"]
+    assert shutter_note.endswith("set Shutter to 1/480 in Protune by hand.")
+    # The oX3 alternative is for whoever confirms the codes, not an operator step.
+    assert alternative_codes(mlm2) == []
+    (alternative,) = alternative_codes(uwlm)
+    assert alternative["code"] == "oX3fX"
+    assert "oX2fX" in alternative["note"] and "use oX10" in alternative["note"]
+    assert labs_payload(uwlm)["alternatives"] == [alternative]
     rows = {row["setting"]: row for row in checklist(mlm2)}
     assert rows["Lens mod"]["value"] == "Max Lens Mod 2.0"
     assert "not detected automatically" in rows["Lens mod"]["how"]

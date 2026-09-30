@@ -518,6 +518,13 @@ h1 {
   gap: 4px;
 }
 
+.howto-other {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--rule);
+  font-size: 13px;
+}
+
 @media (max-width: 560px) {
   .howto {
     font-size: 13px;
@@ -525,6 +532,11 @@ h1 {
 
   .preview-empty {
     padding: 12px;
+  }
+
+  /* No room in a phone-width preview; step 1 right above says the same. */
+  .howto-other {
+    display: none;
   }
 }
 
@@ -1279,6 +1291,7 @@ details.disclosure > .disclosure-body {
 .rec-notes[hidden],
 .rec-note[hidden],
 .rec-camera[hidden],
+.rec-reminder[hidden],
 .rec-error[hidden],
 .labs[hidden] {
   display: none;
@@ -1607,6 +1620,42 @@ details.disclosure > .disclosure-body {
 .rec-camera {
   color: var(--ink-soft);
   overflow-wrap: anywhere;
+}
+
+/* QR code 2 again, once the calibration clip is in: the shutter goes back to Auto. */
+.rec-reminder {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--signal);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: var(--signal-dim);
+  color: var(--ink-soft);
+}
+
+.rec-reminder img {
+  flex: none;
+  width: 132px;
+  height: 132px;
+  border-radius: 4px;
+  background: #fff;
+  image-rendering: pixelated;
+}
+
+.rec-reminder img[hidden] {
+  display: none;
+}
+
+.rec-reminder strong {
+  color: var(--ink);
+}
+
+@media (max-width: 560px) {
+  .rec-reminder {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }
 
 .rec-camera strong {

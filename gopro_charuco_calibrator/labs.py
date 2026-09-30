@@ -64,42 +64,53 @@ def labs_command(rec: RecordingConfig, *, calibration: bool) -> str:
 
 
 def unverified_codes(rec: RecordingConfig, *, calibration: bool) -> list[dict[str, str]]:
-    """Codes the docs do not confirm for this camera; the UI shows them as unverified."""
+    """Codes the docs do not confirm for this camera; the UI shows them as unverified.
+    Each note says what the code should do, what to check on the camera screen, and
+    what to set by hand when the screen shows something else."""
     notes = [
         {
             "code": rec.labs_lens_code,
-            "note": f"{rec.labs_lens_code} is the Labs code for Max SuperView (listed for "
-            f"HERO12-13). That it gives the {rec.lens} lens at 4K 4:3 on a HERO13 is not "
-            "documented. Check the lens on the camera screen.",
+            "note": f"Should select the {rec.lens} lens. GoPro documents this code only as "
+            "Max SuperView (listed for HERO12-13), so check the lens on the camera screen. "
+            f"If it shows another lens, set Lens to {rec.lens} by hand.",
         }
     ]
     if rec.labs_lens_mod_code == "oX10":
         notes.append(
             {
                 "code": "oX10",
-                "note": "Turns on lens-mod auto detection. How it combines with the lens "
-                "code is not documented. Check the camera shows the lens mod.",
-            }
-        )
-        notes.append(
-            {
-                "code": "oX3",
-                "note": "An alternative, also unverified: the HERO13 Labs notes list oX3 "
-                "for Max Lens Mod 2.5, which is probably this lens mod, so oX3fX may be the "
-                "direct counterpart of the Max Lens Mod 2.0 code oX2fX. This code uses "
-                "oX10 until one of them is scanned on a camera.",
+                "note": "Should turn on lens-mod detection; how it combines with the lens "
+                f"code is not documented. Check the camera screen shows the "
+                f"{rec.lens_mod_name}. If it does not, check the mod is fitted properly and "
+                "scan the code again.",
             }
         )
     if calibration:
+        shutter = rec.calibration_shutter
         notes.append(
             {
                 "code": f"S{round(rec.shutter_angle_deg)}",
-                "note": f"Should lock the shutter at {rec.calibration_shutter} s. Not yet "
-                "confirmed on a HERO13 screen. Check the shutter shows "
-                f"{rec.calibration_shutter}.",
+                "note": f"Should lock the shutter at {shutter} s. Check the shutter shows "
+                f"{shutter}. If it does not, set Shutter to {shutter} in Protune by hand.",
             }
         )
     return notes
+
+
+def alternative_codes(rec: RecordingConfig) -> list[dict[str, str]]:
+    """Other codes worth trying on a camera, for whoever confirms the codes (not steps for
+    the operator): the UI keeps them in a closed disclosure."""
+    if rec.labs_lens_mod_code != "oX10":
+        return []
+    return [
+        {
+            "code": f"oX3{rec.labs_lens_code}",
+            "note": "The HERO13 Labs notes list oX3 for Max Lens Mod 2.5, which is probably "
+            f"this lens mod, so oX3{rec.labs_lens_code} may be the direct counterpart of the "
+            f"Max Lens Mod 2.0 code oX2{rec.labs_lens_code}. Also unverified; the QR codes "
+            "above use oX10 until one of them is scanned on a camera.",
+        }
+    ]
 
 
 def qr_png_data_uri(text: str, scale: int = 8, border: int = 4) -> str:
@@ -164,7 +175,7 @@ def checklist(rec: RecordingConfig) -> list[dict[str, str]]:
 
 
 def labs_payload(rec: RecordingConfig) -> dict[str, Any]:
-    """Both QR codes, their unverified parts, and the checklist."""
+    """Both QR codes, their unverified parts, other codes to try, and the checklist."""
     payload: dict[str, Any] = {}
     for kind, calibration in (("calibration", True), ("dataset", False)):
         code = labs_command(rec, calibration=calibration)
@@ -173,6 +184,7 @@ def labs_payload(rec: RecordingConfig) -> dict[str, Any]:
             "png": qr_png_data_uri(code),
             "unverified": unverified_codes(rec, calibration=calibration),
         }
+    payload["alternatives"] = alternative_codes(rec)
     payload["checklist"] = checklist(rec)
     payload["lens_mod"] = {"code": rec.lens_mod, "name": rec.lens_mod_name}
     return payload
