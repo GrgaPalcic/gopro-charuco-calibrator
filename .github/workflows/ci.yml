@@ -10,6 +10,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      - name: Install ffmpeg
+        # The recording-route tests write and read synthetic clips with ffmpeg/ffprobe;
+        # without it they skip.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Install Python
         run: uv python install 3.12
       - name: Install dependencies
