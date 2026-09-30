@@ -19,13 +19,19 @@ Frame selection, per sample of the clip (``RecordingConfig.sample_hz``, 12 Hz):
    to a view already kept, from this clip or an earlier one, is a ``duplicate`` unless
    it is sharper than the one from this clip it matches, which it then replaces.
 5. **Blur across the clip**: when the clip ends, a winner whose size-weighted sharpness
-   is under ``blur_ratio`` x the median over every held position of the clip (kept or
-   not, so a retake that repeats positions still has a reference) is ``blurred``. Sharpness is
+   is under ``blur_ratio`` x the reference median is ``blurred``. The reference is every
+   held position of this clip (kept or not, so a retake that repeats positions still
+   counts) plus every view the run already kept. A first clip needs 3 held positions
+   before the rule applies (fewer is no distribution); a retake always has the run's
+   views, so a short retake that is blurred throughout is still caught. Sharpness is
    the variance of the Laplacian inside the board's box on the half-size image; a far
    board has denser edges and so scores higher, which multiplying by the board's
    apparent size roughly offsets.
-6. **Cap**: past ``max_views`` views in the run, the most varied are kept (farthest
-   pose first, starting from the views already kept) and the rest are ``over_cap``.
+6. **Cap**: past ``max_views`` views in the run, a view that completes a guide
+   checkpoint the run is still missing is always kept (the sharpest one per
+   checkpoint, so a retake can always fix a RETAKE; the run may then pass the cap by
+   at most the 23 checkpoints). The rest are the most varied (farthest pose first,
+   starting from the views already kept), and whatever does not fit is ``over_cap``.
 
 Winners wait on disk (``_staging_<clip>/``) until the clip ends, so memory holds only a
 couple of frames whatever the clip length. Kept views become ``frames/capture_###.jpg``
@@ -44,6 +50,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -53,10 +60,10 @@ import numpy as np
 from . import presets
 from .boards import detector_params, resolve_dictionary
 from .capture import _discarded_points, _read_exact, default_runs_dir
-from .clipcheck import check_clip
+from .clipcheck import check_clip, fallback_check
 from .coverage import PoseParams, coverage_summary, pose_distance
 from .detection import MarkerDetection, detect_markers, draw_detection, marker_motion
-from .guide import default_checkpoints, guide_status
+from .guide import default_checkpoints, guide_status, pose_matches_checkpoint
 from .models import AppConfig, CameraConfig, RecordingConfig
 from .openicc import orbslam3_kb8_yaml
 from .solver import solve_from_frames
@@ -66,6 +73,10 @@ DROP_REASONS = ("no_board", "blurred", "moving", "duplicate", "over_cap")
 MOTION_REFERENCE_HZ = 30.0
 MOTION_REFERENCE_WIDTH = 1920.0
 BUSY_STATES = ("uploading", "analysing", "solving")
+BUSY_MESSAGE = "A clip is still being processed; wait for it to finish."
+# A clip name's stem is kept under this many UTF-8 bytes (file names max out at 255).
+MAX_NAME_STEM_BYTES = 200
+MAX_NAME_SUFFIX_BYTES = 16
 DEFAULT_CAMERA_NAME = CameraConfig().camera_name
 
 
@@ -93,7 +104,7 @@ def board_sharpness(gray: np.ndarray, detection: MarkerDetection) -> float:
     return float(cv2.Laplacian(crop, cv2.CV_64F).var())
 
 
-@dataclass
+@dataclass(eq=False)
 class _Sample:
     index: int
     time_s: float
@@ -111,7 +122,7 @@ class _Sample:
         return self.sharpness * max(self.pose.size, 1e-3)
 
 
-@dataclass
+@dataclass(eq=False)  # compared by identity: a sample holds a numpy frame
 class _Staged:
     sample: _Sample
     path: Path
@@ -136,6 +147,8 @@ class _Selector:
     rec: RecordingConfig
     staging: Path
     prior_poses: list[PoseParams]
+    # Size-weighted sharpness of the views the run already kept (earlier clips).
+    prior_scores: list[float] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=empty_counts)
     window: list[_Sample] = field(default_factory=list)
     best: _Sample | None = None
@@ -202,17 +215,45 @@ class _Selector:
         """Clip-level blur rule and the cap; returns the views to keep, in time order."""
         self.close_window()
         staged = sorted(self.staged, key=lambda s: s.sample.index)
-        if len(self.winner_scores) >= 3:
-            median = float(np.median(self.winner_scores))
+        reference = self.prior_scores + self.winner_scores
+        if self.prior_scores or len(self.winner_scores) >= 3:
+            median = float(np.median(reference))
             sharp = [s for s in staged if s.sample.weighted >= self.rec.blur_ratio * median]
+            for s in staged:
+                if s not in sharp:
+                    s.path.unlink(missing_ok=True)
             self.drop("blurred", len(staged) - len(sharp))
             staged = sharp
         room = max(self.rec.max_views - len(self.prior_poses), 0)
         if len(staged) > room:
-            chosen = _most_varied(staged, self.prior_poses, room)
+            needed = _completing_views(staged, self.prior_poses, self.config)
+            rest = [s for s in staged if s not in needed]
+            anchors = self.prior_poses + [s.sample.pose for s in needed]
+            chosen = needed + _most_varied(rest, anchors, room - len(needed))
+            for s in staged:
+                if s not in chosen:
+                    s.path.unlink(missing_ok=True)
             self.drop("over_cap", len(staged) - len(chosen))
             staged = sorted(chosen, key=lambda s: s.sample.index)
         return staged
+
+
+def _completing_views(
+    staged: list[_Staged], prior: list[PoseParams], config: AppConfig
+) -> list[_Staged]:
+    """The sharpest view for each guide checkpoint the run has not completed yet."""
+    chosen: list[_Staged] = []
+    for checkpoint in default_checkpoints(config.coverage_targets):
+        poses = prior + [s.sample.pose for s in chosen]
+        if any(pose_matches_checkpoint(pose, checkpoint) for pose in poses):
+            continue
+        matches = [
+            s for s in staged
+            if s not in chosen and pose_matches_checkpoint(s.sample.pose, checkpoint)
+        ]
+        if matches:
+            chosen.append(max(matches, key=lambda s: s.sample.sharpness))
+    return chosen
 
 
 def _most_varied(staged: list[_Staged], prior: list[PoseParams], count: int) -> list[_Staged]:
@@ -266,9 +307,14 @@ def extract_views(
     frames_dir: Path,
     overlays_dir: Path,
     prior_poses: list[PoseParams] | None = None,
+    prior_scores: list[float] | None = None,
     progress: Callable[[float], None] | None = None,
 ) -> ExtractResult:
-    """Stream ``clip`` through ffmpeg and keep the views worth solving (module docstring)."""
+    """Stream ``clip`` through ffmpeg and keep the views worth solving (module docstring).
+
+    ``prior_poses`` and ``prior_scores`` (size-weighted sharpness, the ``weighted`` of
+    each kept view) are the views the run already kept, from earlier clips.
+    """
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise RecordingError("ffmpeg is not installed; install it and drop the clip again.")
@@ -280,14 +326,39 @@ def extract_views(
     staging = frames_dir.parent / f"_staging_{clip.stem}"
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True)
+    try:
+        return _extract_into(
+            clip, config, rec, width, height, duration, prior, list(prior_scores or []),
+            frames_dir, overlays_dir, staging, ffmpeg, progress,
+        )
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
+
+def _extract_into(
+    clip: Path,
+    config: AppConfig,
+    rec: RecordingConfig,
+    width: int,
+    height: int,
+    duration: float,
+    prior: list[PoseParams],
+    prior_scores: list[float],
+    frames_dir: Path,
+    overlays_dir: Path,
+    staging: Path,
+    ffmpeg: str,
+    progress: Callable[[float], None] | None,
+) -> ExtractResult:
     board = config.board
     min_markers = config.capture.min_markers
     dictionary = resolve_dictionary(board.aruco_dict)
     params = detector_params()
     half_size = (max(width // 2, 1), max(height // 2, 1))
     limit = motion_limit_px(config.capture.max_motion_px, width, rec.sample_hz)
-    selector = _Selector(config=config, rec=rec, staging=staging, prior_poses=prior)
+    selector = _Selector(
+        config=config, rec=rec, staging=staging, prior_poses=prior, prior_scores=prior_scores
+    )
     nbytes = width * height
 
     command = [
@@ -347,7 +418,6 @@ def extract_views(
         if proc.returncode not in (0, None) and selector.counts["samples"] == 0:
             stderr.seek(0)
             tail = stderr.read().decode(errors="replace").strip().splitlines()
-            shutil.rmtree(staging, ignore_errors=True)
             raise RecordingError(
                 "ffmpeg could not decode this clip"
                 + (f": {tail[-1]}" if tail else ".")
@@ -357,31 +427,42 @@ def extract_views(
     first = next_capture_index(frames_dir)
     number = first
     kept: list[dict[str, Any]] = []
-    for staged in kept_staged:
-        sample = staged.sample
-        name = f"capture_{number:03d}.jpg"
-        shutil.move(str(staged.path), frames_dir / name)
-        frame = cv2.imread(str(frames_dir / name))
-        overlay = draw_detection(
-            frame,
-            sample.detection,
-            f"{name} {clip.name} t={sample.time_s:.1f}s",
-            selected=True,
-        )
-        cv2.imwrite(str(overlays_dir / name), overlay)
-        kept.append(
-            {
-                "name": name,
-                "clip": clip.name,
-                "time_s": round(sample.time_s, 3),
-                "markers": sample.detection.marker_count,
-                "sharpness": round(sample.sharpness, 2),
-                "motion_px": round(sample.motion_px, 3),
-                "pose": sample.pose.as_dict(),
-            }
-        )
-        number += 1
-    shutil.rmtree(staging, ignore_errors=True)
+    written: list[Path] = []
+    try:
+        for staged in kept_staged:
+            sample = staged.sample
+            name = f"capture_{number:03d}.jpg"
+            written.append(frames_dir / name)
+            shutil.move(str(staged.path), frames_dir / name)
+            frame = cv2.imread(str(frames_dir / name))
+            if frame is None:
+                raise RecordingError(f"Could not read back {name} from the frames folder.")
+            overlay = draw_detection(
+                frame,
+                sample.detection,
+                f"{name} {clip.name} t={sample.time_s:.1f}s",
+                selected=True,
+            )
+            written.append(overlays_dir / name)
+            cv2.imwrite(str(overlays_dir / name), overlay)
+            kept.append(
+                {
+                    "name": name,
+                    "clip": clip.name,
+                    "time_s": round(sample.time_s, 3),
+                    "markers": sample.detection.marker_count,
+                    "sharpness": round(sample.sharpness, 2),
+                    "weighted": sample.weighted,
+                    "motion_px": round(sample.motion_px, 3),
+                    "pose": sample.pose.as_dict(),
+                }
+            )
+            number += 1
+    except BaseException:
+        # Leave frames/ as it was: the run's poses must match the files the solve reads.
+        for path in written:
+            path.unlink(missing_ok=True)
+        raise
     selector.counts["kept"] = len(kept)
     if progress is not None:
         progress(1.0)
@@ -451,12 +532,22 @@ def recording_guide(config: AppConfig) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+
+
 def sanitise_clip_name(name: str) -> str:
+    """A safe file name for an upload: no folders, and short enough in bytes (not
+    characters) for any file system, with room for a ``_2`` retake suffix."""
     base = Path((name or "").replace("\\", "/")).name
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in base).strip("._")
     if not cleaned:
         cleaned = "clip.mp4"
-    return cleaned[:120]
+    path = Path(cleaned)
+    suffix = path.suffix if len(path.suffix.encode("utf-8")) <= MAX_NAME_SUFFIX_BYTES else ""
+    stem = cleaned[: len(cleaned) - len(suffix)] if suffix else cleaned
+    stem = _truncate_utf8(stem, MAX_NAME_STEM_BYTES) or "clip"
+    return stem + suffix
 
 
 def camera_name_from_serial(serial: str) -> str | None:
@@ -506,13 +597,21 @@ def describe_recording_mode(
 
 
 class RecordingJob:
-    """One recording-route run at a time, processed in a background thread."""
+    """One recording-route run at a time, processed in a background thread.
+
+    Three threads touch it: the event loop (the upload), the threadpool (start, new,
+    status) and the job thread. Every state change goes through the lock, and a busy
+    check and the state it guards are set under the same hold. ``start`` and ``new``
+    are refused while busy, so the job thread owns the run's views until it leaves the
+    busy states; its writes also carry the run's generation, so a stale one is dropped.
+    """
 
     def __init__(self, runs_dir: Path | None = None):
         self.runs_dir = runs_dir or default_runs_dir()
         self.config = AppConfig()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
+        self._generation = 0
         self._reset_run()
         self._status: dict[str, Any] = {}
         self._set_idle("no recording run yet")
@@ -529,15 +628,42 @@ class RecordingJob:
         self._kept: list[dict[str, Any]] = []
         self._clips: list[dict[str, Any]] = []
         self._image_size: tuple[int, int] | None = None
-        self._state = "idle"
+        self._refused: dict[str, Any] | None = None
+        self._generation += 1
 
     @property
     def rec(self) -> RecordingConfig:
         return self.config.recording or RecordingConfig()
 
     @property
+    def state(self) -> str:
+        with self._lock:
+            return self._status.get("state", "idle")
+
+    @property
     def busy(self) -> bool:
-        return self._state in BUSY_STATES
+        return self.state in BUSY_STATES
+
+    def _run_serial(self) -> str | None:
+        """The serial of the camera this run belongs to (its first clip that has one)."""
+        for clip in self._clips:
+            serial = (clip.get("metadata") or {}).get("serial")
+            if serial:
+                return serial
+        return None
+
+    def _mismatches(self) -> tuple[list[str], list[str]]:
+        """The distinct settings that differ from the preset, and the clips they are in."""
+        labels: list[str] = []
+        clips: list[str] = []
+        for clip in self._clips:
+            rows = [row for row in clip.get("check") or [] if row["status"] == "mismatch"]
+            if rows:
+                clips.append(clip["name"])
+            for row in rows:
+                if row["label"] not in labels:
+                    labels.append(row["label"])
+        return labels, clips
 
     def _run_status(self) -> dict[str, Any]:
         totals = empty_counts()
@@ -545,6 +671,7 @@ class RecordingJob:
             for key, value in (clip.get("counts") or {}).items():
                 totals[key] = totals.get(key, 0) + value
         targets = self.config.coverage_targets
+        mismatch_fields, mismatch_clips = self._mismatches()
         return {
             "route": "recording",
             "run_id": self.run_id,
@@ -558,25 +685,42 @@ class RecordingJob:
                 if self.named_from_serial
                 else None
             ),
+            "serial": self._run_serial(),
             "image_size": None if self._image_size is None else list(self._image_size),
             "captures": len(self._poses),
             "coverage": coverage_summary(self._poses, targets),
             "guide": guide_status(self._poses, None, targets),
             "clips": [dict(clip) for clip in self._clips],
             "counts": totals,
-            "mismatch_count": sum(clip.get("mismatch_count", 0) for clip in self._clips),
+            # Distinct settings that differ from the preset, over every clip of the run.
+            "mismatch_count": len(mismatch_fields),
+            "mismatch_fields": mismatch_fields,
+            "mismatch_clips": mismatch_clips,
+            "refused_clip": None if self._refused is None else dict(self._refused),
             "min_frames": self.config.solver.min_frames,
             "preview_open": False,
         }
 
-    def _set(self, **updates: Any) -> None:
+    def _set(self, generation: int | None = None, **updates: Any) -> bool:
+        """Update the status; with ``generation``, only while that run is current."""
         with self._lock:
+            if generation is not None and generation != self._generation:
+                return False
             self._status.update(updates)
+            return True
 
-    def _set_idle(self, message: str) -> None:
+    def _publish(self, generation: int, **updates: Any) -> bool:
+        """Update the status with the run's current views, clips and counts."""
+        with self._lock:
+            if generation != self._generation:
+                return False
+            self._status.update({**self._run_status(), **updates})
+            return True
+
+    def _set_idle(self, message: str, state: str = "idle") -> None:
         with self._lock:
             self._status = {
-                "state": "idle",
+                "state": state,
                 "stage": None,
                 "progress": 0.0,
                 "message": message,
@@ -586,6 +730,7 @@ class RecordingJob:
                 "acquisition_mode": None,
                 "rejected_points": [],
                 "needs_more_views": False,
+                "orbslam3": None,
                 **self._run_status(),
             }
 
@@ -601,27 +746,29 @@ class RecordingJob:
 
     # -- run lifecycle ---------------------------------------------------
 
-    def start(self, config: AppConfig) -> dict[str, Any]:
-        if self.busy:
-            raise RecordingError("A clip is still being processed; wait for it to finish.")
-        self._reset_run()
-        self.config = config
-        self.camera_name = config.camera.camera_name
-        self._timestamp = time.strftime("%Y%m%d_%H%M%S")
-        self._make_run_dir()
-        self._state = "ready"
-        self._set_idle("Ready for the clip.")
-        self._set(state="ready")
-        return self.status()
+    def start(self, config: AppConfig, runs_dir: Path | None = None) -> dict[str, Any]:
+        with self._lock:
+            if self.busy:
+                raise RecordingError(BUSY_MESSAGE)
+            if runs_dir is not None:
+                self.runs_dir = Path(runs_dir)
+            self._reset_run()
+            self.config = config
+            self.camera_name = config.camera.camera_name
+            self._timestamp = time.strftime("%Y%m%d_%H%M%S")
+            self._make_run_dir()
+            self._set_idle("Ready for the clip.", state="ready")
+            return self.status()
 
     def new(self, config: AppConfig | None = None) -> dict[str, Any]:
-        if self.busy:
-            raise RecordingError("A clip is still being processed; wait for it to finish.")
-        self._reset_run()
-        if config is not None:
-            self.config = config
-        self._set_idle("Ready for the next camera.")
-        return self.status()
+        with self._lock:
+            if self.busy:
+                raise RecordingError(BUSY_MESSAGE)
+            self._reset_run()
+            if config is not None:
+                self.config = config
+            self._set_idle("Ready for the next camera.")
+            return self.status()
 
     def _make_run_dir(self) -> None:
         self.run_id = f"{self.camera_name}_{self._timestamp}"
@@ -634,10 +781,17 @@ class RecordingJob:
         if self.output_dir is None:
             return
         config = self.config.model_copy(deep=True)
-        config.camera.camera_name = self.camera_name or config.camera.camera_name
+        # The camera as recorded (clip size and rate), matching acquisition_mode; the
+        # preset's webcam size and rate are for the live route only.
+        config.camera = self._solve_camera()
         clip_check = self._clips[-1] if self._clips else None
         payload = {
             "config": config.model_dump(),
+            "config_note": (
+                "config.camera is the camera as recorded (the clip's size and frame rate, "
+                "or the preset's recording size before the first clip), not the preset's "
+                "webcam settings, which only the live USB route uses."
+            ),
             "acquisition_mode": describe_recording_mode(
                 self._solve_camera(), self.rec, clip_check
             ),
@@ -666,28 +820,28 @@ class RecordingJob:
     # -- upload ----------------------------------------------------------
 
     def begin_upload(self, name: str, total_bytes: int | None = None) -> Path:
-        if self.busy:
-            raise RecordingError("A clip is still being processed; wait for it to finish.")
-        if self.output_dir is None:
-            raise RecordingError("Start a recording run first.")
-        clips_dir = self.output_dir / "clips"
-        clips_dir.mkdir(parents=True, exist_ok=True)
-        clean = sanitise_clip_name(name)
-        path = clips_dir / clean
-        stem, suffix = path.stem, path.suffix
-        counter = 2
-        while path.exists():
-            path = clips_dir / f"{stem}_{counter}{suffix}"
-            counter += 1
-        self._state = "uploading"
-        self._set(
-            state="uploading",
-            stage="upload",
-            progress=0.0,
-            message=f"Copying {path.name} into the run folder.",
-            upload={"name": path.name, "received_bytes": 0, "total_bytes": total_bytes},
-        )
-        return path
+        with self._lock:
+            if self.busy:
+                raise RecordingError(BUSY_MESSAGE)
+            if self.output_dir is None:
+                raise RecordingError("Start a recording run first.")
+            clips_dir = self.output_dir / "clips"
+            clips_dir.mkdir(parents=True, exist_ok=True)
+            clean = sanitise_clip_name(name)
+            path = clips_dir / clean
+            stem, suffix = path.stem, path.suffix
+            counter = 2
+            while path.exists():
+                path = clips_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+            self._status.update(
+                state="uploading",
+                stage="upload",
+                progress=0.0,
+                message=f"Copying {path.name} into the run folder.",
+                upload={"name": path.name, "received_bytes": 0, "total_bytes": total_bytes},
+            )
+            return path
 
     def upload_progress(self, received_bytes: int) -> None:
         with self._lock:
@@ -700,37 +854,58 @@ class RecordingJob:
 
     def upload_failed(self, path: Path, message: str) -> None:
         path.unlink(missing_ok=True)
-        self._state = "error"
-        self._set(state="error", stage="upload", message=message)
+        with self._lock:
+            if self._status.get("state") == "uploading":
+                self._status.update(state="error", stage="upload", message=message)
 
     def start_processing(self, clip: Path) -> dict[str, Any]:
-        self._state = "analysing"
-        self._set(state="analysing", stage="check", progress=0.0, message="Checking the clip.")
-        self._thread = threading.Thread(
-            target=self._process, args=(clip,), name="gopro-charuco-recording", daemon=True
-        )
-        self._thread.start()
-        return self.status()
+        with self._lock:
+            if self._status.get("state") != "uploading":
+                raise RecordingError("No upload is in progress for this clip.")
+            self._status.update(
+                state="analysing", stage="check", progress=0.0, message="Checking the clip."
+            )
+            generation = self._generation
+            self._thread = threading.Thread(
+                target=self._process,
+                args=(clip, generation),
+                name="gopro-charuco-recording",
+                daemon=True,
+            )
+            self._thread.start()
+            return self.status()
 
     # -- processing (background thread) ----------------------------------
 
-    def _process(self, clip: Path) -> None:
+    def _process(self, clip: Path, generation: int) -> None:
         try:
-            self._process_clip(clip)
+            self._process_clip(clip, generation)
         except Exception as exc:  # noqa: BLE001 - the job must end in a state, never hang
-            self._state = "error"
-            message = str(exc)
-            self._set(
+            message = str(exc) or f"{type(exc).__name__} while processing {clip.name}."
+            self._publish(
+                generation,
                 state="error",
                 message=message,
                 # the solver's own "Need at least N usable frames"
                 needs_more_views=message.startswith("Need at least"),
-                **self._run_status(),
             )
 
-    def _process_clip(self, clip: Path) -> None:
+    def _check(self, clip: Path, run_serial: str | None) -> dict[str, Any]:
+        """The clip check; a failure reading the file's metadata gives unknown rows."""
+        try:
+            return check_clip(clip, self.rec, run_serial)
+        except Exception as exc:  # noqa: BLE001 - the check warns, it never blocks
+            return fallback_check(clip, self.rec, exc)
+
+    def _process_clip(self, clip: Path, generation: int) -> None:
         rec = self.rec
-        check = check_clip(clip, rec)
+        run_serial = self._run_serial()
+        check = self._check(clip, run_serial)
+        serial = check["metadata"].get("serial")
+        if run_serial and serial and serial != run_serial:
+            self._refuse(clip, serial, run_serial, check, generation)
+            return
+        self._refused = None
         entry: dict[str, Any] = {
             "name": clip.name,
             "size_bytes": clip.stat().st_size,
@@ -741,12 +916,13 @@ class RecordingJob:
             "counts": None,
         }
         self._clips.append(entry)
-        clip = self._maybe_name_from_serial(clip, check["metadata"].get("serial"))
-        self._set(**self._run_status())
+        clip = self._maybe_name_from_serial(clip, serial, generation)
+        self._publish(generation)
         if "error" in check["probe"]:
             raise RecordingError(f"Could not read {clip.name}: {check['probe']['error']}")
 
-        assert self.output_dir is not None
+        if self.output_dir is None:
+            raise RecordingError("This run has no folder any more; start a new run.")
         size = _frame_size(check["probe"])
         if self._image_size is not None and size != self._image_size:
             raise RecordingError(
@@ -754,7 +930,9 @@ class RecordingJob:
                 f"{self._image_size[0]}x{self._image_size[1]}. Record every clip of one run "
                 "in the same mode, or start a new run for this one."
             )
-        self._set(stage="extract", progress=0.0, message=f"Picking views from {clip.name}.")
+        self._set(
+            generation, stage="extract", progress=0.0, message=f"Picking views from {clip.name}."
+        )
         result = extract_views(
             clip,
             config=self.config,
@@ -763,7 +941,8 @@ class RecordingJob:
             frames_dir=self.output_dir / "frames",
             overlays_dir=self.output_dir / "overlays",
             prior_poses=self._poses,
-            progress=lambda fraction: self._set(progress=round(fraction, 4)),
+            prior_scores=[view["weighted"] for view in self._kept],
+            progress=lambda fraction: self._set(generation, progress=round(fraction, 4)),
         )
         self._image_size = tuple(result.image_size)
         entry["counts"] = result.counts
@@ -772,10 +951,35 @@ class RecordingJob:
         self._poses.extend(result.poses)
         self._kept.extend(result.kept)
         self._write_run_config()
-        self._set(**self._run_status())
-        self._solve()
+        self._publish(generation)
+        self._solve(generation)
 
-    def _maybe_name_from_serial(self, clip: Path, serial: str | None) -> Path:
+    def _refuse(
+        self,
+        clip: Path,
+        serial: str,
+        run_serial: str,
+        check: dict[str, Any],
+        generation: int,
+    ) -> None:
+        """A clip from another camera never joins this run: one run is one camera."""
+        clip.unlink(missing_ok=True)
+        message = (
+            f"{clip.name} is from another camera (serial {serial}); this run is for the "
+            f"camera with serial {run_serial}. The clip was not used and was removed from "
+            "this run's folder. Press Next camera and start a new run for it."
+        )
+        self._refused = {
+            "name": clip.name,
+            "serial": serial,
+            "run_serial": run_serial,
+            "check": check["check"],
+            "message": message,
+        }
+        # The run's earlier results stay in the status.
+        self._publish(generation, state="error", stage="check", progress=0.0, message=message)
+
+    def _maybe_name_from_serial(self, clip: Path, serial: str | None, generation: int) -> Path:
         """Name the run after the camera's serial when the name is still a default."""
         new_name = camera_name_from_serial(serial or "")
         if (
@@ -787,24 +991,29 @@ class RecordingJob:
         ):
             return clip
         old_dir = self.output_dir
-        self.camera_name = new_name
-        self.named_from_serial = True
         new_dir = self.runs_dir / f"{new_name}_{self._timestamp}"
-        if not new_dir.exists():
+        if new_dir.exists():
+            return clip
+        try:
             old_dir.rename(new_dir)
+        except OSError:
+            return clip  # keep the preset's name rather than fail the clip
+        with self._lock:
+            self.camera_name = new_name
+            self.named_from_serial = True
             self.output_dir = new_dir
             self.run_id = new_dir.name
-            clip = new_dir / "clips" / clip.name
         self._write_run_config()
-        self._set(message=f"Named this camera {new_name} from its serial number.")
-        return clip
+        self._set(generation, message=f"Named this camera {new_name} from its serial number.")
+        return new_dir / "clips" / clip.name
 
-    def _solve(self) -> None:
-        assert self.output_dir is not None
+    def _solve(self, generation: int) -> None:
+        if self.output_dir is None:
+            raise RecordingError("This run has no folder any more; start a new run.")
         min_frames = self.config.solver.min_frames
         if len(self._poses) < min_frames:
-            self._state = "error"
-            self._set(
+            self._publish(
+                generation,
                 state="error",
                 stage="extract",
                 needs_more_views=True,
@@ -813,11 +1022,9 @@ class RecordingJob:
                     "Record another clip that holds the board still at more positions, "
                     "and add it to this run."
                 ),
-                **self._run_status(),
             )
             return
-        self._state = "solving"
-        self._set(state="solving", stage="solve", progress=0.0, message="Solving.")
+        self._set(generation, state="solving", stage="solve", progress=0.0, message="Solving.")
         camera = self._solve_camera()
         summary = solve_from_frames(
             frames_dir=self.output_dir / "frames",
@@ -829,17 +1036,17 @@ class RecordingJob:
         )
         orbslam3 = self._write_orbslam3(summary)
         clip_check = self._clips[-1] if self._clips else None
+        run = self._run_status()
         summary["route"] = "recording"
         summary["acquisition_mode"] = describe_recording_mode(camera, self.rec, clip_check)
         summary["rejected_points"] = _discarded_points(summary)
         summary["recording"] = {
-            "clips": [dict(clip) for clip in self._clips],
-            "counts": self._run_status()["counts"],
-            "mismatch_count": sum(clip.get("mismatch_count", 0) for clip in self._clips),
-            "serial": next(
-                (c["metadata"].get("serial") for c in self._clips if c["metadata"].get("serial")),
-                None,
-            ),
+            "clips": run["clips"],
+            "counts": run["counts"],
+            "mismatch_count": run["mismatch_count"],
+            "mismatch_fields": run["mismatch_fields"],
+            "mismatch_clips": run["mismatch_clips"],
+            "serial": run["serial"],
             "camera_named_from_serial": self.named_from_serial,
             "views": self._kept,
             "orbslam3": orbslam3,
@@ -847,17 +1054,18 @@ class RecordingJob:
         summary_path = self.output_dir / "caib_marker_board_calibration_summary.json"
         summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
         failed = [r.get("model", "unknown") for r in summary["results"] if r.get("ok") is False]
-        self._state = "solved"
-        mismatches = summary["recording"]["mismatch_count"]
         message = "Calibration solved."
         if failed:
             message = f"Calibration solved; these models failed: {', '.join(failed)}."
-        if mismatches:
+        fields, clips = run["mismatch_fields"], run["mismatch_clips"]
+        if fields:
             message += (
-                f" {mismatches} setting{'s' if mismatches != 1 else ''} in the clip "
-                "differ from the preset."
+                f" {len(fields)} setting{'s differ' if len(fields) != 1 else ' differs'} "
+                f"from the preset in {' and '.join(clips)}: {', '.join(fields).lower()}."
             )
-        self._set(
+        # One update, state included: the job stays busy until the run is complete.
+        self._publish(
+            generation,
             state="solved",
             stage="done",
             progress=1.0,
@@ -868,7 +1076,6 @@ class RecordingJob:
             acquisition_mode=summary["acquisition_mode"],
             rejected_points=summary["rejected_points"],
             orbslam3=orbslam3,
-            **self._run_status(),
         )
 
     def _write_orbslam3(self, summary: dict[str, Any]) -> dict[str, Any] | None:
@@ -894,11 +1101,11 @@ class RecordingJob:
             )
         else:
             size = (width, height)
+            shape = Fraction(rec.orbslam3_width, rec.orbslam3_height)
             note = (
-                f"The clip is {width}x{height}, not {rec.orbslam3_width}:{rec.orbslam3_height}, "
+                f"The clip is {width}x{height}, not {shape.numerator}:{shape.denominator}, "
                 "so the block stays at the clip's own size."
             )
         kb["orbslam3_size"] = list(size)
         kb["orbslam3_note"] = note
         return {"path": str(path), "size": list(size), "note": note}
-

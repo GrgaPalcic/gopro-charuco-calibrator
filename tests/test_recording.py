@@ -7,6 +7,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -18,8 +19,9 @@ from fastapi.testclient import TestClient
 from gopro_charuco_calibrator import app as app_module
 from gopro_charuco_calibrator import presets, recording
 from gopro_charuco_calibrator.clipcheck import check_clip, compare, probe_video
-from gopro_charuco_calibrator.coverage import PoseParams, pose_distance
+from gopro_charuco_calibrator.coverage import PoseParams
 from gopro_charuco_calibrator.gopro import camera_state_warnings
+from gopro_charuco_calibrator.guide import default_checkpoints
 from gopro_charuco_calibrator.labs import checklist, labs_command, labs_payload, unverified_codes
 from gopro_charuco_calibrator.models import (
     AppConfig,
@@ -32,6 +34,9 @@ from gopro_charuco_calibrator.openicc import DEFAULT_DOCKER_IMAGE, orbslam3_kb8_
 from gopro_charuco_calibrator.recording import (
     RecordingError,
     RecordingJob,
+    _Sample,
+    _Selector,
+    _Staged,
     camera_name_from_serial,
     extract_views,
     motion_limit_px,
@@ -58,6 +63,33 @@ def test_recording_config_rejects_a_shutter_that_does_not_match_the_angle():
         RecordingConfig(shutter_angle_deg=90)
     with pytest.raises(ValueError, match="iso_max"):
         RecordingConfig(iso_max=1000)
+
+
+def test_lens_mod_code_follows_lens_mod_after_a_json_round_trip():
+    _, preset = presets.get_preset("gopro13_mlm2_adwal002")
+    dumped = preset.model_dump()
+    assert dumped["recording"]["labs_lens_mod_code"] == "oX2"
+    dumped["recording"]["lens_mod"] = "AEWAL-001"  # the UI changes only the mod
+    edited = AppConfig.model_validate(dumped)
+    assert edited.recording.labs_lens_mod_code == "oX10"
+    assert labs_command(edited.recording, calibration=True) == "mVr4Tp60e0!NoX10fXti16S45"
+    assert "oX10" in [u["code"] for u in unverified_codes(edited.recording, calibration=True)]
+    # A code that is not one of the two mods' codes is kept as written.
+    assert RecordingConfig(labs_lens_mod_code="oX3").labs_lens_mod_code == "oX3"
+
+
+def test_labs_rejects_values_the_creator_does_not_offer():
+    with pytest.raises(ValueError, match="frame rate of 59.94"):
+        labs_command(RecordingConfig(fps=59.94, shutter_angle_deg=45), calibration=True)
+    rec = RecordingConfig(fps=60, shutter_angle_deg=22.5, calibration_shutter="1/960")
+    with pytest.raises(ValueError, match="shutter angle of 22.5"):
+        labs_command(rec, calibration=True)
+    rec = RecordingConfig(fps=30, shutter_angle_deg=22.5 * 2, calibration_shutter="1/240")
+    assert labs_command(rec, calibration=True) == "mVr4Tp30e0!NoX2fXti16S45"
+    client = TestClient(app_module.app)
+    config = AppConfig(recording=RecordingConfig(fps=59.94, shutter_angle_deg=45))
+    response = client.post("/api/recording/labs", json={"config": config.model_dump()})
+    assert response.status_code == 400 and "59.94" in response.json()["detail"]
 
 
 def test_lens_mod_presets(monkeypatch, tmp_path):
@@ -245,6 +277,37 @@ def test_clip_check_without_gopro_metadata_or_ffprobe():
     assert rows["hypersmooth"]["status"] == "mismatch"
 
 
+def test_clip_check_flags_a_clip_from_another_camera():
+    rows = _rows(GOOD_PROBE, GOOD_META)
+    assert rows["serial"]["status"] == "ok"
+    rows = {r["field"]: r for r in compare(GOOD_PROBE, GOOD_META, RecordingConfig(), "C350999")}
+    assert rows["serial"]["status"] == "mismatch" and "another camera" in rows["serial"]["advice"]
+    assert rows["serial"]["expected"] == "C350999"
+
+
+def test_clip_check_model_from_a_generic_device_name():
+    # gpmf gives DVNM "Camera" no model; a missing model is unknown, never a mismatch.
+    rows = _rows(GOOD_PROBE, {**GOOD_META, "model": None})
+    assert rows["model"]["status"] == "unknown"
+
+
+def test_a_metadata_failure_gives_unknown_rows(tmp_path, monkeypatch):
+    job = RecordingJob(tmp_path)
+
+    def broken(*args, **kwargs):
+        raise TypeError("odd tag shape")
+
+    monkeypatch.setattr(recording, "check_clip", broken)
+    monkeypatch.setattr(
+        "gopro_charuco_calibrator.clipcheck.probe_video", lambda path: dict(GOOD_PROBE)
+    )
+    check = job._check(tmp_path / "x.mp4", None)
+    rows = {row["field"]: row for row in check["check"]}
+    assert rows["resolution"]["status"] == "ok" and rows["model"]["status"] == "unknown"
+    assert "odd tag shape" in check["metadata"]["error"]
+    assert check["mismatch_count"] == 0
+
+
 # --- guide and helpers --------------------------------------------------------
 
 
@@ -266,6 +329,10 @@ def test_names_and_limits():
     assert sanitise_clip_name("../../etc/GX010001.MP4") == "GX010001.MP4"
     assert sanitise_clip_name("my clip (1).mp4") == "my_clip__1_.mp4"
     assert sanitise_clip_name("") == "clip.mp4"
+    # Capped in bytes, not characters: 130 CJK characters are 390 bytes.
+    long = sanitise_clip_name("录" * 130 + ".MP4")
+    assert long.endswith(".MP4") and len(long.encode("utf-8")) <= 210
+    assert len(sanitise_clip_name("a" * 300 + ".mp4").encode()) == 204
     assert camera_name_from_serial("C3501234567890") == "gopro13_7890"
     assert camera_name_from_serial("ab") is None
     assert motion_limit_px(1.5, 1920, 30.0) == pytest.approx(1.5)
@@ -275,7 +342,7 @@ def test_names_and_limits():
 # --- extraction on a synthetic clip -------------------------------------------
 
 
-def _extract(clip, run_dir, prior=None, **rec_overrides):
+def _extract(clip, run_dir, prior=None, prior_scores=None, **rec_overrides):
     probe = probe_video(clip.path)
     return extract_views(
         clip.path,
@@ -285,6 +352,7 @@ def _extract(clip, run_dir, prior=None, **rec_overrides):
         frames_dir=run_dir / "frames",
         overlays_dir=run_dir / "overlays",
         prior_poses=prior,
+        prior_scores=prior_scores,
     )
 
 
@@ -333,14 +401,98 @@ def test_extraction_keeps_one_sharp_still_view_per_position(synthetic_clip, tmp_
     assert again.counts["kept"] == 0 and again.first_index == len(names) + 1
 
 
+# Two positions the synthetic clip does not have (tilted about two axes).
+NEW_POSITIONS = [
+    (0.30, 0.50, 0.40, (0.0, 0.5, 0.3)),
+    (0.70, 0.50, 0.40, (0.0, -0.5, -0.3)),
+]
+
+
 @needs_ffmpeg
-def test_extraction_cap_keeps_the_most_varied(synthetic_clip, tmp_path):
+def test_a_short_blurred_retake_keeps_nothing(synthetic_clip, tmp_path):
+    first = _extract(synthetic_clip, tmp_path / "run")
+    poses = [(*entry, "blurred") for entry in NEW_POSITIONS]
+    retake = build_clip(tmp_path / "retake.mp4", poses=poses)
+    prior_scores = [view["weighted"] for view in first.kept]
+    again = _extract(retake, tmp_path / "run", prior=first.poses, prior_scores=prior_scores)
+    assert again.counts["kept"] == 0, again.kept
+    assert again.counts["blurred"] >= 2
+    # The same two positions held sharp are new views, so the rule is not just
+    # dropping everything in a retake.
+    sharp = build_clip(tmp_path / "sharp.mp4", poses=[(*e, "sharp") for e in NEW_POSITIONS])
+    kept = _extract(sharp, tmp_path / "run", prior=first.poses, prior_scores=prior_scores)
+    assert kept.counts["kept"] == 2
+    assert kept.kept[0]["name"] == f"capture_{len(first.kept) + 1:03d}.jpg"
+
+
+@needs_ffmpeg
+def test_a_failure_while_saving_views_leaves_no_files(synthetic_clip, tmp_path, monkeypatch):
+    calls = []
+
+    def draw_then_fail(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 3:
+            raise RuntimeError("disk full")
+        return args[0]
+
+    monkeypatch.setattr(recording, "draw_detection", draw_then_fail)
+    with pytest.raises(RuntimeError, match="disk full"):
+        _extract(synthetic_clip, tmp_path)
+    assert list((tmp_path / "frames").iterdir()) == []
+    assert list((tmp_path / "overlays").iterdir()) == []
+    assert not list(tmp_path.glob("_staging_*"))
+
+
+@needs_ffmpeg
+def test_extraction_cap(synthetic_clip, tmp_path):
     prior = [PoseParams(0.5, 0.5, 0.23, 0.0)]
     result = _extract(synthetic_clip, tmp_path, prior=prior, max_views=6)
-    assert result.counts["kept"] == 5  # 6 in the run, one already kept
+    assert result.counts["kept"] >= 5  # 6 in the run (one already kept), + checkpoints
     assert result.counts["over_cap"] >= 8
-    # Farthest-first from the kept view: the far ring, not the ones next to the centre.
-    assert all(pose_distance(pose, prior[0]) > 0.3 for pose in result.poses)
+    # 15 sharp positions, less the centre one: it repeats the view already kept.
+    assert result.counts["kept"] + result.counts["over_cap"] == 14
+
+
+def _selector(tmp_path, prior, max_views):
+    rec = RecordingConfig(max_views=max_views)
+    return _Selector(config=AppConfig(), rec=rec, staging=tmp_path, prior_poses=prior)
+
+
+def _staged(tmp_path, index, pose):
+    path = tmp_path / f"s{index}.jpg"
+    path.write_bytes(b"x")
+    detection = SimpleNamespace(pose=pose)
+    return _Staged(_Sample(index, index / 12, detection, 100.0, 0.0), path)
+
+
+def _all_checkpoint_poses():
+    targets = AppConfig().coverage_targets
+    return [PoseParams(c.x, c.y, c.size, c.skew) for c in default_checkpoints(targets)]
+
+
+def test_cap_keeps_the_most_varied_when_no_checkpoint_is_missing(tmp_path):
+    prior = _all_checkpoint_poses()
+    selector = _selector(tmp_path, prior, max_views=len(prior) + 2)
+    near = PoseParams(0.52, 0.5, 0.35, 0.0)  # next to the centre checkpoint
+    far = PoseParams(0.05, 0.95, 0.9, 0.0)
+    farther = PoseParams(0.95, 0.05, 0.05, 0.9)
+    selector.staged = [_staged(tmp_path, i, p) for i, p in enumerate([near, far, farther])]
+    kept = selector.finish()
+    assert [s.sample.pose for s in kept] == [far, farther]
+    assert selector.counts["over_cap"] == 1
+
+
+def test_cap_always_admits_a_view_that_completes_a_missing_checkpoint(tmp_path):
+    # A full run (at the cap) still missing its first checkpoint, "center medium".
+    checkpoints = _all_checkpoint_poses()
+    prior = checkpoints[1:] + [PoseParams(0.05, 0.05, 0.05, 0.0)] * 97
+    selector = _selector(tmp_path, prior, max_views=len(prior))
+    centre = checkpoints[0]
+    other = PoseParams(0.95, 0.95, 0.9, 0.0)
+    selector.staged = [_staged(tmp_path, 0, other), _staged(tmp_path, 1, centre)]
+    kept = selector.finish()
+    assert [s.sample.pose for s in kept] == [centre]
+    assert selector.counts["over_cap"] == 1
 
 
 @needs_ffmpeg
@@ -397,9 +549,9 @@ def test_end_to_end_upload_check_extract_solve_and_retake(
 ):
     real_check = recording.check_clip
 
-    def check_with_serial(path, rec):
+    def check_with_serial(path, rec, run_serial=None):
         # The synthetic clip has no GPMF; pretend the camera wrote its serial.
-        result = real_check(path, rec)
+        result = real_check(path, rec, run_serial)
         result["metadata"] = {**result["metadata"], "serial": "C3501234567890"}
         return result
 
@@ -462,18 +614,74 @@ def test_end_to_end_upload_check_extract_solve_and_retake(
     assert status["state"] == "solved"
     assert [c["name"] for c in status["clips"]] == ["GX010001.MP4", "GX010001_2.MP4"]
     assert status["clips"][1]["counts"]["kept"] == 0
-    assert status["captures"] == 15 and status["mismatch_count"] == 4
+    # The same 2 settings differ in both clips: 2 settings, named once, in 2 clips.
+    assert status["captures"] == 15 and status["mismatch_count"] == 2
+    assert status["mismatch_fields"] == ["Resolution", "Frame rate"]
+    assert status["mismatch_clips"] == ["GX010001.MP4", "GX010001_2.MP4"]
+    assert "2 settings differ from the preset in GX010001.MP4 and GX010001_2.MP4" in (
+        status["message"]
+    )
     assert Path(status["output_dir"]) == run_dir
+    saved = json.loads((run_dir / "config.json").read_text())
+    camera = saved["config"]["camera"]
+    assert (camera["width"], camera["height"], camera["fps"]) == (1600, 1200, 24.0)
 
     # Next camera: back to idle, with nothing of this run left in the status.
     reset = client.post("/api/recording/new").json()
     assert reset["state"] == "idle" and reset["run_id"] is None and reset["results"] is None
     assert reset["clips"] == [] and reset["captures"] == 0
+    assert reset["orbslam3"] is None and reset["refused_clip"] is None
+
+
+@needs_ffmpeg
+def test_retake_adds_views_and_refuses_another_camera(
+    synthetic_clip, fresh_job, monkeypatch, tmp_path
+):
+    real_check = recording.check_clip
+    serials = iter(["C3501234567890", "C3501234567890", "C3509999999999"])
+
+    def check_with_serial(path, rec, run_serial=None):
+        result = real_check(path, rec, run_serial)
+        result["metadata"] = {**result["metadata"], "serial": next(serials)}
+        return result
+
+    monkeypatch.setattr(recording, "check_clip", check_with_serial)
+    client = TestClient(app_module.app)
+    client.post(
+        "/api/recording/start",
+        json={"config": _config().model_dump(), "runs_dir": str(tmp_path / "runs")},
+    )
+    assert _upload(client, synthetic_clip.path, "GX010001.MP4").status_code == 200
+    first = _poll(client)
+    assert first["state"] == "solved" and first["captures"] == 15
+
+    retake = build_clip(tmp_path / "GX010002.MP4", poses=[(*e, "sharp") for e in NEW_POSITIONS])
+    assert _upload(client, retake.path, "GX010002.MP4").status_code == 200
+    status = _poll(client)
+    assert status["state"] == "solved", status["message"]
+    assert status["clips"][1]["kept"] == ["capture_016.jpg", "capture_017.jpg"]
+    assert status["captures"] == 17 == status["coverage"]["count"]
+    run_dir = Path(status["output_dir"])
+    frames = sorted(p.name for p in (run_dir / "frames").glob("capture_*.jpg"))
+    assert frames == [f"capture_{i:03d}.jpg" for i in range(1, 18)]
+    summary = json.loads(Path(status["summary_path"]).read_text())
+    assert len(summary["frames"]) == 17  # the solve read both clips' views
+    assert {v["clip"] for v in summary["recording"]["views"]} == {"GX010001.MP4", "GX010002.MP4"}
+
+    # A clip from another camera never joins the run.
+    assert _upload(client, retake.path, "GX010003.MP4").status_code == 200
+    refused = _poll(client)
+    assert refused["state"] == "error" and "another camera" in refused["message"]
+    assert refused["refused_clip"]["serial"] == "C3509999999999"
+    assert refused["refused_clip"]["run_serial"] == "C3501234567890"
+    assert [c["name"] for c in refused["clips"]] == ["GX010001.MP4", "GX010002.MP4"]
+    assert refused["captures"] == 17 and refused["results"] == status["results"]
+    assert not (run_dir / "clips" / "GX010003.MP4").exists()
 
 
 @needs_ffmpeg
 def test_a_clip_too_short_to_solve_asks_for_another(tmp_path, fresh_job):
-    clip = build_clip(tmp_path / "short.mp4", poses=POSES[:3], size=(800, 600))
+    clip = build_clip(tmp_path / "short.mp4", poses=[POSES[0], POSES[2], POSES[4]])
     client = TestClient(app_module.app)
     client.post(
         "/api/recording/start",
@@ -482,7 +690,8 @@ def test_a_clip_too_short_to_solve_asks_for_another(tmp_path, fresh_job):
     assert _upload(client, clip.path, "short.mp4").status_code == 200
     status = _poll(client)
     assert status["state"] == "error" and status["needs_more_views"] is True
-    assert "solving needs 8" in status["message"]
+    assert status["captures"] == 3 == status["clips"][0]["counts"]["kept"]
+    assert "Only 3 usable views so far; solving needs 8" in status["message"]
 
 
 def test_busy_job_refuses_uploads_and_resets(tmp_path, fresh_job):
@@ -491,10 +700,17 @@ def test_busy_job_refuses_uploads_and_resets(tmp_path, fresh_job):
         "/api/recording/start",
         json={"config": _config().model_dump(), "runs_dir": str(tmp_path / "runs")},
     )
-    fresh_job._state = "analysing"
+    fresh_job._set(state="analysing")
     assert client.put("/api/recording/clips?name=a.mp4", content=b"x").status_code == 409
     assert client.post("/api/recording/new").status_code == 409
-    fresh_job._state = "ready"
+    # A refused start changes nothing, not even the runs folder.
+    runs_before = fresh_job.runs_dir
+    response = client.post(
+        "/api/recording/start",
+        json={"config": _config().model_dump(), "runs_dir": str(tmp_path / "elsewhere")},
+    )
+    assert response.status_code == 409 and fresh_job.runs_dir == runs_before
+    fresh_job._set(state="ready")
     response = client.put("/api/recording/clips?name=a.mp4", content=b"")
     assert response.status_code == 400
     assert client.get("/api/recording/status").json()["state"] == "error"

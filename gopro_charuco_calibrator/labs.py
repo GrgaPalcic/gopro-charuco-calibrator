@@ -29,6 +29,20 @@ from .models import RecordingConfig
 # Labs resolution codes for the sizes this route supports.
 RESOLUTION_CODES = {(4000, 3000): "r4T"}
 HYPERSMOOTH_CODES = {"off": "e0"}
+# The frame rates a HERO13 offers at 4K 4:3 with a lens mod (the creator's p codes).
+FPS_CODES = (24, 25, 30, 50, 60)
+# The creator's "Lock Shutter" angles in degrees, as it labels them; S0 is Auto.
+SHUTTER_ANGLE_CODES = (360, 180, 90, 45, 22, 10, 5, 2)
+
+
+def _labs_int(value: float, allowed: tuple[int, ...], what: str) -> int:
+    code = round(value)
+    if abs(value - code) > 1e-6 or code not in allowed:
+        raise ValueError(
+            f"No Labs code for a {what} of {value:g}; use one of "
+            + ", ".join(str(a) for a in allowed)
+        )
+    return code
 
 
 def labs_command(rec: RecordingConfig, *, calibration: bool) -> str:
@@ -36,9 +50,10 @@ def labs_command(rec: RecordingConfig, *, calibration: bool) -> str:
     resolution = RESOLUTION_CODES.get((rec.width, rec.height))
     if resolution is None:
         raise ValueError(f"No Labs code for {rec.width}x{rec.height}; only 4000x3000 (4K 4:3)")
-    fps = f"p{rec.fps:g}"
+    fps = f"p{_labs_int(rec.fps, FPS_CODES, 'frame rate')}"
     iso = f"i{rec.iso_max // 100}"
-    shutter = f"S{rec.shutter_angle_deg:g}" if calibration else "S0"
+    angle = _labs_int(rec.shutter_angle_deg, SHUTTER_ANGLE_CODES, "shutter angle")
+    shutter = f"S{angle}" if calibration else "S0"
     return (
         f"mV{resolution}{fps}{HYPERSMOOTH_CODES[rec.hypersmooth]}!N"
         f"{rec.labs_lens_mod_code}{rec.labs_lens_code}t{iso}{shutter}"
@@ -65,7 +80,7 @@ def unverified_codes(rec: RecordingConfig, *, calibration: bool) -> list[dict[st
     if calibration:
         notes.append(
             {
-                "code": f"S{rec.shutter_angle_deg:g}",
+                "code": f"S{round(rec.shutter_angle_deg)}",
                 "note": f"Should lock the shutter at {rec.calibration_shutter} s. Not yet "
                 "confirmed on a HERO13 screen. Check the shutter shows "
                 f"{rec.calibration_shutter}.",

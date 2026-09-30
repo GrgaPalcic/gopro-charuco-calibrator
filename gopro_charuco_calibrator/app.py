@@ -315,10 +315,8 @@ class RecordingRequest(StartRequest):
 @app.post("/api/recording/start")
 def recording_start(request: StartRequest):
     """Open a new recording-route run (runs/<camera>_<timestamp>/) for the next clip."""
-    if request.runs_dir is not None:
-        _recording.runs_dir = request.runs_dir
     try:
-        return _recording.start(request.config)
+        return _recording.start(request.config, request.runs_dir)
     except RecordingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -366,7 +364,10 @@ async def recording_upload(request: Request, name: str):
     if received == 0:
         _recording.upload_failed(path, "The file was empty.")
         raise HTTPException(status_code=400, detail="The file was empty.")
-    return _recording.start_processing(path)
+    try:
+        return _recording.start_processing(path)
+    except RecordingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/recording/guide")

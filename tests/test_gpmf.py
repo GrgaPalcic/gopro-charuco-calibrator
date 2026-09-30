@@ -224,9 +224,78 @@ def test_odd_files_never_raise(tmp_path, payload):
 def test_truncated_gopro_file_keeps_what_it_found(tmp_path):
     path = gopro_mp4(tmp_path)
     data = path.read_bytes()
-    path.write_bytes(data[: len(data) - 40])  # cut into moov/udta
+    path.write_bytes(data[: len(data) - 40])  # cut into moov/udta/GPMF, in its last STRM
     meta = read_clip_metadata(path)
-    assert meta["error"] is None  # truncated boxes are skipped, not fatal
+    assert meta["error"] is None  # truncated boxes are clamped, not fatal
+    # The global tags before the cut, and the whole telemetry track, are still read.
+    assert meta["model"] == "HERO13 Black" and meta["serial"] == "C3501234567890"
+    assert meta["has_imu"] is True and meta["shutter_s"] == pytest.approx(1 / 480)
+    # A moov cut short by 4 bytes, in a trailing box, loses nothing.
+    wrapped = tmp_path / "trailing.mp4"
+    moov_start = data.index(b"moov") - 4
+    moov = data[moov_start:]
+    grown = struct.pack(">I", len(moov) + 72) + moov[4:] + box(b"free", b"\0" * 64)
+    wrapped.write_bytes(data[:moov_start] + grown[:-4])
+    meta = read_clip_metadata(wrapped)
+    assert meta["model"] == "HERO13 Black" and meta["vfps"] == pytest.approx(59.94, abs=0.01)
+
+
+def _udta_only(tmp_path, gpmf: bytes, name="odd_tags.mp4"):
+    path = tmp_path / name
+    path.write_bytes(box(b"moov", box(b"udta", box(b"GPMF", gpmf))))
+    return path
+
+
+@pytest.mark.parametrize(
+    "gpmf, field, expected",
+    [
+        (klv("ZFOV", "f", 8, [150.0, 2.0, 3.0, 4.0]), "zfov", 150.0),  # rows of floats
+        (text("ZFOV", "abc"), "zfov", None),  # a string where a number was expected
+        (klv("ZFOV", "f", 4, [float("nan")]), "zfov", None),  # never NaN in the status
+        (klv("ZFOV", "f", 4, [float("inf")]), "zfov", None),
+        (klv("VFPS", "L", 8, [60, 1, 60, 1]), "vfps", 60.0),  # two rows
+        (klv("VFPS", "L", 8, [60, 0]), "vfps", None),  # zero denominator
+        (klv("VRES", "L", 16, [4000, 3000, 1, 1]), "vres", [4000, 3000]),
+        (text("VRES", "4K"), "vres", None),
+        (klv("MINF", "L", 4, [13]), "model", None),  # a number where text was expected
+        (text("DVNM", "Camera"), "model", None),  # a generic device name is no model
+        (text("DVNM", "HERO13 Black"), "model", "HERO13 Black"),
+        (
+            nested("STRM", klv("SCAL", "s", 4, [1, 2, 3, 4]), klv("SHUT", "f", 4, [0.002])),
+            "shutter_s",
+            0.002,
+        ),
+        (nested("STRM", klv("SHUT", "f", 4, [float("nan")])), "shutter_s", None),
+    ],
+    ids=[
+        "zfov-rows", "zfov-text", "zfov-nan", "zfov-inf", "vfps-rows", "vfps-zero",
+        "vres-4", "vres-text", "minf-number", "dvnm-generic", "dvnm-hero", "scal-rows",
+        "shut-nan",
+    ],
+)
+def test_odd_tag_shapes_never_raise(tmp_path, gpmf, field, expected):
+    meta = read_clip_metadata(_udta_only(tmp_path, gpmf))
+    assert meta["error"] is None
+    if isinstance(expected, float):
+        assert meta[field] == pytest.approx(expected)
+    else:
+        assert meta[field] == expected
+
+
+def test_deep_nesting_never_raises(tmp_path):
+    inner = b""
+    for _ in range(3000):
+        if len(inner) + 8 > 0xFFFF:
+            break
+        inner = nested("DEVC", inner)
+    meta = read_clip_metadata(_udta_only(tmp_path, inner, "deep_klv.mp4"))
+    assert meta["error"] is None
+    boxes = b""
+    for _ in range(3000):
+        boxes = box(b"moov", boxes)
+    path = tmp_path / "deep_boxes.mp4"
+    path.write_bytes(boxes)
+    assert read_clip_metadata(path)["error"] is None
 
 
 def test_missing_file_reports_error(tmp_path):

@@ -196,7 +196,9 @@ class RecordingConfig(BaseModel):
     calibration_shutter: str = "1/480"
     shutter_angle_deg: float = Field(default=45.0, gt=0.0, le=360.0)
     iso_max: int = 1600
-    # Labs codes; the lens-mod code follows lens_mod when left empty. fX is the Labs
+    # Labs codes. The lens-mod code follows lens_mod: left empty, or set to another
+    # mod's code (a config saved before lens_mod was changed), it is derived again;
+    # only a code that is not one of LENS_MOD_LABS_CODES is kept as written. fX is the Labs
     # "Enable MSV" (Max SuperView) code; that it gives Ultra Wide on a HERO13 at 4:3 is
     # unverified until someone scans it on a camera.
     labs_lens_mod_code: str = ""
@@ -219,8 +221,10 @@ class RecordingConfig(BaseModel):
 
     @model_validator(mode="after")
     def fill_codes(self) -> RecordingConfig:
-        if not self.labs_lens_mod_code:
-            self.labs_lens_mod_code = LENS_MOD_LABS_CODES[self.lens_mod]
+        code = self.labs_lens_mod_code.strip()
+        if not code or code in LENS_MOD_LABS_CODES.values():
+            code = LENS_MOD_LABS_CODES[self.lens_mod]
+        self.labs_lens_mod_code = code
         num, _, den = self.calibration_shutter.partition("/")
         try:
             shutter_s = float(num) / float(den)

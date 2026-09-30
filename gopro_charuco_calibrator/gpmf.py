@@ -16,11 +16,13 @@ DVNM/MINF model name, CASN serial, FIRM firmware, VFOV lens style (L, W, S, H),
 ZFOV diagonal field of view in degrees, EISE ("Y"/"N"), EISA ("N/A", "HS EIS", ...),
 VRES resolution, VFPS frame-rate ratio, SHUT exposure time in seconds, ISOE sensor
 ISO, ACCL/GYRO the IMU. No tag for the lens mod is documented, and which VFOV letter a
-lens mod writes is not documented either.
+lens mod writes is not documented either. Nor are the HERO13's exact tag shapes, so
+every value is read defensively: an odd shape gives None, never an exception.
 """
 
 from __future__ import annotations
 
+import math
 import os
 import struct
 from dataclasses import dataclass, field
@@ -33,6 +35,10 @@ _CONTAINERS = {b"moov", b"trak", b"mdia", b"minf", b"stbl", b"udta", b"edts", b"
 _MAX_READ = 8 * 1024 * 1024
 # Stop walking after this many boxes: a damaged file must not loop for ever.
 _MAX_BOXES = 100_000
+# Nesting limits (a real file nests boxes about 6 deep and GPMF about 3 deep), so a
+# damaged or hostile file cannot exhaust the stack.
+_MAX_BOX_DEPTH = 16
+_MAX_KLV_DEPTH = 8
 
 _NUMERIC = {
     "b": "b",
@@ -61,13 +67,18 @@ class KLV:
 
     @property
     def value(self) -> Any:
-        return decode_value(self.type, self.size, self.repeat, self.raw)
+        try:
+            return decode_value(self.type, self.size, self.repeat, self.raw)
+        except (struct.error, ValueError, UnicodeDecodeError):
+            return self.raw
 
 
-def parse_klv(data: bytes) -> list[KLV]:
+def parse_klv(data: bytes, _depth: int = 0) -> list[KLV]:
     """Parse a GPMF payload into KLV items, nested items as ``children``.
 
-    Stops quietly at the first truncated or malformed item.
+    Stops quietly at the first truncated or malformed item (keeping the complete
+    children of a truncated nested one); items nested deeper than ``_MAX_KLV_DEPTH``
+    keep no children.
     """
     items: list[KLV] = []
     pos = 0
@@ -81,13 +92,16 @@ def parse_klv(data: bytes) -> list[KLV]:
         if key_bytes == b"\0\0\0\0":
             break
         body = data[pos + 8 : pos + 8 + length]
-        if len(body) < length:
-            break
         key = key_bytes.decode("latin-1")
+        if len(body) < length:
+            # Cut short: a nested item still gives the children that are complete.
+            if type_byte == 0 and _depth < _MAX_KLV_DEPTH:
+                items.append(KLV(key, "", size, repeat, body, parse_klv(body, _depth + 1)))
+            break
         type_char = "" if type_byte == 0 else chr(type_byte)
         item = KLV(key, type_char, size, repeat, body)
-        if type_byte == 0:
-            item.children = parse_klv(body)
+        if type_byte == 0 and _depth < _MAX_KLV_DEPTH:
+            item.children = parse_klv(body, _depth + 1)
         items.append(item)
         pos += 8 + padded
     return items
@@ -138,7 +152,11 @@ def iter_klv(items: list[KLV]):
 
 
 def _read_box_header(f: BinaryIO, end: int) -> tuple[bytes, int, int] | None:
-    """(type, payload start, box end) of the box at the current position, or None."""
+    """(type, payload start, box end) of the box at the current position, or None.
+
+    A box that claims to run past ``end`` (a file cut short, or a parent box written
+    too small) is clamped to ``end``, so what it does hold can still be read.
+    """
     start = f.tell()
     if start + 8 > end:
         return None
@@ -155,14 +173,18 @@ def _read_box_header(f: BinaryIO, end: int) -> tuple[bytes, int, int] | None:
         payload += 8
     elif size == 0:
         size = end - start
-    box_end = start + size
-    if size < payload - start or box_end > end:
+    if size < payload - start:
+        return None
+    box_end = min(start + size, end)
+    if payload > box_end:
         return None
     return box_type, payload, box_end
 
 
 def _walk(f: BinaryIO, start: int, end: int, path: tuple[bytes, ...], found: dict, budget: list):
     """Collect the offsets of the boxes we need, recursing into containers."""
+    if len(path) >= _MAX_BOX_DEPTH:
+        return
     f.seek(start)
     position = start
     while position < end and budget[0] > 0:
@@ -237,6 +259,18 @@ def _first(items: list[KLV], key: str) -> Any:
     return None
 
 
+def _as_float(value: Any) -> float | None:
+    """The first number in a decoded value (a scalar, a row, or rows), if finite."""
+    while isinstance(value, list):
+        if not value:
+            return None
+        value = value[0]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
 def _stream_values(items: list[KLV], key: str) -> list[float]:
     """The samples of a telemetry stream (e.g. SHUT), divided by its SCAL if any."""
     values: list[float] = []
@@ -246,53 +280,65 @@ def _stream_values(items: list[KLV], key: str) -> list[float]:
         scale = 1.0
         for item in strm.children:
             if item.key == "SCAL" and item.type:
-                value = item.value
-                scale = float(value[0] if isinstance(value, list) else value) or 1.0
+                scale = _as_float(item.value) or 1.0
             elif item.key == key and item.type and item.type not in ("c", "U", "F", "?"):
                 value = item.value
-                flat = value if isinstance(value, list) else [value]
-                for entry in flat:
-                    if isinstance(entry, list):
-                        entry = entry[0]
-                    if isinstance(entry, (int, float)):
-                        values.append(float(entry) / scale)
+                for entry in value if isinstance(value, list) else [value]:
+                    number = _as_float(entry)
+                    if number is not None and math.isfinite(number / scale):
+                        values.append(number / scale)
     return values
 
 
 def _clean_text(value: Any) -> str | None:
+    """A text tag as a string; numbers or bytes where text was expected give None."""
     if isinstance(value, list):
-        value = " ".join(str(v) for v in value if v)
-    if value is None:
+        value = " ".join(v for v in value if isinstance(v, str) and v)
+    if not isinstance(value, str):
         return None
-    text = str(value).strip()
+    text = value.strip()
     return text or None
 
 
 def summarise(items: list[KLV]) -> dict[str, Any]:
     """The known tags from parsed GPMF items (missing tags are None)."""
     vres = _first(items, "VRES")
+    if isinstance(vres, list) and vres and isinstance(vres[0], list):
+        vres = vres[0]  # several rows: the first
+    if not isinstance(vres, list) or len(vres) < 2:
+        vres = None
+    elif any(_as_float(v) is None for v in vres[:2]):
+        vres = None
     vfps = _first(items, "VFPS")
+    if isinstance(vfps, list) and vfps and isinstance(vfps[0], list):
+        vfps = vfps[0]
     fps = None
-    if isinstance(vfps, list) and len(vfps) >= 2 and vfps[1]:
-        fps = float(vfps[0]) / float(vfps[1])
-    elif isinstance(vfps, (int, float)):
-        fps = float(vfps)
-    zfov = _first(items, "ZFOV")
-    if isinstance(zfov, list):
-        zfov = zfov[0] if zfov else None
+    if isinstance(vfps, list) and len(vfps) >= 2:
+        num, den = _as_float(vfps[0]), _as_float(vfps[1])
+        fps = num / den if num is not None and den else None
+    else:
+        fps = _as_float(vfps)
+    if fps is not None and (not math.isfinite(fps) or fps <= 0):
+        fps = None
     shutter = sorted(_stream_values(items, "SHUT"))
     iso = sorted(_stream_values(items, "ISOE"))
     keys = {item.key for item in iter_klv(items)}
+    device_name = _clean_text(_first(items, "DVNM"))
+    # MINF is the model; DVNM is often just "Camera" (gpmf-parser's examples), so it
+    # stands in for the model only when it names a HERO.
+    model = _clean_text(_first(items, "MINF"))
+    if model is None and device_name and "HERO" in device_name.upper():
+        model = device_name
     return {
-        "model": _clean_text(_first(items, "MINF")) or _clean_text(_first(items, "DVNM")),
-        "device_name": _clean_text(_first(items, "DVNM")),
+        "model": model,
+        "device_name": device_name,
         "serial": _clean_text(_first(items, "CASN")),
         "firmware": _clean_text(_first(items, "FIRM")),
         "vfov": _clean_text(_first(items, "VFOV")),
-        "zfov": None if zfov is None else float(zfov),
+        "zfov": _as_float(_first(items, "ZFOV")),
         "eise": _clean_text(_first(items, "EISE")),
         "eisa": _clean_text(_first(items, "EISA")),
-        "vres": list(vres[:2]) if isinstance(vres, list) and len(vres) >= 2 else None,
+        "vres": None if vres is None else [int(v) for v in vres[:2]],
         "vfps": fps,
         # Median over the first telemetry sample (about a second of frames).
         "shutter_s": shutter[len(shutter) // 2] if shutter else None,
@@ -306,18 +352,18 @@ def read_clip_metadata(path: str | os.PathLike[str]) -> dict[str, Any]:
     """GoPro metadata of an mp4: ``moov/udta/GPMF`` plus the first ``gpmd`` sample.
 
     Returns every known tag (None when absent), ``gpmf_found`` and ``tags`` (every
-    FourCC seen). Never raises for a readable file, GoPro or not; an unreadable one
-    gives ``error``.
+    FourCC seen). Never raises: an unreadable or damaged file gives ``error`` along
+    with whatever was read before the damage.
     """
     result = summarise([])
     result.update(gpmf_found=False, error=None)
+    items: list[KLV] = []
     try:
         with Path(path).open("rb") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
             found: dict[str, Any] = {"traks": [], "udta_gpmf": None}
             _walk(f, 0, size, (), found, [_MAX_BOXES])
-            items: list[KLV] = []
             if found["udta_gpmf"] is not None:
                 items.extend(parse_klv(_read(f, *found["udta_gpmf"])))
             for trak in found["traks"]:
@@ -327,9 +373,11 @@ def read_clip_metadata(path: str | os.PathLike[str]) -> dict[str, Any]:
                 if sample:
                     items.extend(parse_klv(sample))
                     break
-    except (OSError, struct.error, ValueError) as exc:
-        result["error"] = str(exc)
-        return result
-    result.update(summarise(items))
+    except Exception as exc:  # noqa: BLE001 - metadata is advisory, never fatal
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    try:
+        result.update(summarise(items))
+    except Exception as exc:  # noqa: BLE001 - odd tag shapes must not fail the clip
+        result["error"] = result["error"] or f"{type(exc).__name__}: {exc}"
     result["gpmf_found"] = bool(items)
     return result

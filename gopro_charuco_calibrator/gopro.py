@@ -304,7 +304,8 @@ def camera_state_warnings(config: GoProSettingsConfig, camera_state: dict[str, A
             f"requested {_setting_label('webcam_fov', config.webcam_fov)}; check the preview"
         )
     mod = reported.get("max_lens_mod")
-    # 100 = Auto Detect: the camera then reports the mod it found, which is not a mismatch.
+    # 100 = Auto Detect: the camera may then report the mod it found (unverified on a
+    # HERO13), which is not a mismatch.
     requested_mod = None if config.max_lens_mod == 100 else config.max_lens_mod
     if requested_mod is not None and mod is not None and mod != requested_mod:
         warnings.append(

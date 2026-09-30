@@ -13,6 +13,7 @@ the camera.
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
 from fractions import Fraction
@@ -36,6 +37,20 @@ def _rate(value: Any) -> float | None:
     except (ValueError, ZeroDivisionError):
         return None
     return float(rate) if rate > 0 else None
+
+
+def _number(value: Any) -> float | None:
+    """A finite float, or None ("N/A", missing, nan): the status must stay valid JSON."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _int(value: Any) -> int:
+    number = _number(value)
+    return 0 if number is None else int(number)
 
 
 def probe_video(path: Path) -> dict[str, Any]:
@@ -71,17 +86,19 @@ def probe_video(path: Path) -> dict[str, Any]:
     rotation = 0
     for side in video.get("side_data_list") or []:
         if "rotation" in side:
-            rotation = int(float(side["rotation"]))
+            rotation = _int(side["rotation"])
     if "rotate" in (video.get("tags") or {}):
-        rotation = int(float(video["tags"]["rotate"]))
-    duration = video.get("duration") or (data.get("format") or {}).get("duration")
+        rotation = _int(video["tags"]["rotate"])
+    duration = _number(video.get("duration")) or _number(
+        (data.get("format") or {}).get("duration")
+    )
     return {
-        "width": int(video.get("width") or 0),
-        "height": int(video.get("height") or 0),
+        "width": _int(video.get("width")),
+        "height": _int(video.get("height")),
         "avg_frame_rate": _rate(video.get("avg_frame_rate")),
         "r_frame_rate": _rate(video.get("r_frame_rate")),
         "codec": video.get("codec_name"),
-        "duration_s": None if duration is None else float(duration),
+        "duration_s": duration,
         "rotation": rotation,
     }
 
@@ -101,8 +118,17 @@ def _fps_text(fps: float) -> str:
     return f"{fps:.2f}".rstrip("0").rstrip(".") + " fps"
 
 
-def compare(probe: dict[str, Any], meta: dict[str, Any], rec: RecordingConfig) -> list[dict]:
-    """The clip-check rows: settings first, then facts about the file."""
+def compare(
+    probe: dict[str, Any],
+    meta: dict[str, Any],
+    rec: RecordingConfig,
+    run_serial: str | None = None,
+) -> list[dict]:
+    """The clip-check rows: settings first, then facts about the file.
+
+    ``run_serial`` is the serial of the run's earlier clips: a clip from another camera
+    is a mismatch.
+    """
     rows: list[dict[str, Any]] = []
     probed = "error" not in probe
     no_gpmf = (
@@ -231,18 +257,45 @@ def compare(probe: dict[str, Any], meta: dict[str, Any], rec: RecordingConfig) -
             "ok" if meta.get("has_imu") else "unknown",
         )
     )
-    rows.append(
-        _row("serial", "Camera serial", None, meta.get("serial"),
-             "ok" if meta.get("serial") else "unknown")
-    )
+    serial = meta.get("serial")
+    if run_serial and serial and serial != run_serial:
+        rows.append(
+            _row(
+                "serial", "Camera serial", run_serial, serial, "mismatch",
+                f"This clip is from another camera (serial {serial}). Press Next camera "
+                "and start a new run for it.",
+            )
+        )
+    else:
+        rows.append(
+            _row("serial", "Camera serial", run_serial, serial, "ok" if serial else "unknown")
+        )
     return rows
 
 
-def check_clip(path: Path, rec: RecordingConfig) -> dict[str, Any]:
+def fallback_check(path: Path, rec: RecordingConfig, error: Exception) -> dict[str, Any]:
+    """The clip check when reading the file's metadata failed: every setting unknown."""
+    try:
+        probe = probe_video(path)
+    except Exception as exc:  # noqa: BLE001 - the check is advisory
+        probe = {"error": f"ffprobe failed: {exc}"}
+    meta = {"gpmf_found": False, "error": f"{type(error).__name__}: {error}"}
+    rows = compare(probe, meta, rec)
+    return {
+        "probe": probe,
+        "metadata": meta,
+        "check": rows,
+        "mismatch_count": sum(1 for row in rows if row["status"] == "mismatch"),
+    }
+
+
+def check_clip(
+    path: Path, rec: RecordingConfig, run_serial: str | None = None
+) -> dict[str, Any]:
     """Probe a clip and compare it with ``rec``. Never raises for a readable file."""
     probe = probe_video(path)
     meta = read_clip_metadata(path)
-    rows = compare(probe, meta, rec)
+    rows = compare(probe, meta, rec, run_serial)
     return {
         "probe": probe,
         "metadata": meta,
