@@ -747,6 +747,9 @@ def _upload(client, clip_path: Path, name: str):
 def fresh_job(monkeypatch, tmp_path):
     job = RecordingJob(tmp_path / "runs")
     monkeypatch.setattr(app_module, "_recording", job)
+    # Tests that never decode a clip run without ffmpeg too; the ones that do are
+    # marked needs_ffmpeg, and the missing-ffmpeg test patches this back.
+    monkeypatch.setattr(recording, "missing_tools", lambda: [])
     return job
 
 
@@ -1194,6 +1197,75 @@ def test_an_upload_the_browser_drops_ends_in_a_plain_error(tmp_path, fresh_job):
     status = fresh_job.status()
     assert status["state"] == "error" and status["message"] == message
     assert list((Path(status["output_dir"]) / "clips").iterdir()) == []
+
+
+def test_an_upload_that_goes_quiet_ends_in_a_plain_error(tmp_path, fresh_job, monkeypatch):
+    monkeypatch.setattr(app_module, "UPLOAD_IDLE_TIMEOUT_S", 0.2)
+    fresh_job.start(_config(), tmp_path / "runs")
+    sent = []
+
+    async def receive():
+        if not sent:
+            sent.append(1)
+            return {"type": "http.request", "body": b"x" * 1000, "more_body": True}
+        await anyio.sleep(30)  # the connection stays open but nothing arrives
+
+    scope = {
+        "type": "http",
+        "method": "PUT",
+        "path": "/api/recording/clips",
+        "query_string": b"name=GX010001.MP4",
+        "headers": [(b"content-length", b"10000000")],
+    }
+    request = app_module.Request(scope, receive)
+    response = anyio.run(app_module.recording_upload, request, "GX010001.MP4")
+    assert response.status_code == 408
+    status = fresh_job.status()
+    assert status["state"] == "error" and status["message"].startswith("The upload stalled")
+    assert list((Path(status["output_dir"]) / "clips").iterdir()) == []
+    assert not fresh_job.busy
+
+
+def test_a_run_folder_that_cannot_be_made_is_a_plain_error(tmp_path, fresh_job, monkeypatch):
+    client = TestClient(app_module.app)
+    body = {"config": _config().model_dump(), "runs_dir": str(tmp_path / "runs")}
+    assert client.post("/api/recording/start", json=body).status_code == 200
+
+    def refuse(self):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(RecordingJob, "_make_run_dir", refuse)
+    response = client.post("/api/recording/start", json=body)
+    assert response.status_code == 500
+    assert "Could not make the run folder" in response.json()["detail"]
+    status = fresh_job.status()
+    assert status["state"] == "error" and status["run_id"] is None
+    assert fresh_job.output_dir is None
+    response = client.put("/api/recording/clips?name=GX010001.MP4", content=b"x" * 10)
+    assert response.status_code == 409  # no run open: start again first
+
+
+def test_a_processing_failure_says_what_to_do(tmp_path, fresh_job, monkeypatch):
+    fresh_job.start(_config(), tmp_path / "runs")
+
+    def crash(self, clip, generation):
+        raise RuntimeError("synthetic crash")
+
+    monkeypatch.setattr(RecordingJob, "_process_clip", crash)
+    fresh_job._process(tmp_path / "GX010001.MP4", fresh_job._generation)
+    status = fresh_job.status()
+    assert status["state"] == "error"
+    assert status["message"].startswith("Processing GX010001.MP4 failed: synthetic crash.")
+    assert "drop another clip" in status["message"]
+
+    def too_few(self, clip, generation):
+        raise RuntimeError("Need at least 8 usable frames, found 5")
+
+    monkeypatch.setattr(RecordingJob, "_process_clip", too_few)
+    fresh_job._process(tmp_path / "GX010001.MP4", fresh_job._generation)
+    status = fresh_job.status()
+    assert status["needs_more_views"] is True
+    assert status["message"].startswith("Only 5 usable views so far; solving needs 8.")
 
 
 @needs_ffmpeg

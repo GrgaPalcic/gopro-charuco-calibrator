@@ -23,6 +23,7 @@ from .recording import (
     MissingToolError,
     RecordingError,
     RecordingJob,
+    RunFolderError,
     recording_guide,
 )
 from .solver import solve_from_frames
@@ -68,6 +69,8 @@ _session_lock = threading.Lock()
 _session = CaptureSession()
 # The "From a recording" route: its own job, independent of the live session.
 _recording = RecordingJob()
+# Seconds without any upload bytes before a clip upload counts as abandoned.
+UPLOAD_IDLE_TIMEOUT_S = 60.0
 # Set only on server shutdown; ends the MJPEG generator. NOT the per-session stop
 # (a per-session stop is handled by the browser closing the stream connection),
 # so reopening a preview after Stop/Next Camera still streams.
@@ -332,6 +335,8 @@ def recording_start(request: StartRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except MissingToolError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RunFolderError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except RecordingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -367,16 +372,33 @@ async def recording_upload(request: Request, name: str):
         path = _recording.begin_upload(name, total)
     except MissingToolError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RunFolderError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except RecordingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     received = 0
     try:
         async with await anyio.open_file(path, "wb") as stream:
-            async for chunk in request.stream():
+            chunks = request.stream().__aiter__()
+            while True:
+                # A connection that goes quiet (Wi-Fi dropped, laptop asleep) would
+                # otherwise hold the job in "uploading" until the server restarts.
+                with anyio.fail_after(UPLOAD_IDLE_TIMEOUT_S):
+                    try:
+                        chunk = await chunks.__anext__()
+                    except StopAsyncIteration:
+                        break
                 if chunk:
                     await stream.write(chunk)
                     received += len(chunk)
                     _recording.upload_progress(received)
+    except TimeoutError:
+        message = (
+            f"The upload stalled: nothing arrived for {UPLOAD_IDLE_TIMEOUT_S:.0f} s. "
+            "Drop the clip again."
+        )
+        _recording.upload_failed(path, message)
+        return JSONResponse(status_code=408, content={"detail": message})
     except ClientDisconnect:
         # The browser went away (tab closed, network): nobody reads this response.
         message = "The upload stopped before the end. Drop the clip again."

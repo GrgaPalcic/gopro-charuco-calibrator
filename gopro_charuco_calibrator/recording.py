@@ -110,16 +110,6 @@ DEFAULT_CAMERA_NAME = CameraConfig().camera_name
 NOT_USED = "The clip was not used and was removed from this run's folder."
 
 
-def no_results() -> dict[str, Any]:
-    """The status's result keys for a run that has not solved (the live route's shapes)."""
-    return {
-        "results": None,
-        "summary_path": None,
-        "acquisition_mode": None,
-        "rejected_points": [],
-        "needs_more_views": False,
-        "orbslam3": None,
-    }
 NO_RECORDING_SETTINGS = (
     "This preset has no settings for recording on the camera. Pick a HERO13 lens-mod "
     "preset for the From a recording route."
@@ -134,10 +124,26 @@ class MissingToolError(RecordingError):
     """ffmpeg or ffprobe is not installed: the clip is fine and is never removed."""
 
 
+class RunFolderError(RecordingError):
+    """The run folder could not be made (a read-only or full disk)."""
+
+
 TOOLS_MISSING = (
     "ffmpeg is not installed on this computer. Install ffmpeg (it includes ffprobe), "
     "then drop the clip again."
 )
+
+
+def no_results() -> dict[str, Any]:
+    """The status's result keys for a run that has not solved (the live route's shapes)."""
+    return {
+        "results": None,
+        "summary_path": None,
+        "acquisition_mode": None,
+        "rejected_points": [],
+        "needs_more_views": False,
+        "orbslam3": None,
+    }
 
 
 def missing_tools() -> list[str]:
@@ -941,7 +947,20 @@ class RecordingJob:
             self.config = config
             self.camera_name = config.camera.camera_name
             self._timestamp = time.strftime("%Y%m%d_%H%M%S")
-            self._make_run_dir()
+            try:
+                self._make_run_dir()
+            except OSError as exc:
+                partial = self.output_dir
+                self._reset_run()
+                if partial is not None:
+                    shutil.rmtree(partial, ignore_errors=True)
+                message = (
+                    f"Could not make the run folder in {self.runs_dir}"
+                    + (f" ({exc.strerror})" if exc.strerror else "")
+                    + ". Check that it can be written to, then start again."
+                )
+                self._set_idle(message, state="error")
+                raise RunFolderError(message) from exc
             self._set_idle("Ready for the clip.", state="ready")
             return self.status()
 
@@ -1026,7 +1045,16 @@ class RecordingJob:
                 )
                 raise MissingToolError(TOOLS_MISSING)
             clips_dir = self.output_dir / "clips"
-            clips_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                clips_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                message = (
+                    f"Could not write to the run folder {self.output_dir}"
+                    + (f" ({exc.strerror})" if exc.strerror else "")
+                    + ". Check that it can be written to, then drop the clip again."
+                )
+                self._status.update(state="error", stage="upload", message=message)
+                raise RunFolderError(message) from exc
             clean = sanitise_clip_name(name)
             path = clips_dir / clean
             stem, suffix = path.stem, path.suffix
@@ -1086,13 +1114,23 @@ class RecordingJob:
             # Not the clip's fault: it stays in clips/, out of the run's list.
             self._publish(self._active_generation, state="error", stage="check", message=str(exc))
         except Exception as exc:  # noqa: BLE001 - the job must end in a state, never hang
-            message = str(exc) or f"{type(exc).__name__} while processing {clip.name}."
+            reason = str(exc) or type(exc).__name__
+            few = re.match(r"Need at least (\d+) usable frames, found (\d+)", reason)
+            if few:
+                message = (
+                    f"Only {few.group(2)} usable views so far; solving needs {few.group(1)}. "
+                    "Record another clip covering the missing positions and drop it here."
+                )
+            else:
+                message = (
+                    f"Processing {clip.name} failed: {reason.rstrip('.')}. The views picked "
+                    "so far are kept; drop another clip, or try this one again."
+                )
             self._publish(
                 self._active_generation,
                 state="error",
                 message=self._with_switch_note(message),
-                # the solver's own "Need at least N usable frames"
-                needs_more_views=message.startswith("Need at least"),
+                needs_more_views=bool(few),
             )
 
     def _check(self, clip: Path, run_serial: str | None) -> dict[str, Any]:
@@ -1204,6 +1242,8 @@ class RecordingJob:
         except MissingToolError:
             with self._lock:
                 self._clips.remove(entry)
+                # The clip stays in this run's clips/, so the run is no longer undoable.
+                self._before_switch = None
             raise
         except Exception as exc:  # noqa: BLE001 - the clip leaves the run, then the job ends
             with self._lock:
