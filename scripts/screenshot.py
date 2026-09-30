@@ -1251,7 +1251,7 @@ def main() -> int:
                 drawn=["#recAnim"],
                 within={
                     "#animCaption": ["position 21/23 · tilted · upper right"],
-                    "#recHint": ["finish steps 2 and 3 first"],
+                    "#recHint": ["click I've recorded the clip first"],
                 },
             ),
             False,
@@ -1358,7 +1358,7 @@ def main() -> int:
                     "differ. The calibration below is only valid for footage recorded exactly "
                     "like this clip.",
                     "PASS",
-                    "The file cannot confirm these settings",
+                    "The file cannot confirm how this clip was recorded",
                     "Named this camera gopro13_1234 from its serial number",
                 ],
                 within={
@@ -1413,7 +1413,7 @@ def main() -> int:
                 ["#clipBanner", "#recAlert"],
                 "#recRedoBtn",
                 rec_row("done", "done", "done", "current"),
-                within={"#recPrompt": ["The last clip was not used either",
+                within={"#recPrompt": ["The last clip was not used: the first red box says why",
                                        "click Start this camera again"]},
             ),
             False,

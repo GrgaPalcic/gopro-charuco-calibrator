@@ -165,7 +165,7 @@ def checklist(rec: RecordingConfig) -> list[dict[str, str]]:
             "setting": "Shutter",
             "value": f"{rec.calibration_shutter} for the calibration clip, Auto for the dataset",
             "how": "A fast shutter keeps the board sharp while it moves. Set it back to Auto "
-            "after the calibration clip (scan the dataset QR code).",
+            "after the calibration clip (scan QR code 2).",
         },
         {
             "setting": "ISO max",

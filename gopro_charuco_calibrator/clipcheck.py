@@ -248,7 +248,7 @@ def compare(
     if shutter is None or shutter <= 0:
         rows.append(
             _row("shutter", "Shutter", expected_shutter, None, "unknown",
-                 f"Check the shutter shows {rec.calibration_shutter} on the camera screen.")
+                 f"The clip must have been recorded at {rec.calibration_shutter} (QR code 1).")
         )
     else:
         ok = abs(shutter - rec.shutter_s) <= SHUTTER_TOLERANCE * rec.shutter_s
@@ -256,7 +256,7 @@ def compare(
             _row(
                 "shutter", "Shutter", expected_shutter, f"1/{1 / shutter:.0f} s",
                 "ok" if ok else "mismatch",
-                "" if ok else "Scan the calibration QR code (or set the shutter to "
+                "" if ok else "Scan QR code 1 (or set the shutter to "
                 f"{rec.calibration_shutter} in Protune), then record again.",
             )
         )

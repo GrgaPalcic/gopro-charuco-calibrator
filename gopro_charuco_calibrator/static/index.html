@@ -279,7 +279,7 @@
             <li><span class="swatch swatch-dot swatch-todo" aria-hidden="true"></span><span id="animTodo">Blue: positions still to come</span></li>
             <li data-anim-moving><span class="swatch swatch-board" aria-hidden="true"></span>White: the board, as the camera sees it</li>
             <li data-anim-still><span class="swatch swatch-dot swatch-ring" aria-hidden="true"></span>Ringed: hold the board tilted</li>
-            <li><span class="swatch swatch-target" aria-hidden="true"></span>Dashed line: the board centre must reach it or beyond</li>
+            <li><span class="swatch swatch-target" aria-hidden="true"></span>Dashed line: at the far positions the board centre reaches it; at the near ones the board edges touch the frame edges</li>
           </ul>
           <details class="disclosure" id="positionsList">
             <summary>All positions in order</summary>
@@ -473,7 +473,7 @@
 
     <div class="clip-check rec-only" id="clipCheck" hidden>
       <div class="clip-unknown" id="clipUnknown" hidden>
-        <p class="clip-unknown-head">The file cannot confirm these settings. Check them on the camera screen:</p>
+        <p class="clip-unknown-head">The file cannot confirm how this clip was recorded. If any of these was different, record the clip again:</p>
         <ul id="clipUnknownList"></ul>
       </div>
       <div class="clip-unknown" id="clipOther" hidden>

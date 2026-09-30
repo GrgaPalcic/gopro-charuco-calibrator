@@ -1210,7 +1210,9 @@ function renderResults(modelResults, coverage, mode, f) {
   if (modeStr) {
     const advice = f.settingsDiffer
       ? "The clip check found settings that differ from the camera setup: see the red box."
-      : "Record your data in exactly this mode.";
+      : calibrationRoute === "live"
+        ? "Valid for the webcam stream in exactly this mode, not for footage recorded on the camera."
+        : "Record your data in exactly this mode.";
     gridRow(resultGrid, "Captured in", `${modeStr}. ${advice}`);
   }
   for (const result of solved) {
@@ -1420,7 +1422,10 @@ async function poll() {
   try {
     updateStatus(await api("/api/session/status"));
   } catch {
-    setStatusLine("Problem: the server is not reachable. Is it still running?");
+    // The recording route writes its own status line.
+    if (calibrationRoute === "live") {
+      setStatusLine("Problem: the server is not reachable. Is it still running?");
+    }
     setStreamStatus("error", "server offline");
   }
 }
@@ -1798,6 +1803,7 @@ const clipCheck = document.getElementById("clipCheck");
 const clipBanner = document.getElementById("clipBanner");
 const clipUnknown = document.getElementById("clipUnknown");
 const clipUnknownList = document.getElementById("clipUnknownList");
+const settingsTitle = document.getElementById("settingsTitle");
 const clipOther = document.getElementById("clipOther");
 const clipOtherList = document.getElementById("clipOtherList");
 
@@ -2009,8 +2015,11 @@ function recFacts(status) {
   // a clip was refused, and the next action when the clip check found a problem.
   // A clip refused for its size gets a run of its own only when it is the one in the
   // camera setup's mode; one in another mode is recorded again (the refusal says so).
+  // The run keeps the settings it started with; a form edited since is not used
+  // until the camera is started again.
+  f.formChanged = hasRun && recRunKey !== null && setupKey(readForm()) !== recRunKey;
   f.canRedo = !busy && hasRun
-    && (Boolean(f.warning)
+    && (Boolean(f.warning) || f.formChanged
       || (f.refused?.reason === "different_size" && f.refused.matches_setup !== false));
   return f;
 }
@@ -2035,7 +2044,7 @@ function recPrimary(f, states) {
   if (f.step === "record") return recRecordedBtn;
   if (f.busy) return null;
   // The banner asks for the clip again: a fresh run keeps this clip's views out.
-  if (f.warning && f.canRedo) return recRedoBtn;
+  if ((f.warning || f.formChanged) && f.canRedo) return recRedoBtn;
   if (f.passed) return recNextBtn;
   return recChooseBtn;
 }
@@ -2169,7 +2178,7 @@ function recPromptText(f, s) {
     const again = recRestartedFrom
       ? `Starting this camera again; the earlier run stays in ${recRestartedFrom}. `
       : "";
-    return `${again}Scan the first QR code with the camera, then check each setting below on `
+    return `${again}Scan QR code 1 with the camera, then check each setting below on `
       + "the camera screen. Click I've set the camera when they all match.";
   }
   if (f.step === "record") return `${RECORD_TEXT} Then click I've recorded the clip.`;
@@ -2181,8 +2190,13 @@ function recPromptText(f, s) {
   const standing = "The calibration below still passes: click Next camera when this camera is done";
   // The clip check's problem comes first: Start this camera again is the next action,
   // even when a later clip was refused as well.
+  if (f.formChanged && f.canRedo) {
+    return "The settings changed after this run started, and this run keeps the settings it "
+      + "started with. Click Start this camera again to use the new settings (this run's "
+      + "files stay where they are).";
+  }
   if (f.warning && f.canRedo) {
-    return `${f.refused ? "The last clip was not used either; read why below. " : ""}${redoText(f, s)}`;
+    return `${f.refused ? "The last clip was not used: the first red box says why. " : ""}${redoText(f, s)}`;
   }
   if (f.refused) {
     // The reason below names Start this camera again where it applies.
@@ -2325,7 +2339,7 @@ function renderLabs(f) {
   const shutter = rec.calibration_shutter || "1/480";
   shutterWarningText.textContent = `The calibration clip uses a fast shutter (${shutter} s); `
     + "the dataset is recorded with the shutter on Auto. Before you record the dataset, scan "
-    + "the second QR code, or set Shutter back to Auto in Protune.";
+    + "QR code 2, or set Shutter back to Auto in Protune.";
   // Codes the Labs docs do not confirm for a HERO13, once each: what to check and do
   // first, then the code itself for reference; a code only QR code 1 carries says so.
   const dataset = new Set(recLabs.dataset.unverified.map((u) => u.code));
@@ -2447,7 +2461,8 @@ function animAt(t) {
   const time = ((t % total) + total) % total;
   const index = Math.floor(time / ANIM_STEP_MS);
   const into = time - index * ANIM_STEP_MS;
-  const from = boardPose(cps[(index - 1 + n) % n]);
+  // The first pass starts on position 1 instead of travelling in from the last one.
+  const from = boardPose(cps[t < ANIM_STEP_MS ? 0 : (index - 1 + n) % n]);
   const to = boardPose(cps[index]);
   const u = into < ANIM_MOVE_MS ? ease(into / ANIM_MOVE_MS) : 1;
   const mix = (key) => from[key] + (to[key] - from[key]) * u;
@@ -2598,7 +2613,7 @@ function drawAnimation() {
     }
   });
   drawBoard(ctx, pose, frame, boardShape());
-  dotAt(ctx, frame, cps[index], COLOR.signal, 10, offsets[index] * spacing);
+  dotAt(ctx, frame, cps[index], COLOR.signal, 10, 0);
   setText(animCaption, `position ${index + 1}/${cps.length} · ${cps[index].caption}`);
 }
 
@@ -2835,7 +2850,7 @@ function renderDrop(f, s) {
     : redo ? "Add a clip to this run (not a re-recorded one)"
       : f.clips.length ? "Drop another clip of this camera here" : "Drop the clip from the camera's card here");
   setText(dropZoneNote, redo
-    ? "A clip dropped here is solved together with the one above. For a clip recorded with the settings fixed, click Start this camera again first."
+    ? "A clip dropped here is solved together with this run's clip. For a clip recorded with the settings fixed, click Start this camera again first."
     : f.clips.length
     ? "Its views are added to this run and everything is solved again. A clip from another camera starts its own run."
     : "An .mp4 file (GX01xxxx.MP4, for example GX010042.MP4), or several. A 90 s clip is about 1.4 GB and takes a moment to copy.");
@@ -2908,7 +2923,7 @@ function renderDrop(f, s) {
     }));
   }
   recMapWrap.hidden = !hasViews || f.busy;
-  setText(recMapTodo, f.passed ? "Blue: not covered (not needed, the result passed)" : "Blue: still missing");
+  setText(recMapTodo, f.done ? "Blue: not covered (not needed, the result passed)" : "Blue: still missing");
   const signature = JSON.stringify([s.coverage?.points, s.guide?.checkpoints, s.image_size, recMapWrap.hidden, recGuideKey]);
   if (signature !== mapSignature) {
     mapSignature = signature;
@@ -3080,6 +3095,12 @@ async function recAddFiles(fileList) {
   // The banner asks for the clip to be recorded again in a fresh run: adding the new
   // clip here would solve it together with the flagged one.
   const f = recFacts(recStatus || {});
+  if (f.formChanged) {
+    recHintText = `Not added: ${listText(clips.map((file) => file.name))}. The settings changed `
+      + "after this run started: click Start this camera again, then drop the clip in step 4.";
+    renderRecording();
+    return;
+  }
   if (f.warning && f.canRedo) {
     const why = f.settingsDiffer
       ? "A clip in this run was not recorded with the preset's settings."
@@ -3100,6 +3121,8 @@ async function recAddFiles(fileList) {
 
 // One clip at a time: the job refuses a clip while it works on the previous one.
 let recRunning = false;
+// setupKey of the config the open run started with (null: unknown or no run).
+let recRunKey = null;
 
 async function recRunQueue() {
   recRunning = true;
@@ -3111,7 +3134,9 @@ async function recRunQueue() {
     const file = recQueue.shift();
     try {
       if (!recStatus?.run_id) {
-        renderRecording(await api("/api/recording/start", {method: "POST", body: JSON.stringify({config: readForm()})}));
+        const config = readForm();
+        renderRecording(await api("/api/recording/start", {method: "POST", body: JSON.stringify({config})}));
+        recRunKey = setupKey(config);
       }
       recUpload = {name: file.name, loaded: 0, total: file.size, left: recQueue.length};
       renderRecording();
@@ -3166,7 +3191,8 @@ function recDropAnywhere(files) {
   let hint = "";
   if (!f.supported) hint = "That file was not used: pick a camera setup with recording settings in step 1 first.";
   else if (f.busy) hint = "That file was not used: wait for this clip to finish, then drop the next one.";
-  else if (f.step !== "drop") hint = "That file was not used: finish steps 2 and 3 first, then drop the clip in step 4.";
+  else if (f.step === "record") hint = "That file was not used: click I've recorded the clip first, then drop it again.";
+  else if (f.step !== "drop") hint = "That file was not used: click I've set the camera and I've recorded the clip first, then drop it again.";
   if (hint) {
     recHintText = hint;
     renderRecording();
@@ -3229,6 +3255,7 @@ async function recNewRun(button) {
   recLocalErrorKey = null;
   recHintText = "";
   recRestartedFrom = button === "Next camera" ? "" : s.run_dir || "";
+  recRunKey = null;
   renderRecording(await api("/api/recording/new", {method: "POST", body: JSON.stringify({config: readForm()})}));
 }
 
@@ -3251,6 +3278,11 @@ function setRoute(value, {remember = true} = {}) {
   }
   delete cameraReadout.dataset.signature;
   resultsSignature = "";
+  // In the recording route, step 2 is the camera's settings; this panel is the app's.
+  settingsTitle.firstChild.textContent = calibrationRoute === "recording" ? "App settings " : "Settings ";
+  settingsTitle.querySelector(".hint").textContent = calibrationRoute === "recording"
+    ? "(not camera settings; the camera setup fills these in)"
+    : "(the camera setup fills these in)";
   if (calibrationRoute === "recording") {
     refreshRecordingConfig();
     renderRecording();
