@@ -191,7 +191,9 @@ class RecordingConfig(BaseModel):
     width: int = Field(default=4000, ge=160)
     height: int = Field(default=3000, ge=120)
     fps: float = Field(default=60.0, gt=0.0)
-    lens: str = "Ultra Wide"
+    # The only lens with a Labs code here (fX, unverified; see labs_lens_code), so the
+    # QR code and the checklist cannot name different lenses.
+    lens: Literal["Ultra Wide"] = "Ultra Wide"
     hypersmooth: Literal["off"] = "off"
     calibration_shutter: str = "1/480"
     shutter_angle_deg: float = Field(default=45.0, gt=0.0, le=360.0)

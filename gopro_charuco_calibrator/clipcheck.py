@@ -53,6 +53,22 @@ def _int(value: Any) -> int:
     return 0 if number is None else int(number)
 
 
+def ffmpeg_error_line(stderr: str, path: Path) -> str | None:
+    """The last line ffmpeg or ffprobe printed, without the file's folder in it.
+
+    They start an error with the input's full path ("/runs/.../clip.mp4: Invalid data
+    found when processing input"); the status only needs what went wrong.
+    """
+    lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
+    if not lines:
+        return None
+    line = lines[-1]
+    for prefix in (f"{path}:", f"{path.name}:"):
+        if line.startswith(prefix):
+            line = line[len(prefix) :].strip()
+    return line.replace(str(path), path.name) or None
+
+
 def probe_video(path: Path) -> dict[str, Any]:
     """Width, height, frame rates, codec, duration and rotation of the first video stream.
 
@@ -81,8 +97,7 @@ def probe_video(path: Path) -> dict[str, Any]:
         (s for s in data.get("streams", []) if s.get("codec_type") == "video"), None
     )
     if proc.returncode != 0 or video is None:
-        detail = (proc.stderr or "").strip().splitlines()
-        return {"error": detail[-1] if detail else "no video stream in this file"}
+        return {"error": ffmpeg_error_line(proc.stderr, path) or "no video stream in this file"}
     rotation = 0
     for side in video.get("side_data_list") or []:
         if "rotation" in side:
@@ -234,6 +249,26 @@ def compare(
                 "ok" if ok else "mismatch",
                 "" if ok else "Scan the calibration QR code (or set the shutter to "
                 f"{rec.calibration_shutter} in Protune), then record again.",
+            )
+        )
+
+    # GoPro originals are expected to carry no rotation flag (unverified); an exported
+    # or re-muxed copy can. Frames are read as stored (ffmpeg -noautorotate), so the
+    # calibration is for the stored pixels, not the turned picture a player shows.
+    rotation = probe.get("rotation") if probed else None
+    if rotation is None:
+        rows.append(_row("rotation", "Rotation flag", "none", None, "unknown"))
+    elif rotation % 360 == 0:
+        rows.append(_row("rotation", "Rotation flag", "none", "none", "ok"))
+    else:
+        rows.append(
+            _row(
+                "rotation", "Rotation flag", "none", f"turn by {abs(rotation) % 360}°",
+                "mismatch",
+                "This file tells video players to turn the picture. The calibration uses "
+                "the picture as stored, which may not be what the dataset tools read. Use "
+                "the original file from the camera's card, and lock the camera's "
+                "orientation before recording.",
             )
         )
 

@@ -19,14 +19,20 @@ Frame selection, per sample of the clip (``RecordingConfig.sample_hz``, 12 Hz):
    to a view already kept, from this clip or an earlier one, is a ``duplicate`` unless
    it is sharper than the one from this clip it matches, which it then replaces.
 5. **Blur across the clip**: when the clip ends, a winner whose size-weighted sharpness
-   is under ``blur_ratio`` x the reference median is ``blurred``. The reference is every
-   held position of this clip (kept or not, so a retake that repeats positions still
-   counts) plus every view the run already kept. A first clip needs 3 held positions
-   before the rule applies (fewer is no distribution); a retake always has the run's
-   views, so a short retake that is blurred throughout is still caught. Sharpness is
-   the variance of the Laplacian inside the board's box on the half-size image; a far
-   board has denser edges and so scores higher, which multiplying by the board's
-   apparent size roughly offsets.
+   is under ``blur_ratio`` x the reference's ``BLUR_REFERENCE_PERCENTILE`` (90th
+   percentile) is ``blurred``. The reference is every held position of this clip (kept
+   or not, so a retake that repeats positions still counts) plus every view the run
+   already kept. A first clip needs 3 held positions before the rule applies (fewer is
+   no distribution); a retake always has the run's views, so a short retake that is
+   blurred throughout is still caught. Sharpness is the variance of the Laplacian
+   inside the board's box on the half-size image; a far board has denser edges and so
+   scores higher, which multiplying by the board's apparent size roughly offsets.
+   A high percentile, not the median, so the rule still works when most held positions
+   are blurred (a clip recorded before the fast-shutter QR code was scanned): it holds
+   while about one held position in ten is sharp. Measured on synthetic clips
+   (2026-09-30): sharp holds scored at least 0.67x the 90th percentile at every
+   distance, blurred ones (Gaussian sigma 1.3) at most 0.24x. Real HERO13 footage,
+   whose fisheye edges are softer, has not been measured yet.
 6. **Cap**: past ``max_views`` views in the run, a view that completes a guide
    checkpoint the run is still missing is always kept (the sharpest one per
    checkpoint, so a retake can always fix a RETAKE; the run may then pass the cap by
@@ -60,7 +66,7 @@ import numpy as np
 from . import presets
 from .boards import detector_params, resolve_dictionary
 from .capture import _discarded_points, _read_exact, default_runs_dir
-from .clipcheck import check_clip, fallback_check
+from .clipcheck import check_clip, fallback_check, ffmpeg_error_line
 from .coverage import PoseParams, coverage_summary, pose_distance
 from .detection import MarkerDetection, detect_markers, draw_detection, marker_motion
 from .guide import default_checkpoints, guide_status, pose_matches_checkpoint
@@ -72,16 +78,30 @@ DROP_REASONS = ("no_board", "blurred", "moving", "duplicate", "over_cap")
 # The live motion gate is per frame at about this rate and width (see module docstring).
 MOTION_REFERENCE_HZ = 30.0
 MOTION_REFERENCE_WIDTH = 1920.0
+# The clip-level blur rule judges against this percentile of the reference scores.
+BLUR_REFERENCE_PERCENTILE = 90.0
 BUSY_STATES = ("uploading", "analysing", "solving")
 BUSY_MESSAGE = "A clip is still being processed; wait for it to finish."
 # A clip name's stem is kept under this many UTF-8 bytes (file names max out at 255).
 MAX_NAME_STEM_BYTES = 200
 MAX_NAME_SUFFIX_BYTES = 16
 DEFAULT_CAMERA_NAME = CameraConfig().camera_name
+NOT_USED = "The clip was not used and was removed from this run's folder."
+NO_RECORDING_SETTINGS = (
+    "This preset has no settings for recording on the camera. Pick a HERO13 lens-mod "
+    "preset for the From a recording route."
+)
 
 
 class RecordingError(RuntimeError):
     pass
+
+
+def join_names(names: list[str]) -> str:
+    """"A", "A and B", "A, B and C"."""
+    if len(names) <= 1:
+        return "".join(names)
+    return f"{', '.join(names[:-1])} and {names[-1]}"
 
 
 def empty_counts() -> dict[str, int]:
@@ -217,8 +237,8 @@ class _Selector:
         staged = sorted(self.staged, key=lambda s: s.sample.index)
         reference = self.prior_scores + self.winner_scores
         if self.prior_scores or len(self.winner_scores) >= 3:
-            median = float(np.median(reference))
-            sharp = [s for s in staged if s.sample.weighted >= self.rec.blur_ratio * median]
+            top = float(np.percentile(reference, BLUR_REFERENCE_PERCENTILE))
+            sharp = [s for s in staged if s.sample.weighted >= self.rec.blur_ratio * top]
             for s in staged:
                 if s not in sharp:
                     s.path.unlink(missing_ok=True)
@@ -283,9 +303,7 @@ def _frame_size(probe: dict[str, Any]) -> tuple[int, int]:
     width, height = int(probe.get("width") or 0), int(probe.get("height") or 0)
     if width <= 0 or height <= 0:
         raise RecordingError(probe.get("error") or "Could not read the video size.")
-    # ffmpeg applies the rotation stored in the file, so the frames come out turned.
-    if abs(int(probe.get("rotation") or 0)) % 180 == 90:
-        width, height = height, width
+    # Frames are read as stored (-noautorotate): a rotation flag does not turn them.
     return width, height
 
 
@@ -362,7 +380,8 @@ def _extract_into(
     nbytes = width * height
 
     command = [
-        ffmpeg, "-v", "error", "-nostdin", "-i", str(clip),
+        # -noautorotate: calibrate the pixels as stored; the clip check flags a rotation.
+        ffmpeg, "-v", "error", "-nostdin", "-noautorotate", "-i", str(clip),
         "-map", "0:v:0", "-an", "-sn", "-dn",
         "-vf", f"fps={rec.sample_hz:g}", "-f", "rawvideo", "-pix_fmt", "gray", "-",
     ]
@@ -417,10 +436,9 @@ def _extract_into(
                 proc.wait()
         if proc.returncode not in (0, None) and selector.counts["samples"] == 0:
             stderr.seek(0)
-            tail = stderr.read().decode(errors="replace").strip().splitlines()
+            detail = ffmpeg_error_line(stderr.read().decode(errors="replace"), clip)
             raise RecordingError(
-                "ffmpeg could not decode this clip"
-                + (f": {tail[-1]}" if tail else ".")
+                "ffmpeg could not decode this clip" + (f": {detail}." if detail else ".")
             )
 
     kept_staged = selector.finish()
@@ -747,6 +765,10 @@ class RecordingJob:
     # -- run lifecycle ---------------------------------------------------
 
     def start(self, config: AppConfig, runs_dir: Path | None = None) -> dict[str, Any]:
+        """Open a run. Raises ``ValueError`` for a preset without a recording section
+        (live route only) and ``RecordingError`` while a clip is being processed."""
+        if config.recording is None:
+            raise ValueError(NO_RECORDING_SETTINGS)
         with self._lock:
             if self.busy:
                 raise RecordingError(BUSY_MESSAGE)
@@ -898,14 +920,54 @@ class RecordingJob:
             return fallback_check(clip, self.rec, exc)
 
     def _process_clip(self, clip: Path, generation: int) -> None:
+        """Check, extract and solve. A clip the run cannot use (another camera, not a
+        video, a different size, or reading it failed) never joins the run: its file is
+        deleted and it shows as ``refused_clip``, so it cannot feed the mismatch
+        warnings, the summary or config.json."""
         rec = self.rec
         run_serial = self._run_serial()
         check = self._check(clip, run_serial)
         serial = check["metadata"].get("serial")
         if run_serial and serial and serial != run_serial:
-            self._refuse(clip, serial, run_serial, check, generation)
+            self._refuse(
+                clip, check, generation, reason="other_camera", serial=serial,
+                run_serial=run_serial,
+                message=(
+                    f"{clip.name} is from another camera (serial {serial}); this run is for "
+                    f"the camera with serial {run_serial}. {NOT_USED} Press Next camera and "
+                    "start a new run for it."
+                ),
+            )
             return
-        self._refused = None
+        size = None
+        if "error" not in check["probe"]:
+            try:
+                size = _frame_size(check["probe"])
+            except RecordingError:
+                size = None
+        if size is None:
+            detail = check["probe"].get("error") or "no picture size in the file"
+            self._refuse(
+                clip, check, generation, reason="unreadable",
+                message=(
+                    f"{clip.name} is not a video ffmpeg can read ({detail}). {NOT_USED} "
+                    "Drop the original file from the camera's card."
+                ),
+            )
+            return
+        if self._image_size is not None and size != self._image_size:
+            self._refuse(
+                clip, check, generation, reason="different_size",
+                message=(
+                    f"{clip.name} is {size[0]}x{size[1]} but this run's first clip was "
+                    f"{self._image_size[0]}x{self._image_size[1]}. {NOT_USED} Record every "
+                    "clip of one run in the same mode, or start a new run for this one."
+                ),
+            )
+            return
+        if self.output_dir is None:
+            raise RecordingError("This run has no folder any more; start a new run.")
+
         entry: dict[str, Any] = {
             "name": clip.name,
             "size_bytes": clip.stat().st_size,
@@ -915,41 +977,44 @@ class RecordingJob:
             "metadata": {k: v for k, v in check["metadata"].items() if k != "tags"},
             "counts": None,
         }
-        self._clips.append(entry)
-        clip = self._maybe_name_from_serial(clip, serial, generation)
-        self._publish(generation)
-        if "error" in check["probe"]:
-            raise RecordingError(f"Could not read {clip.name}: {check['probe']['error']}")
-
-        if self.output_dir is None:
-            raise RecordingError("This run has no folder any more; start a new run.")
-        size = _frame_size(check["probe"])
-        if self._image_size is not None and size != self._image_size:
-            raise RecordingError(
-                f"{clip.name} is {size[0]}x{size[1]} but this run's first clip was "
-                f"{self._image_size[0]}x{self._image_size[1]}. Record every clip of one run "
-                "in the same mode, or start a new run for this one."
-            )
-        self._set(
+        with self._lock:
+            self._refused = None
+            self._clips.append(entry)
+        self._publish(
             generation, stage="extract", progress=0.0, message=f"Picking views from {clip.name}."
         )
-        result = extract_views(
-            clip,
-            config=self.config,
-            rec=rec,
-            probe=check["probe"],
-            frames_dir=self.output_dir / "frames",
-            overlays_dir=self.output_dir / "overlays",
-            prior_poses=self._poses,
-            prior_scores=[view["weighted"] for view in self._kept],
-            progress=lambda fraction: self._set(generation, progress=round(fraction, 4)),
-        )
-        self._image_size = tuple(result.image_size)
-        entry["counts"] = result.counts
-        entry["kept"] = [view["name"] for view in result.kept]
-        entry["motion_limit_px"] = round(result.motion_limit_px, 3)
-        self._poses.extend(result.poses)
-        self._kept.extend(result.kept)
+        try:
+            result = extract_views(
+                clip,
+                config=self.config,
+                rec=rec,
+                probe=check["probe"],
+                frames_dir=self.output_dir / "frames",
+                overlays_dir=self.output_dir / "overlays",
+                prior_poses=self._poses,
+                prior_scores=[view["weighted"] for view in self._kept],
+                progress=lambda fraction: self._set(generation, progress=round(fraction, 4)),
+            )
+        except Exception as exc:  # noqa: BLE001 - the clip leaves the run, then the job ends
+            with self._lock:
+                self._clips.remove(entry)
+            reason = str(exc) or f"{type(exc).__name__} while reading {clip.name}."
+            self._refuse(
+                clip, check, generation, reason="failed",
+                message=f"Could not pick views from {clip.name}: {reason.rstrip('.')}. "
+                f"{NOT_USED} Drop the clip again.",
+            )
+            return
+        with self._lock:
+            entry["counts"] = result.counts
+            entry["kept"] = [view["name"] for view in result.kept]
+            entry["motion_limit_px"] = round(result.motion_limit_px, 3)
+            self._image_size = tuple(result.image_size)
+        # Named after the camera only once the clip is in the run (frames move with it).
+        self._maybe_name_from_serial(serial, generation)
+        with self._lock:
+            self._poses.extend(result.poses)
+            self._kept.extend(result.kept)
         self._write_run_config()
         self._publish(generation)
         self._solve(generation)
@@ -957,29 +1022,29 @@ class RecordingJob:
     def _refuse(
         self,
         clip: Path,
-        serial: str,
-        run_serial: str,
         check: dict[str, Any],
         generation: int,
+        *,
+        reason: str,
+        message: str,
+        serial: str | None = None,
+        run_serial: str | None = None,
     ) -> None:
-        """A clip from another camera never joins this run: one run is one camera."""
+        """A clip the run cannot use never joins it: one run is one camera in one mode.
+        The run's earlier clips, views and results stay in the status."""
         clip.unlink(missing_ok=True)
-        message = (
-            f"{clip.name} is from another camera (serial {serial}); this run is for the "
-            f"camera with serial {run_serial}. The clip was not used and was removed from "
-            "this run's folder. Press Next camera and start a new run for it."
-        )
-        self._refused = {
-            "name": clip.name,
-            "serial": serial,
-            "run_serial": run_serial,
-            "check": check["check"],
-            "message": message,
-        }
-        # The run's earlier results stay in the status.
+        with self._lock:
+            self._refused = {
+                "name": clip.name,
+                "reason": reason,
+                "serial": serial,
+                "run_serial": run_serial,
+                "check": check["check"],
+                "message": message,
+            }
         self._publish(generation, state="error", stage="check", progress=0.0, message=message)
 
-    def _maybe_name_from_serial(self, clip: Path, serial: str | None, generation: int) -> Path:
+    def _maybe_name_from_serial(self, serial: str | None, generation: int) -> None:
         """Name the run after the camera's serial when the name is still a default."""
         new_name = camera_name_from_serial(serial or "")
         if (
@@ -989,15 +1054,15 @@ class RecordingJob:
             or self.camera_name not in _shipped_camera_names()
             or self.output_dir is None
         ):
-            return clip
+            return
         old_dir = self.output_dir
         new_dir = self.runs_dir / f"{new_name}_{self._timestamp}"
         if new_dir.exists():
-            return clip
+            return
         try:
             old_dir.rename(new_dir)
         except OSError:
-            return clip  # keep the preset's name rather than fail the clip
+            return  # keep the preset's name rather than fail the clip
         with self._lock:
             self.camera_name = new_name
             self.named_from_serial = True
@@ -1005,7 +1070,6 @@ class RecordingJob:
             self.run_id = new_dir.name
         self._write_run_config()
         self._set(generation, message=f"Named this camera {new_name} from its serial number.")
-        return new_dir / "clips" / clip.name
 
     def _solve(self, generation: int) -> None:
         if self.output_dir is None:
@@ -1061,7 +1125,7 @@ class RecordingJob:
         if fields:
             message += (
                 f" {len(fields)} setting{'s differ' if len(fields) != 1 else ' differs'} "
-                f"from the preset in {' and '.join(clips)}: {', '.join(fields).lower()}."
+                f"from the preset in {join_names(clips)}: {', '.join(fields).lower()}."
             )
         # One update, state included: the job stays busy until the run is complete.
         self._publish(

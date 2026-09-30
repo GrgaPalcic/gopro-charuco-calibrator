@@ -8,16 +8,17 @@ from pathlib import Path
 
 import anyio
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import ClientDisconnect
 
 from . import presets
 from .bridge import stop_gopro_video_bridge
 from .capture import CaptureSession, default_runs_dir
 from .gopro import gopro_options_for_ui
 from .labs import labs_payload
-from .models import AppConfig, RecordingConfig, SolveFramesRequest, StartRequest
-from .recording import RecordingError, RecordingJob, recording_guide
+from .models import AppConfig, SolveFramesRequest, StartRequest
+from .recording import NO_RECORDING_SETTINGS, RecordingError, RecordingJob, recording_guide
 from .solver import solve_from_frames
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -314,9 +315,14 @@ class RecordingRequest(StartRequest):
 
 @app.post("/api/recording/start")
 def recording_start(request: StartRequest):
-    """Open a new recording-route run (runs/<camera>_<timestamp>/) for the next clip."""
+    """Open a new recording-route run (runs/<camera>_<timestamp>/) for the next clip.
+
+    400 when the preset has no recording section, 409 while a clip is being processed.
+    """
     try:
         return _recording.start(request.config, request.runs_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RecordingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -358,8 +364,22 @@ async def recording_upload(request: Request, name: str):
                     await stream.write(chunk)
                     received += len(chunk)
                     _recording.upload_progress(received)
-    except BaseException as exc:
-        _recording.upload_failed(path, f"The upload stopped before the end: {exc}")
+    except ClientDisconnect:
+        # The browser went away (tab closed, network): nobody reads this response.
+        message = "The upload stopped before the end. Drop the clip again."
+        _recording.upload_failed(path, message)
+        return JSONResponse(status_code=400, content={"detail": message})
+    except OSError as exc:
+        message = (
+            "Could not save the clip on this computer"
+            + (f" ({exc.strerror})" if exc.strerror else "")
+            + ". Free some disk space and drop the clip again."
+        )
+        _recording.upload_failed(path, message)
+        return JSONResponse(status_code=500, content={"detail": message})
+    except BaseException:
+        # Cancelled (server shutting down): clean up and let the cancellation through.
+        _recording.upload_failed(path, "The upload stopped before the end. Drop the clip again.")
         raise
     if received == 0:
         _recording.upload_failed(path, "The file was empty.")
@@ -372,15 +392,30 @@ async def recording_upload(request: Request, name: str):
 
 @app.get("/api/recording/guide")
 def recording_guide_endpoint():
-    """The route's checkpoints in order, with plain words for the recording animation."""
+    """The current recording run's checkpoints, with plain words for the animation.
+
+    Before a run is started this falls back to the live session's config; to draw the
+    guide for the preset picked in the UI before starting, POST that config instead.
+    """
     config = _recording.config if _recording.output_dir is not None else _session.config
     return recording_guide(config)
 
 
+@app.post("/api/recording/guide")
+def recording_guide_for_config(request: StartRequest):
+    """The checkpoints for a given config (its coverage_targets), no run needed."""
+    return recording_guide(request.config)
+
+
 @app.post("/api/recording/labs")
 def recording_labs(request: StartRequest):
-    """The GoPro Labs QR codes (calibration clip, then dataset) and the settings checklist."""
-    rec = request.config.recording or RecordingConfig()
+    """The GoPro Labs QR codes (calibration clip, then dataset) and the settings checklist.
+
+    400 when the preset has no recording section (it only supports the live route).
+    """
+    rec = request.config.recording
+    if rec is None:
+        raise HTTPException(status_code=400, detail=NO_RECORDING_SETTINGS)
     try:
         return labs_payload(rec)
     except ValueError as exc:

@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import anyio
 import cv2
 import numpy as np
 import pytest
@@ -18,7 +19,12 @@ from fastapi.testclient import TestClient
 
 from gopro_charuco_calibrator import app as app_module
 from gopro_charuco_calibrator import presets, recording
-from gopro_charuco_calibrator.clipcheck import check_clip, compare, probe_video
+from gopro_charuco_calibrator.clipcheck import (
+    check_clip,
+    compare,
+    ffmpeg_error_line,
+    probe_video,
+)
 from gopro_charuco_calibrator.coverage import PoseParams
 from gopro_charuco_calibrator.gopro import camera_state_warnings
 from gopro_charuco_calibrator.guide import default_checkpoints
@@ -34,11 +40,13 @@ from gopro_charuco_calibrator.openicc import DEFAULT_DOCKER_IMAGE, orbslam3_kb8_
 from gopro_charuco_calibrator.recording import (
     RecordingError,
     RecordingJob,
+    _frame_size,
     _Sample,
     _Selector,
     _Staged,
     camera_name_from_serial,
     extract_views,
+    join_names,
     motion_limit_px,
     recording_guide,
     sanitise_clip_name,
@@ -56,6 +64,13 @@ def test_recording_config_defaults_are_the_dataset_mode():
     assert rec.labs_lens_mod_code == "oX2"
     assert RecordingConfig(lens_mod="AEWAL-001").labs_lens_mod_code == "oX10"
     assert (rec.orbslam3_width, rec.orbslam3_height) == (960, 720)
+
+
+def test_recording_config_lens_is_the_one_with_a_labs_code():
+    # fX (the only lens code) is Max SuperView / Ultra Wide: another lens would put a
+    # QR code for one lens next to a checklist line for another.
+    with pytest.raises(ValueError):
+        RecordingConfig(lens="Linear")
 
 
 def test_recording_config_rejects_a_shutter_that_does_not_match_the_angle():
@@ -165,6 +180,18 @@ def test_labs_endpoint():
     assert body["calibration"]["code"] == "mVr4Tp60e0!NoX10fXti16S45"
     assert body["calibration"]["png"].startswith("data:image/png;base64,")
     assert body["checklist"][0]["setting"] == "Lens mod"
+
+
+def test_labs_and_start_refuse_a_preset_without_recording_settings(tmp_path, fresh_job):
+    client = TestClient(app_module.app)
+    _, live_only = presets.get_preset("gopro11_wide_1080p")
+    assert live_only.recording is None
+    body = {"config": live_only.model_dump(), "runs_dir": str(tmp_path / "runs")}
+    for endpoint in ("/api/recording/labs", "/api/recording/start"):
+        response = client.post(endpoint, json=body)
+        assert response.status_code == 400, endpoint
+        assert "no settings for recording" in response.json()["detail"]
+    assert not (tmp_path / "runs").exists() and fresh_job.run_id is None
 
 
 # --- ORB-SLAM3 block size -----------------------------------------------------
@@ -285,6 +312,25 @@ def test_clip_check_flags_a_clip_from_another_camera():
     assert rows["serial"]["expected"] == "C350999"
 
 
+def test_clip_check_flags_a_rotation_flag():
+    assert _rows({**GOOD_PROBE, "rotation": 0}, GOOD_META)["rotation"]["status"] == "ok"
+    row = _rows({**GOOD_PROBE, "rotation": -180}, GOOD_META)["rotation"]
+    assert row["status"] == "mismatch" and row["found"] == "turn by 180°"
+    assert "original file" in row["advice"]
+    # Frames are read as stored, so the size is never swapped for a 90 degree flag.
+    assert _frame_size({"width": 1600, "height": 1200, "rotation": 90}) == (1600, 1200)
+
+
+def test_ffmpeg_error_lines_leave_the_folder_out(tmp_path):
+    path = tmp_path / "runs" / "cam_1" / "clips" / "junk.mp4"
+    line = ffmpeg_error_line(f"noise\n{path}: Invalid data found when processing input\n", path)
+    assert line == "Invalid data found when processing input"
+    assert ffmpeg_error_line(f"[mov] moov atom not found in {path}", path) == (
+        "[mov] moov atom not found in junk.mp4"
+    )
+    assert ffmpeg_error_line("", path) is None
+
+
 def test_clip_check_model_from_a_generic_device_name():
     # gpmf gives DVNM "Camera" no model; a missing model is unknown, never a mismatch.
     rows = _rows(GOOD_PROBE, {**GOOD_META, "model": None})
@@ -325,7 +371,18 @@ def test_recording_guide_has_the_23_checkpoints_with_words():
     assert client.get("/api/recording/guide").json()["total"] == 23
 
 
+def test_recording_guide_for_a_config_before_a_run(fresh_job):
+    client = TestClient(app_module.app)
+    config = AppConfig(recording=RecordingConfig())
+    config.coverage_targets.size_max = 0.45  # the near checkpoints follow it
+    guide = client.post("/api/recording/guide", json={"config": config.model_dump()}).json()
+    assert guide["total"] == 23
+    assert guide == recording_guide(config) != recording_guide(AppConfig())
+
+
 def test_names_and_limits():
+    assert join_names(["A"]) == "A" and join_names(["A", "B"]) == "A and B"
+    assert join_names(["A", "B", "C"]) == "A, B and C"
     assert sanitise_clip_name("../../etc/GX010001.MP4") == "GX010001.MP4"
     assert sanitise_clip_name("my clip (1).mp4") == "my_clip__1_.mp4"
     assert sanitise_clip_name("") == "clip.mp4"
@@ -423,6 +480,44 @@ def test_a_short_blurred_retake_keeps_nothing(synthetic_clip, tmp_path):
     kept = _extract(sharp, tmp_path / "run", prior=first.poses, prior_scores=prior_scores)
     assert kept.counts["kept"] == 2
     assert kept.kept[0]["name"] == f"capture_{len(first.kept) + 1:03d}.jpg"
+
+
+@needs_ffmpeg
+def test_most_holds_blurred_still_keeps_only_the_sharp_ones(tmp_path):
+    # A clip recorded before the fast-shutter QR code: 3 sharp far holds, 4 near holds
+    # blurred throughout. A median reference would be a blurred score and keep them all.
+    far = [(0.35, 0.35, 0.65), (0.65, 0.35, 0.65), (0.65, 0.65, 0.65)]
+    near = [(0.3, 0.5, 0.28), (0.7, 0.5, 0.28), (0.5, 0.35, 0.28), (0.5, 0.65, 0.28)]
+    poses = [(*p, (0.0, 0.0, 0.0), "sharp") for p in far]
+    poses += [(*p, (0.0, 0.0, 0.0), "blurred") for p in near]
+    clip = build_clip(tmp_path / "mostly_blurred.mp4", poses=poses)
+    result = _extract(clip, tmp_path / "run")
+    kinds = [clip.label_at(view["time_s"]) for view in result.kept]
+    assert sorted(kinds) == [("sharp", 0), ("sharp", 1), ("sharp", 2)], kinds
+    assert result.counts["blurred"] >= 4
+
+
+@needs_ffmpeg
+def test_a_rotation_flag_does_not_turn_the_frames(synthetic_clip, tmp_path):
+    turned = tmp_path / "turned.mp4"
+    remux = subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-display_rotation", "90", "-i",
+         str(synthetic_clip.path), "-c", "copy", str(turned)],
+        capture_output=True,
+    )
+    if remux.returncode != 0:
+        pytest.skip("this ffmpeg cannot write a rotation flag (-display_rotation)")
+    probe = probe_video(turned)
+    assert abs(probe["rotation"]) == 90
+    rows = {row["field"]: row for row in check_clip(turned, RecordingConfig())["check"]}
+    assert rows["rotation"]["status"] == "mismatch"
+    frames = tmp_path / "run"
+    result = extract_views(
+        turned, config=AppConfig(), rec=RecordingConfig(), probe=probe,
+        frames_dir=frames / "frames", overlays_dir=frames / "overlays",
+    )
+    assert result.image_size == (1600, 1200) and result.counts["kept"] == 15
+    assert cv2.imread(str(frames / "frames" / "capture_001.jpg")).shape[:2] == (1200, 1600)
 
 
 @needs_ffmpeg
@@ -677,6 +772,88 @@ def test_retake_adds_views_and_refuses_another_camera(
     assert [c["name"] for c in refused["clips"]] == ["GX010001.MP4", "GX010002.MP4"]
     assert refused["captures"] == 17 and refused["results"] == status["results"]
     assert not (run_dir / "clips" / "GX010003.MP4").exists()
+
+
+@needs_ffmpeg
+def test_clips_the_run_cannot_use_leave_no_trace(synthetic_clip, fresh_job, tmp_path):
+    """A wrong-size retake and a file that is not a video are refused like a clip from
+    another camera: removed, and never counted in the mismatch warnings."""
+    client = TestClient(app_module.app)
+    # A preset whose recording section matches the synthetic clip: no mismatch at all.
+    rec = RecordingConfig(width=1600, height=1200, fps=24, calibration_shutter="1/192")
+    config = _config().model_copy(update={"recording": rec})
+    started = client.post(
+        "/api/recording/start",
+        json={"config": config.model_dump(), "runs_dir": str(tmp_path / "runs")},
+    ).json()
+    run_dir = Path(started["run_dir"])
+    assert _upload(client, synthetic_clip.path, "GX010001.MP4").status_code == 200
+    first = _poll(client)
+    assert first["state"] == "solved" and first["mismatch_count"] == 0, first["message"]
+
+    small = build_clip(tmp_path / "small.mp4", poses=POSES[:3], size=(1200, 900))
+    assert _upload(client, small.path, "GX010002.MP4").status_code == 200
+    refused = _poll(client)
+    assert refused["state"] == "error" and refused["refused_clip"]["reason"] == "different_size"
+    assert "1200x900" in refused["message"] and "not used" in refused["message"]
+    assert not (run_dir / "clips" / "GX010002.MP4").exists()
+
+    junk = tmp_path / "junk.mp4"
+    junk.write_bytes(b"not a video" * 1000)
+    assert _upload(client, junk, "junk.mp4").status_code == 200
+    refused = _poll(client)
+    assert refused["refused_clip"]["reason"] == "unreadable"
+    assert "junk.mp4 is not a video ffmpeg can read" in refused["message"]
+    assert str(tmp_path) not in refused["message"]  # no folders in what the UI shows
+    assert not (run_dir / "clips" / "junk.mp4").exists()
+    for status in (refused, client.get("/api/recording/status").json()):
+        assert [c["name"] for c in status["clips"]] == ["GX010001.MP4"]
+        assert status["mismatch_count"] == 0 and status["mismatch_clips"] == []
+        assert status["results"] == first["results"] and status["captures"] == 15
+
+    assert _upload(client, synthetic_clip.path, "GX010003.MP4").status_code == 200
+    status = _poll(client)
+    assert status["state"] == "solved" and status["refused_clip"] is None
+    assert status["message"] == "Calibration solved."
+    assert status["mismatch_fields"] == [] and status["mismatch_clips"] == []
+    assert [c["name"] for c in status["clips"]] == ["GX010001.MP4", "GX010003.MP4"]
+    summary = json.loads(Path(status["summary_path"]).read_text())
+    assert [c["name"] for c in summary["recording"]["clips"]] == ["GX010001.MP4", "GX010003.MP4"]
+    assert summary["recording"]["mismatch_fields"] == []
+    saved = json.loads((run_dir / "config.json").read_text())
+    assert saved["clips"] == ["GX010001.MP4", "GX010003.MP4"]
+    assert sorted(p.name for p in (run_dir / "clips").iterdir()) == [
+        "GX010001.MP4", "GX010003.MP4"
+    ]
+
+
+def test_an_upload_the_browser_drops_ends_in_a_plain_error(tmp_path, fresh_job):
+    fresh_job.start(_config(), tmp_path / "runs")
+    messages = iter(
+        [
+            {"type": "http.request", "body": b"x" * 1000, "more_body": True},
+            {"type": "http.disconnect"},
+        ]
+    )
+
+    async def receive():
+        return next(messages)
+
+    scope = {
+        "type": "http",
+        "method": "PUT",
+        "path": "/api/recording/clips",
+        "query_string": b"name=GX010001.MP4",
+        "headers": [(b"content-length", b"10000000")],
+    }
+    request = app_module.Request(scope, receive)
+    response = anyio.run(app_module.recording_upload, request, "GX010001.MP4")
+    assert response.status_code == 400
+    message = "The upload stopped before the end. Drop the clip again."
+    assert json.loads(response.body) == {"detail": message}
+    status = fresh_job.status()
+    assert status["state"] == "error" and status["message"] == message
+    assert list((Path(status["output_dir"]) / "clips").iterdir()) == []
 
 
 @needs_ffmpeg
