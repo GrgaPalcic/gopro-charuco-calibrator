@@ -39,6 +39,10 @@ const steps = {
   connect: document.getElementById("stepConnect"),
   capture: document.getElementById("stepCapture"),
   solve: document.getElementById("stepSolve"),
+  // The From a recording route's steps 2-4 (step 1 is shared).
+  settings: document.getElementById("stepSettings"),
+  record: document.getElementById("stepRecord"),
+  drop: document.getElementById("stepDrop"),
 };
 
 const presetSelect = document.getElementById("presetSelect");
@@ -545,7 +549,8 @@ function missingSentence(failed, camera) {
 
 function fixMissing(f) {
   const rows = f.missing.length === 1 ? "row" : "rows";
-  return `${f.missingText} Fix the reason on the red ${rows}, then Solve again.`;
+  const again = f.route === "recording" ? "drop the clip again to solve again" : "Solve again";
+  return `${f.missingText} Fix the reason on the red ${rows}, then ${again}.`;
 }
 
 function stepStates(f) {
@@ -1000,10 +1005,13 @@ function fileRows(result) {
     rows.push([`${name} JSON`, result.json, "Use this for: tools that read OpenICC's JSON."]);
   }
   if (result.orbslam3_yaml) {
+    // The recording route writes this block at UMI's SLAM size and says so.
+    const size = result.orbslam3_note ? ` ${result.orbslam3_note}` : "";
     rows.push([
       "ORB-SLAM3 camera YAML",
       result.orbslam3_yaml,
-      "Use this for: the camera block of ORB-SLAM3 settings. Merge in the IMU block from your existing settings file.",
+      "Use this for: the camera block of ORB-SLAM3 settings. Merge in the IMU block from your existing settings file."
+        + size,
     ]);
   }
   if (result.yaml) {
@@ -1034,6 +1042,19 @@ function judge(results, coverage) {
 
 let resultsSignature = "";
 
+// The result headline; a clip-check warning (recording route) is repeated in front of it.
+function setHeadline(text, warning = "") {
+  if (!warning) {
+    verdictText.textContent = text;
+    return;
+  }
+  const lead = Object.assign(document.createElement("span"), {
+    className: "verdict-warning",
+    textContent: warning,
+  });
+  verdictText.replaceChildren(lead, document.createTextNode(text));
+}
+
 // `f` is runFacts for the same status, so the headline names the same next
 // action as the amber button.
 function renderResults(modelResults, coverage, mode, f) {
@@ -1045,9 +1066,10 @@ function renderResults(modelResults, coverage, mode, f) {
   resultsPanel.hidden = false;
   // Rebuild only on a change: the status polls every 150 ms, and a rebuilt card
   // would drop a text selection (copying a file path) on every poll.
-  const signature = JSON.stringify(
-    [modelResults, coverage, mode, f.live, f.canResume, f.missingText, f.moreViews, f.solveFirst],
-  );
+  const signature = JSON.stringify([
+    modelResults, coverage, mode, f.live, f.canResume, f.missingText, f.moreViews, f.solveFirst,
+    f.route, f.clipWarning,
+  ]);
   if (signature === resultsSignature) return;
   resultsSignature = signature;
   resultGrid.replaceChildren();
@@ -1069,11 +1091,14 @@ function renderResults(modelResults, coverage, mode, f) {
     }
   };
 
+  const recording = f.route === "recording";
   if (!rec) {
     verdictBox.className = "verdict retake";
     verdictBadge.textContent = "FAILED";
-    verdictText.textContent = "No calibration model solved. The reasons are below.";
-    verdictDetail.textContent = "Fix the first reason, then Solve again.";
+    setHeadline("No calibration model solved. The reasons are below.", f.clipWarning);
+    verdictDetail.textContent = recording
+      ? "Fix the first reason, then drop the clip again to solve again."
+      : "Fix the first reason, then Solve again.";
     failedRows();
     filesTitle.hidden = true;
     return;
@@ -1092,7 +1117,7 @@ function renderResults(modelResults, coverage, mode, f) {
   verdictBadge.textContent = f.incomplete ? "INCOMPLETE" : pass ? "PASS" : "RETAKE";
   const next = f.moreViews
     ? "Solve again to include the views added since this result."
-    : f.live
+    : f.live || recording
       ? "Click Next camera to do another camera."
       : OTHER_CAMERA;
   let headline;
@@ -1102,9 +1127,14 @@ function renderResults(modelResults, coverage, mode, f) {
       : `${modelName(rec.model)} solved but needs a retake, and`;
     headline = `${lead} ${fixMissing(f)}`;
   } else if (pass) {
-    headline = `Calibration passed. The files are listed below. ${next}`;
+    headline = f.clipWarning
+      ? `Calibration passed, but it is only valid for footage recorded exactly like ${f.clipsWord}.`
+      : `Calibration passed. The files are listed below. ${next}`;
   } else if (f.solveFirst) {
-    headline = SOLVE_FIRST;
+    headline = recording ? REC_SOLVE_FIRST : SOLVE_FIRST;
+  } else if (recording) {
+    headline = "Retake: record another clip that covers the missing positions listed above, "
+      + "then click Add another clip.";
   } else if (f.canResume) {
     headline = "Retake: Resume and add the views listed below, then Solve again.";
   } else {
@@ -1113,7 +1143,7 @@ function renderResults(modelResults, coverage, mode, f) {
       ? "Retake: start a new run and add the views listed below."
       : "Retake: Open preview, start a new run and add the views listed below.";
   }
-  verdictText.textContent = headline;
+  setHeadline(headline, f.clipWarning);
   // Say only what was checked: coverage, plus worst view (cv2) or alpha (Double Sphere).
   const checked = isDS
     ? " and alpha is clear of its limit"
@@ -1200,6 +1230,8 @@ function sentence(text) {
 
 function updateStatus(status) {
   lastStatus = status;
+  // The live session keeps its status while the From a recording route is shown.
+  if (calibrationRoute !== "live") return;
   const state = status.state || "idle";
   const captures = status.captures || 0;
   const message = status.message || "";
@@ -1354,6 +1386,8 @@ function updateStatus(status) {
     resultsPanel.hidden = true;
     renderDiagnostics(status, fwCmd);
   }
+  // From a recording cannot be picked while the preview is open.
+  renderRouteChoice();
 }
 
 async function poll() {
@@ -1430,6 +1464,7 @@ function showPresetChoice(name) {
   presetCustom.hidden = Boolean(name); // offered only while it is the truth
   showFullChoice(presetSelect);
   if (lastStatus) updateStatus(lastStatus); // step 1 follows the choice
+  refreshRecordingConfig();
 }
 
 function appliedNote(what) {
@@ -1604,6 +1639,7 @@ for (const name of ["gopro.enabled", "gopro.apply_on_preview"]) {
 form.addEventListener("input", (event) => {
   if (event.target.name?.startsWith("board.")) updateBoardSummary();
   if (event.target.name === "solver.models") showFullChoice(event.target);
+  refreshRecordingConfig();
   // An edit is a choice: custom settings made on purpose finish step 1.
   const firstChoice = !settingsChosen;
   settingsChosen = true;
@@ -1655,6 +1691,1310 @@ function redrawCanvases() {
 new ResizeObserver(redrawCanvases).observe(scatter);
 new ResizeObserver(redrawCanvases).observe(guideOverlay);
 
+// ---- Route: live over USB, or from a recording ----
+
+// The From a recording route: the operator sets the camera (checklist and GoPro Labs
+// QR codes), records a clip on the camera while following an animation of the board
+// positions, then drops the mp4 here. The server's recording job (/api/recording/*)
+// checks the clip, picks the views and solves, independent of the live session.
+
+const appEl = document.getElementById("app");
+const routeRadios = [...document.querySelectorAll('input[name="calibrationRoute"]')];
+const routeLiveOption = document.getElementById("routeLiveOption");
+const routeRecordingOption = document.getElementById("routeRecordingOption");
+const recSettingsBtn = document.getElementById("recSettingsBtn");
+const recShowSettingsBtn = document.getElementById("recShowSettingsBtn");
+const recRecordedBtn = document.getElementById("recRecordedBtn");
+const recShowRecordBtn = document.getElementById("recShowRecordBtn");
+const recChooseBtn = document.getElementById("recChooseBtn");
+const recNextBtn = document.getElementById("recNextBtn");
+const recDropDesc = document.getElementById("recDropDesc");
+const recPrompt = document.getElementById("recPrompt");
+const recBack = document.getElementById("recBack");
+const recBackBtn = document.getElementById("recBackBtn");
+const recPanels = {
+  settings: document.getElementById("recSettingsPanel"),
+  record: document.getElementById("recRecordPanel"),
+  drop: document.getElementById("recDropPanel"),
+};
+const labsError = document.getElementById("labsError");
+const labsBody = document.getElementById("labsBody");
+const qrCalibration = document.getElementById("qrCalibration");
+const qrDataset = document.getElementById("qrDataset");
+const qrCalibrationCode = document.getElementById("qrCalibrationCode");
+const qrDatasetCode = document.getElementById("qrDatasetCode");
+const shutterWarningText = document.getElementById("shutterWarningText");
+const labsUnverified = document.getElementById("labsUnverified");
+const labsUnverifiedList = document.getElementById("labsUnverifiedList");
+const labsChecklist = document.getElementById("labsChecklist");
+const recAnim = document.getElementById("recAnim");
+const animToggle = document.getElementById("animToggle");
+const animCaption = document.getElementById("animCaption");
+const animLegend = document.getElementById("animLegend");
+const animTodo = document.getElementById("animTodo");
+const positionsList = document.getElementById("positionsList");
+const positionsOl = document.getElementById("positionsOl");
+const dropZone = document.getElementById("dropZone");
+const dropZoneTitle = document.getElementById("dropZoneTitle");
+const dropZoneNote = document.getElementById("dropZoneNote");
+const recFile = document.getElementById("recFile");
+const recProgress = document.getElementById("recProgress");
+const recProgressLabel = document.getElementById("recProgressLabel");
+const recProgressPct = document.getElementById("recProgressPct");
+const recProgressBar = document.getElementById("recProgressBar");
+const recProgressFill = document.getElementById("recProgressFill");
+const recProgressNote = document.getElementById("recProgressNote");
+const recAlert = document.getElementById("recAlert");
+const recAlertText = document.getElementById("recAlertText");
+const recSwitchNote = document.getElementById("recSwitchNote");
+const recNotesList = document.getElementById("recNotes");
+const recCamera = document.getElementById("recCamera");
+const recStats = document.getElementById("recStats");
+const recCounts = document.getElementById("recCounts");
+const recMissing = document.getElementById("recMissing");
+const recMissingHead = document.getElementById("recMissingHead");
+const recMissingList = document.getElementById("recMissingList");
+const recMapWrap = document.getElementById("recMapWrap");
+const recMap = document.getElementById("recMap");
+const recMapTodo = document.getElementById("recMapTodo");
+const recClips = document.getElementById("recClips");
+const clipCheck = document.getElementById("clipCheck");
+const clipBanner = document.getElementById("clipBanner");
+const clipUnknown = document.getElementById("clipUnknown");
+const clipUnknownList = document.getElementById("clipUnknownList");
+const clipOther = document.getElementById("clipOther");
+const clipOtherList = document.getElementById("clipOtherList");
+
+const ROUTE_KEY = "gopro-charuco.route";
+const REC_BUSY = new Set(["uploading", "analysing", "solving"]);
+const NO_RECORDING = "This camera setup has no settings for recording on the camera. "
+  + "Pick a HERO13 lens-mod setup in step 1 for the From a recording route.";
+const REC_SOLVE_FIRST = "Retake: the two fisheye solves disagree. Add another clip with views "
+  + "near the edge of the circle; the run is solved again with it.";
+const RECORD_TEXT = "Record 60–90 s. Move slowly and hold each position for about a second. "
+  + "Push the board right to the edges of the frame.";
+// Server messages that only repeat what the page already says.
+const REC_QUIET = new Set([
+  "no recording run yet", "Ready for the clip.", "Ready for the next camera.", "Checking the clip.",
+  "Solving.",
+]);
+const DROP_WORDS = {
+  no_board: "no board found",
+  blurred: "blurred",
+  moving: "moving too fast",
+  duplicate: "too like a view already kept",
+  over_cap: "over the view limit",
+};
+
+// The route is a per-viewer convenience: remembered in this browser only.
+function loadRoute() {
+  try {
+    return localStorage.getItem(ROUTE_KEY) === "recording" ? "recording" : "live";
+  } catch {
+    return "live";
+  }
+}
+
+function saveRoute(value) {
+  try {
+    localStorage.setItem(ROUTE_KEY, value);
+  } catch {
+    // Storage blocked (private window): the choice lasts for this page only.
+  }
+}
+
+let calibrationRoute = loadRoute();
+appEl.dataset.route = calibrationRoute;
+for (const radio of routeRadios) radio.checked = radio.value === calibrationRoute;
+
+let recStatus = null;
+// What the Labs endpoint returned for the recording settings in the form.
+let recLabs = null;
+let recLabsKey = null;
+let recLabsError = "";
+// The 23 guide positions, with plain words for the animation.
+let recGuide = null;
+let recGuideKey = null;
+// The operator's own progress through steps 2 and 3 (the server knows nothing of it).
+const recConfirmed = {settings: false, recorded: false};
+// A finished step the operator asked to see again, or null for the current step.
+let recView = null;
+let recQueue = [];
+// The upload in flight: {name, loaded, total, left}.
+let recUpload = null;
+// A request that failed before the job could say so (start refused, upload cut).
+let recLocalError = "";
+// Files left out of a multi-file drop, and clips refused on the way through a queue.
+let recNotes = [];
+let recPollTimer = null;
+let recConfigTimer = null;
+
+function recordingConfig() {
+  return readForm().recording || null;
+}
+
+function humanBytes(bytes) {
+  if (bytes == null) return "";
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1e3))} kB`;
+}
+
+function plural(n, word, many = `${word}s`) {
+  return `${n} ${n === 1 ? word : many}`;
+}
+
+// ---- Clip check ----
+
+// "Frame rate is 30 fps, expected 60 fps" for every mismatch, over every clip.
+function mismatchItems(status) {
+  const clips = status.clips || [];
+  const several = clips.length > 1;
+  const items = [];
+  for (const clip of clips) {
+    for (const row of clip.check || []) {
+      if (row.status !== "mismatch") continue;
+      const where = several ? `in ${clip.name}, ` : "";
+      const text = row.field === "complete"
+        ? `only ${row.found} of ${row.expected} could be read (copy the file from the card again)`
+        : `${row.label} is ${row.found ?? "missing"}, expected ${row.expected ?? "nothing"}`;
+      items.push(where + text);
+    }
+  }
+  return items;
+}
+
+// The loud warning, and the first sentence of it that the result headline repeats.
+function clipWarning(status) {
+  const items = mismatchItems(status);
+  if (!items.length) return null;
+  const clips = status.clips || [];
+  const one = clips.length <= 1;
+  const lead = one
+    ? "This clip was not recorded with the preset's settings"
+    : "Not every clip was recorded with the preset's settings";
+  const first = `${lead}: ${items.join("; ")}.`;
+  const rest = `Check every setting on the camera again, and record the clip again if any differ. `
+    + `The calibration below is only valid for footage recorded exactly like ${one ? "this clip" : "these clips"}.`;
+  return {first, rest, clipsWord: one ? "this clip" : "these clips"};
+}
+
+// The check's own advice, once each: what the file could not confirm, and the other
+// notes on rows that passed (a short clip).
+function clipAdvice(status) {
+  const seen = new Set();
+  const unknown = [];
+  const other = [];
+  for (const clip of status.clips || []) {
+    for (const row of clip.check || []) {
+      if (row.status === "mismatch" || !row.advice || seen.has(row.advice)) continue;
+      seen.add(row.advice);
+      (row.status === "unknown" ? unknown : other).push(row.advice);
+    }
+  }
+  return {unknown, other};
+}
+
+// ---- Facts, steps and buttons ----
+
+function recFacts(status) {
+  const s = status || {};
+  const state = s.state || "idle";
+  const busy = Boolean(recUpload) || REC_BUSY.has(state);
+  const clips = s.clips || [];
+  const hasRun = Boolean(s.run_id);
+  // While a retake is picked and solved, the result on screen no longer applies.
+  const results = busy ? [] : s.results || [];
+  const verdict = judge(results, s.coverage);
+  const solved = verdict.rec !== null;
+  const failedOpenicc = solved ? verdict.failed.filter((r) => OPENICC_MODELS.has(r.model)) : [];
+  const supported = Boolean(recordingConfig());
+  const started = hasRun || busy || clips.length > 0;
+  const setupChosen = Boolean(presetChoice) || settingsChosen;
+  const settingsDone = started || recConfirmed.settings;
+  const recordedDone = started || recConfirmed.recorded;
+  let step = "drop";
+  if (!supported) step = "setup";
+  else if (!settingsDone) step = "settings";
+  else if (!recordedDone) step = "record";
+  const warning = busy ? null : clipWarning(s);
+  const f = {
+    route: "recording",
+    state, busy, clips, hasRun, started, supported, setupChosen, step,
+    results,
+    hasResults: results.length > 0,
+    solved,
+    pass: verdict.pass,
+    live: false,
+    canResume: false,
+    moreViews: false,
+    missing: failedOpenicc,
+    incomplete: failedOpenicc.length > 0,
+    missingText: failedOpenicc.length ? missingSentence(failedOpenicc, cameraOf(s)) : "",
+    solveFirst: solved && !verdict.pass && verdict.reasons.length > 0
+      && verdict.reasons.every((reason) => reason.startsWith(DISAGREE)),
+    clipWarning: warning ? warning.first : "",
+    clipsWord: warning ? warning.clipsWord : "this clip",
+    warning,
+    refused: s.refused_clip || null,
+    needsMore: Boolean(s.needs_more_views),
+    error: recLocalError || (state === "error" ? s.message || "" : ""),
+  };
+  // The result on show passed. A clip refused after it (or a failed retake) leaves it
+  // standing, so Next camera stays the next action; the step is done only without one.
+  f.passed = f.solved && f.pass && !f.incomplete && !busy;
+  f.done = f.passed && !f.refused && !f.error;
+  return f;
+}
+
+function recStepStates(f) {
+  const setup = !f.supported || (!f.setupChosen && !f.started) ? "current" : "done";
+  if (setup === "current") return {setup, settings: "pending", record: "pending", drop: "pending"};
+  const order = ["settings", "record", "drop"];
+  const at = order.indexOf(f.step);
+  const states = {setup};
+  order.forEach((name, i) => {
+    states[name] = i < at ? "done" : i === at ? "current" : "pending";
+  });
+  if (f.done) states.drop = "done";
+  return states;
+}
+
+// The one obvious next action, or null while a clip is being copied or processed.
+function recPrimary(f, states) {
+  if (states.setup === "current") return null;
+  if (f.step === "settings") return recSettingsBtn;
+  if (f.step === "record") return recRecordedBtn;
+  if (f.busy) return null;
+  if (f.passed) return recNextBtn;
+  return recChooseBtn;
+}
+
+// The panel on show: the current step, or a finished one the operator went back to.
+function currentRecView(f) {
+  const step = f.step === "setup" ? "settings" : f.step;
+  return recView || step;
+}
+
+function recStatusLine(f, s) {
+  if (!f.supported) return ["Pick a camera setup for recording in step 1.", ""];
+  const message = s.message || "";
+  const detail = REC_QUIET.has(message) ? "" : message;
+  if (recUpload) {
+    const pct = recUpload.total ? ` ${percent(recUpload.loaded / recUpload.total)}` : "";
+    const left = recUpload.left ? `${plural(recUpload.left, "more clip")} after this one.` : "";
+    return [`Copying ${recUpload.name} into the run folder:${pct}.`, left];
+  }
+  // A refused clip's reason is in the red box of the drop step, in full.
+  if (f.refused) return ["Problem: the last clip was not used.", ""];
+  if (f.error) return [`Problem: ${sentence(f.error)}`, ""];
+  switch (f.state) {
+    case "uploading": return [`Copying ${s.upload?.name || "the clip"} into the run folder.`, ""];
+    case "analysing":
+      // The job's own "Picking views from X." only repeats this line; a camera-switch
+      // note in front of it does not.
+      return s.stage === "extract"
+        ? [`Picking views from the clip: ${percent(s.progress)}.`,
+          detail.startsWith("Picking views") ? "" : detail]
+        : ["Checking the clip…", detail];
+    case "solving": return ["Solving… this can take a minute.", ""];
+    case "solved": {
+      let main = "Calibration done.";
+      if (!f.solved) main = "The solve failed: no model solved.";
+      else if (f.incomplete) main = `Calibration incomplete: ${listText(f.missing.map((r) => modelName(r.model)))} did not solve.`;
+      else if (f.warning) main = "Calibration done, but the clip was not recorded with the preset's settings.";
+      else if (!f.pass) main = "Calibration done, but it needs a retake.";
+      return [main, detail];
+    }
+    default:
+      if (f.step === "settings") return ["Set the camera up for the calibration clip.", ""];
+      if (f.step === "record") return ["Record the calibration clip on the camera.", ""];
+      return ["Ready for the clip.", detail];
+  }
+}
+
+// The guide positions the kept views do not cover yet, in route order.
+function missingPositions(s) {
+  const points = s.guide?.checkpoints || [];
+  const words = recGuide?.checkpoints || [];
+  const missing = [];
+  points.forEach((point, index) => {
+    if (!point.complete) {
+      missing.push({number: index + 1, caption: words[index]?.caption || point.label});
+    }
+  });
+  return missing;
+}
+
+function recPromptText(f, s) {
+  if (!f.supported) {
+    return "Pick a HERO13 lens-mod camera setup in step 1 (Max Lens Mod 2.0 or Ultra Wide Lens "
+      + "Mod), or choose Live over USB.";
+  }
+  const view = currentRecView(f);
+  if (view !== f.step && view === "settings") {
+    return "The settings for this camera, again. Click Back to return to the current step.";
+  }
+  if (view !== f.step && view === "record") {
+    return `${RECORD_TEXT} Click Back to return to the current step.`;
+  }
+  if (f.step === "settings") {
+    return "Scan the first QR code with the camera, then check each setting below on the camera "
+      + "screen. Click I've set the camera when they all match.";
+  }
+  if (f.step === "record") return `${RECORD_TEXT} Then click I've recorded the clip.`;
+  if (f.busy) {
+    if (recUpload) return "Copying the clip. Keep this page open until it is done.";
+    if (f.state === "uploading") return "Copying the clip into the run folder.";
+    return "Working on the clip. A 90 s clip can take a few minutes.";
+  }
+  const missing = missingPositions(s).length;
+  const retake = `Retake: record another clip that covers the ${plural(missing, "missing position")} `
+    + "listed below, then click Add another clip. Its views are added to this run.";
+  const standing = "The calibration below still passes: click Next camera when this camera is done";
+  if (f.refused) {
+    return f.passed
+      ? `That clip was not used; read why below. ${standing}, or add another clip.`
+      : "That clip was not used. Read why below, then add another clip.";
+  }
+  if (f.error && f.passed) {
+    return `The last clip could not be used; the problem is below. ${standing}, or drop the clip again.`;
+  }
+  if (f.needsMore) return retake;
+  if (f.error) {
+    return f.hasRun
+      ? "Fix the problem on the status line, then drop the clip again."
+      : "Fix the problem on the status line, then choose the clip again.";
+  }
+  if (f.hasResults && !f.solved) {
+    return "No model solved. Read the reasons in the result below, then drop the clip again, "
+      + "or add another clip.";
+  }
+  if (f.incomplete) return fixMissing(f);
+  if (f.solveFirst) return REC_SOLVE_FIRST;
+  if (f.solved && !f.pass) return retake;
+  if (f.done) {
+    return f.warning
+      ? "Solved, but the clip check found settings that differ: read the red box below first. "
+        + "Click Next camera when this camera is done."
+      : "Solved. Check the result below, then click Next camera for the next GoPro.";
+  }
+  return "Copy the clip (GX01….MP4) from the camera's card, then drop it below or click Choose clip…";
+}
+
+function renderRecButtons(f, states) {
+  const view = currentRecView(f);
+  const inFlight = f.busy ? "Wait for this clip to finish" : "";
+  // Step 2: confirm, or look at the settings again once past it.
+  recSettingsBtn.hidden = states.settings === "done";
+  recShowSettingsBtn.hidden = states.settings !== "done";
+  setButton(
+    recSettingsBtn, f.step === "settings" && Boolean(recLabs),
+    "Go on to recording the clip",
+    !f.supported ? "Pick a camera setup with recording settings in step 1 first"
+      : recLabsError ? "The settings could not be loaded; see the message below"
+        : "Loading the settings…",
+  );
+  setButton(
+    recShowSettingsBtn, view !== "settings", "Show the checklist and the QR codes again",
+    "The settings are on show below",
+  );
+  recRecordedBtn.hidden = states.record === "done";
+  recShowRecordBtn.hidden = states.record !== "done";
+  setButton(
+    recRecordedBtn, f.step === "record", "Go on to dropping the clip",
+    f.supported ? "Set up the camera first (step 2)" : "Pick a camera setup with recording settings in step 1 first",
+  );
+  setButton(
+    recShowRecordBtn, view !== "record", "Show the animation of the board positions again",
+    "The animation is on show below",
+  );
+  recChooseBtn.textContent = f.clips.length ? "Add another clip" : "Choose clip…";
+  let chooseWhy = "Finish the steps before this one first";
+  if (!f.supported) chooseWhy = "Pick a camera setup with recording settings in step 1 first";
+  else if (f.busy) chooseWhy = inFlight;
+  setButton(
+    recChooseBtn, f.step === "drop" && !f.busy,
+    f.clips.length ? "Pick another clip of this camera; its views are added to this run"
+      : "Pick the clip recorded on the camera (.mp4)",
+    chooseWhy,
+  );
+  recNextBtn.hidden = !(f.clips.length || f.solved);
+  setButton(
+    recNextBtn, !f.busy, "End this camera's run and start again at step 2 for the next camera",
+    inFlight,
+  );
+  const primary = recPrimary(f, states);
+  for (const button of [recSettingsBtn, recShowSettingsBtn, recRecordedBtn, recShowRecordBtn, recChooseBtn, recNextBtn]) {
+    button.classList.toggle("btn-primary", button === primary && !button.disabled);
+  }
+  let desc = "Drop the clip here. The app picks the views and solves.";
+  if (f.done) desc = "Done. Next camera starts again at step 2 for the next GoPro.";
+  else if (f.clips.length) desc = "Add another clip of this camera, or click Next camera.";
+  if (recDropDesc.textContent !== desc) recDropDesc.textContent = desc;
+}
+
+// The route choice cannot change while the other route is busy.
+function renderRouteChoice() {
+  const liveOpen = Boolean(lastStatus) && isLive(lastStatus);
+  const recBusy = Boolean(recUpload) || REC_BUSY.has(recStatus?.state);
+  for (const radio of routeRadios) {
+    const other = radio.value !== calibrationRoute;
+    radio.disabled = other && (radio.value === "recording" ? liveOpen : recBusy);
+  }
+  routeRecordingOption.title = liveOpen && calibrationRoute === "live"
+    ? "Stop the live preview first" : "";
+  routeLiveOption.title = recBusy && calibrationRoute === "recording"
+    ? "Wait for the clip to finish" : "";
+}
+
+function renderRecReadout(s) {
+  const chips = [];
+  if (s.camera_name && s.run_id) chips.push(chip(s.camera_name, {key: "Camera"}));
+  if (s.serial) chips.push(chip(s.serial, {key: "Serial"}));
+  const model = (s.clips || []).map((c) => c.metadata?.model).find(Boolean);
+  if (model) chips.push(chip(model, {key: "Model"}));
+  const signature = `rec|${chips.map((el) => el.textContent).join("|")}`;
+  if (cameraReadout.dataset.signature === signature) return;
+  cameraReadout.dataset.signature = signature;
+  cameraReadout.replaceChildren(...chips);
+}
+
+// ---- Settings panel ----
+
+let labsSignature = "";
+
+function renderLabs(f) {
+  const error = !f.supported ? NO_RECORDING : recLabsError;
+  labsError.hidden = !error;
+  labsError.textContent = error;
+  labsBody.hidden = Boolean(error) || !recLabs;
+  if (!recLabs || error) return;
+  const signature = JSON.stringify(recLabs);
+  if (signature === labsSignature) return;
+  labsSignature = signature;
+  qrCalibration.src = recLabs.calibration.png;
+  qrDataset.src = recLabs.dataset.png;
+  qrCalibrationCode.textContent = recLabs.calibration.code;
+  qrDatasetCode.textContent = recLabs.dataset.code;
+  const rec = recordingConfig() || {};
+  const shutter = rec.calibration_shutter || "1/480";
+  shutterWarningText.textContent = `The calibration clip uses a fast shutter (${shutter} s); `
+    + "the dataset is recorded with the shutter on Auto. Before you record the dataset, scan "
+    + "the second QR code, or set Shutter back to Auto in Protune.";
+  // Codes the Labs docs do not confirm for a HERO13, once each; a code only the first
+  // QR carries says so.
+  const dataset = new Set(recLabs.dataset.unverified.map((u) => u.code));
+  const seen = new Set();
+  const items = [];
+  for (const entry of [...recLabs.calibration.unverified, ...recLabs.dataset.unverified]) {
+    if (seen.has(entry.code)) continue;
+    seen.add(entry.code);
+    const li = document.createElement("li");
+    const code = Object.assign(document.createElement("code"), {textContent: entry.code});
+    const only = dataset.has(entry.code) ? "" : " (first code only)";
+    // Most notes start with their own code: show it once, as code.
+    const note = entry.note.startsWith(`${entry.code} `)
+      ? entry.note.slice(entry.code.length) : `: ${entry.note}`;
+    li.append(code, document.createTextNode(`${only}${note}`));
+    items.push(li);
+  }
+  labsUnverifiedList.replaceChildren(...items);
+  labsUnverified.hidden = items.length === 0;
+  labsChecklist.replaceChildren(...recLabs.checklist.map((row) => {
+    const tr = document.createElement("tr");
+    for (const text of [row.setting, row.value, row.how]) {
+      tr.append(Object.assign(document.createElement("td"), {textContent: text}));
+    }
+    return tr;
+  }));
+}
+
+// Fetch the QR codes and the guide for the settings in the form, when they change.
+function refreshRecordingConfig() {
+  clearTimeout(recConfigTimer);
+  recConfigTimer = setTimeout(loadRecordingConfig, 150);
+}
+
+async function loadRecordingConfig() {
+  if (!defaults || calibrationRoute !== "recording") return;
+  const config = readForm();
+  const labsKey = stableJson(config.recording || null);
+  if (labsKey !== recLabsKey) {
+    recLabsKey = labsKey;
+    recLabs = null;
+    recLabsError = "";
+    if (config.recording) {
+      try {
+        const labs = await api("/api/recording/labs", {method: "POST", body: JSON.stringify({config})});
+        if (labsKey === recLabsKey) recLabs = labs;
+      } catch (err) {
+        if (labsKey === recLabsKey) recLabsError = `Could not make the QR codes: ${err.message || err}`;
+      }
+    }
+  }
+  const guideKey = stableJson(config.coverage_targets || null);
+  if (guideKey !== recGuideKey) {
+    recGuideKey = guideKey;
+    try {
+      const guide = await api("/api/recording/guide", {method: "POST", body: JSON.stringify({config})});
+      if (guideKey === recGuideKey) {
+        recGuide = guide;
+        positionsOl.replaceChildren(...guide.checkpoints.map((cp) =>
+          Object.assign(document.createElement("li"), {textContent: cp.caption})));
+      }
+    } catch {
+      recGuide = null; // the animation says it has nothing to show
+    }
+  }
+  renderRecording();
+}
+
+// ---- Animation: the camera's-eye view of the board positions ----
+
+const ANIM_MOVE_MS = 1100;
+const ANIM_HOLD_MS = 900;
+const ANIM_STEP_MS = ANIM_MOVE_MS + ANIM_HOLD_MS;
+const anim = {playing: true, t: 0, last: 0, raf: 0};
+const reducedMotion = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
+
+function prefersReducedMotion() {
+  return Boolean(reducedMotion?.matches);
+}
+
+function ease(u) {
+  return u < 0.5 ? 4 * u * u * u : 1 - ((-2 * u + 2) ** 3) / 2;
+}
+
+// A tilted position turns the board about both axes, so it reads as a trapezoid.
+function boardPose(cp) {
+  const tilt = cp.tilted ? 1 : 0;
+  return {
+    x: cp.x,
+    y: cp.y,
+    size: cp.size,
+    yaw: tilt * (cp.x < 0.5 ? 0.75 : -0.75),
+    pitch: tilt * (cp.y < 0.5 ? -0.55 : 0.55),
+  };
+}
+
+function animAt(t) {
+  const cps = recGuide?.checkpoints || [];
+  const n = cps.length;
+  const total = n * ANIM_STEP_MS;
+  const time = ((t % total) + total) % total;
+  const index = Math.floor(time / ANIM_STEP_MS);
+  const into = time - index * ANIM_STEP_MS;
+  const from = boardPose(cps[(index - 1 + n) % n]);
+  const to = boardPose(cps[index]);
+  const u = into < ANIM_MOVE_MS ? ease(into / ANIM_MOVE_MS) : 1;
+  const mix = (key) => from[key] + (to[key] - from[key]) * u;
+  return {
+    index,
+    holding: into >= ANIM_MOVE_MS,
+    pose: {x: mix("x"), y: mix("y"), size: mix("size"), yaw: mix("yaw"), pitch: mix("pitch")},
+  };
+}
+
+function boardShape() {
+  const cols = Number(form.elements["board.cols"]?.value) || 11;
+  const rows = Number(form.elements["board.rows"]?.value) || 8;
+  return {cols, rows};
+}
+
+// Board point (u, v in 0..1) -> canvas point, for a board whose bounding box is `size`
+// (sqrt of its width x height fraction of the frame, as coverage.py measures it).
+function boardProjector(pose, frame, shape) {
+  const aspect = shape.cols / shape.rows;
+  const area = pose.size * pose.size * frame.w * frame.h;
+  const h = Math.sqrt(area / aspect);
+  const w = h * aspect;
+  const focal = 2.2 * Math.max(w, h);
+  const cy = Math.cos(pose.yaw);
+  const sy = Math.sin(pose.yaw);
+  const cp = Math.cos(pose.pitch);
+  const sp = Math.sin(pose.pitch);
+  return (u, v) => {
+    const x0 = (u - 0.5) * w;
+    const y0 = (v - 0.5) * h;
+    const x = x0 * cy;
+    const z0 = x0 * sy;
+    const y = y0 * cp - z0 * sp;
+    const z = y0 * sp + z0 * cp;
+    const k = focal / (focal + z);
+    return [frame.x + pose.x * frame.w + x * k, frame.y + pose.y * frame.h + y * k];
+  };
+}
+
+function drawBoard(ctx, pose, frame, shape) {
+  const at = boardProjector(pose, frame, shape);
+  const quad = (u0, v0, u1, v1) => {
+    ctx.beginPath();
+    ctx.moveTo(...at(u0, v0));
+    ctx.lineTo(...at(u1, v0));
+    ctx.lineTo(...at(u1, v1));
+    ctx.lineTo(...at(u0, v1));
+    ctx.closePath();
+  };
+  quad(0, 0, 1, 1);
+  ctx.fillStyle = COLOR.inkFill;
+  ctx.fill();
+  ctx.fillStyle = "rgba(232, 230, 225, 0.42)";
+  for (let r = 0; r < shape.rows; r++) {
+    for (let c = 0; c < shape.cols; c++) {
+      if ((r + c) % 2) continue;
+      quad(c / shape.cols, r / shape.rows, (c + 1) / shape.cols, (r + 1) / shape.rows);
+      ctx.fill();
+    }
+  }
+  quad(0, 0, 1, 1);
+  ctx.strokeStyle = COLOR.ink;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+}
+
+// The 4:3 camera frame inside a canvas: dark field, grid, and the reach line.
+function drawFrame(canvas, aspect = 4 / 3) {
+  const {ctx, cssW, cssH} = fitCanvas(canvas);
+  const scale = Math.min(cssW / aspect, cssH);
+  const frame = {w: scale * aspect, h: scale};
+  frame.x = (cssW - frame.w) / 2;
+  frame.y = (cssH - frame.h) / 2;
+  ctx.fillStyle = COLOR.field;
+  ctx.fillRect(frame.x, frame.y, frame.w, frame.h);
+  ctx.strokeStyle = COLOR.grid;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 1; i < 10; i++) {
+    ctx.moveTo(frame.x + (frame.w * i) / 10, frame.y);
+    ctx.lineTo(frame.x + (frame.w * i) / 10, frame.y + frame.h);
+    ctx.moveTo(frame.x, frame.y + (frame.h * i) / 10);
+    ctx.lineTo(frame.x + frame.w, frame.y + (frame.h * i) / 10);
+  }
+  ctx.stroke();
+  ctx.strokeStyle = COLOR.frame;
+  ctx.strokeRect(frame.x + 0.5, frame.y + 0.5, frame.w - 1, frame.h - 1);
+  const target = targetBox(recStatus?.coverage);
+  ctx.save();
+  ctx.strokeStyle = COLOR.ink;
+  ctx.globalAlpha = 0.6;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([10, 8]);
+  ctx.strokeRect(
+    frame.x + target.x * frame.w, frame.y + target.y * frame.h, target.w * frame.w, target.h * frame.h,
+  );
+  ctx.restore();
+  return {ctx, frame};
+}
+
+function dotAt(ctx, frame, point, color, radius) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(frame.x + point.x * frame.w, frame.y + point.y * frame.h, radius, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawAnimation() {
+  const cps = recGuide?.checkpoints || [];
+  const {ctx, frame} = drawFrame(recAnim);
+  if (!cps.length) {
+    setText(animCaption, "The positions could not be loaded. Reload the page.");
+    return;
+  }
+  if (prefersReducedMotion()) {
+    drawNumbered(ctx, frame, cps, null);
+    setText(animCaption, `Hold the board at each numbered position in turn, 1 to ${cps.length}. `
+      + "The list below says how far away and where.");
+    return;
+  }
+  const {index, pose} = animAt(anim.t);
+  cps.forEach((cp, i) => {
+    if (i !== index) dotAt(ctx, frame, cp, i < index ? COLOR.pass : COLOR.target, 6);
+  });
+  drawBoard(ctx, pose, frame, boardShape());
+  dotAt(ctx, frame, cps[index], COLOR.signal, 10);
+  setText(animCaption, `position ${index + 1}/${cps.length} · ${cps[index].caption}`);
+}
+
+// Numbered positions (reduced motion, and the drop step's coverage map). Positions
+// that share a spot (the centre is visited three times) sit side by side.
+function drawNumbered(ctx, frame, cps, complete) {
+  const groups = new Map();
+  cps.forEach((cp, i) => {
+    const key = `${cp.x.toFixed(3)},${cp.y.toFixed(3)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(i);
+  });
+  const radius = Math.max(9, Math.min(13, frame.w / 50));
+  ctx.font = `600 ${Math.round(radius * 1.05)}px ${getComputedStyle(document.body).fontFamily}`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  for (const indices of groups.values()) {
+    indices.forEach((i, k) => {
+      const cp = cps[i];
+      const dx = (k - (indices.length - 1) / 2) * (radius * 2 + 9);
+      const cx = frame.x + cp.x * frame.w + dx;
+      const cy = frame.y + cp.y * frame.h;
+      const done = complete ? complete[i] : false;
+      ctx.fillStyle = done ? COLOR.pass : COLOR.target;
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.fill();
+      if (cp.tilted ?? cp.skew > 0) {
+        // A tilted position: a ring around the number.
+        ctx.strokeStyle = ctx.fillStyle;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius + 3.5, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.fillStyle = COLOR.field;
+      ctx.fillText(String(i + 1), cx, cy + 0.5);
+    });
+  }
+}
+
+function setText(el, text) {
+  if (el.textContent !== text) el.textContent = text;
+}
+
+function animFrame(now) {
+  anim.raf = 0;
+  if (!animShouldRun()) return;
+  if (anim.last) anim.t += now - anim.last;
+  anim.last = now;
+  drawAnimation();
+  anim.raf = requestAnimationFrame(animFrame);
+}
+
+function animVisible() {
+  return calibrationRoute === "recording" && !recPanels.record.hidden;
+}
+
+function animShouldRun() {
+  return animVisible() && anim.playing && !prefersReducedMotion() && Boolean(recGuide?.checkpoints?.length);
+}
+
+function syncAnimation() {
+  const reduced = prefersReducedMotion();
+  animToggle.hidden = reduced;
+  animToggle.textContent = anim.playing ? "Pause" : "Play";
+  animToggle.title = anim.playing ? "Stop the animation at this position" : "Carry on with the animation";
+  for (const line of animLegend.querySelectorAll("[data-anim-moving]")) line.hidden = reduced;
+  for (const line of animLegend.querySelectorAll("[data-anim-still]")) line.hidden = !reduced;
+  setText(animTodo, reduced ? "Blue, numbered: the positions, in the order to hold them" : "Blue: positions still to come");
+  if (reduced) positionsList.open = true;
+  if (animShouldRun() && !anim.raf) {
+    anim.last = 0;
+    anim.raf = requestAnimationFrame(animFrame);
+  } else if (!animShouldRun() && anim.raf) {
+    cancelAnimationFrame(anim.raf);
+    anim.raf = 0;
+  }
+  if (animVisible()) drawAnimation();
+}
+
+// Show one moment of the animation and stop there (the screenshot script uses it).
+function seekAnimation(index, fraction = 0.9) {
+  anim.playing = false;
+  anim.t = (index + fraction) * ANIM_STEP_MS;
+  syncAnimation();
+}
+
+animToggle.addEventListener("click", () => {
+  anim.playing = !anim.playing;
+  syncAnimation();
+});
+reducedMotion?.addEventListener?.("change", syncAnimation);
+
+// ---- Drop step ----
+
+let mapSignature = "";
+
+function drawRecMap() {
+  const s = recStatus || {};
+  if (recMapWrap.hidden) return;
+  const cps = recGuide?.checkpoints || s.guide?.checkpoints || [];
+  const size = s.image_size?.length === 2 ? s.image_size : [4, 3];
+  const {ctx, frame} = drawFrame(recMap, size[0] / size[1]);
+  for (const point of s.coverage?.points || []) {
+    const side = Math.max(point.size || 0, 0.03);
+    const box = [
+      frame.x + (point.x - side / 2) * frame.w, frame.y + (point.y - side / 2) * frame.h,
+      side * frame.w, side * frame.h,
+    ];
+    ctx.fillStyle = COLOR.inkFill;
+    ctx.fillRect(...box);
+    ctx.strokeStyle = "rgba(232, 230, 225, 0.35)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(...box);
+  }
+  drawNumbered(ctx, frame, cps, (s.guide?.checkpoints || []).map((c) => c.complete));
+}
+
+function drawRecordingCanvases() {
+  if (calibrationRoute !== "recording") return;
+  if (animVisible()) drawAnimation();
+  drawRecMap();
+}
+new ResizeObserver(drawRecordingCanvases).observe(recAnim);
+new ResizeObserver(drawRecordingCanvases).observe(recMap);
+
+function renderProgress(f, s) {
+  let label = "";
+  let fraction = null;
+  let note = "";
+  if (recUpload) {
+    label = `Copying ${recUpload.name} into the run folder`;
+    fraction = recUpload.total ? recUpload.loaded / recUpload.total : null;
+    note = `${humanBytes(recUpload.loaded)} of ${humanBytes(recUpload.total)} copied. Keep this page open.`;
+    if (recUpload.left) note += ` ${plural(recUpload.left, "more clip")} after this one.`;
+  } else if (f.state === "uploading") {
+    const upload = s.upload || {};
+    label = `Copying ${upload.name || "the clip"} into the run folder`;
+    fraction = upload.total_bytes ? upload.received_bytes / upload.total_bytes : null;
+    note = upload.total_bytes
+      ? `${humanBytes(upload.received_bytes)} of ${humanBytes(upload.total_bytes)} copied.` : "";
+  } else if (f.state === "analysing") {
+    if (s.stage === "extract") {
+      label = "Picking views from the clip";
+      fraction = s.progress || 0;
+      note = "Reads the clip and keeps sharp, still views of the board at new positions.";
+    } else {
+      label = "Checking the clip";
+      note = "Reads the clip's settings and compares them with the camera setup.";
+    }
+  } else if (f.state === "solving") {
+    label = "Solving";
+    note = "Computes the lens calibration from the kept views. This can take a minute.";
+  }
+  recProgress.hidden = !label;
+  if (!label) return;
+  setText(recProgressLabel, label);
+  setText(recProgressPct, fraction == null ? "" : percent(fraction));
+  setText(recProgressNote, note);
+  recProgressFill.style.width = fraction == null ? "100%" : `${Math.round(fraction * 100)}%`;
+  recProgressFill.style.opacity = fraction == null ? "0.35" : "1";
+  if (fraction == null) recProgressBar.removeAttribute("aria-valuenow");
+  else recProgressBar.setAttribute("aria-valuenow", String(Math.round(fraction * 100)));
+}
+
+function countsText(s) {
+  const counts = s.counts || {};
+  if (!counts.samples) return "";
+  const rate = recordingConfig()?.sample_hz;
+  const left = Object.entries(DROP_WORDS)
+    .filter(([key]) => counts[key])
+    .map(([key, words]) => `${counts[key]} ${words}`);
+  const read = `Read ${plural(counts.samples, "frame")}${rate ? ` (${rate} a second)` : ""}`;
+  return `${read} and kept ${plural(counts.kept || 0, "view")}.`
+    + (left.length ? ` Left out: ${listText(left)}.` : "");
+}
+
+let clipsSignature = "";
+
+function renderClips(s) {
+  const clips = s.clips || [];
+  const signature = JSON.stringify(clips);
+  if (signature === clipsSignature) return;
+  clipsSignature = signature;
+  recClips.replaceChildren(...clips.map((clip) => {
+    const box = document.createElement("div");
+    const row = document.createElement("div");
+    row.className = "clip-row";
+    row.append(Object.assign(document.createElement("span"), {className: "clip-name", textContent: clip.name}));
+    const facts = [humanBytes(clip.size_bytes)];
+    if (clip.counts) facts.push(`${plural(clip.counts.kept || 0, "view")} kept`);
+    row.append(Object.assign(document.createElement("span"), {className: "note", textContent: facts.join(" · ")}));
+    if (clip.mismatch_count) {
+      row.append(Object.assign(document.createElement("span"), {
+        className: "clip-flag",
+        textContent: `${clip.mismatch_count} DIFFER${clip.mismatch_count === 1 ? "S" : ""}`,
+      }));
+    }
+    const details = document.createElement("details");
+    details.className = "disclosure";
+    details.append(Object.assign(document.createElement("summary"), {textContent: "What the clip check read"}));
+    const body = document.createElement("div");
+    body.className = "disclosure-body";
+    const table = document.createElement("table");
+    table.className = "clip-table";
+    const head = document.createElement("tr");
+    for (const text of ["Setting", "Expected", "In the file", ""]) {
+      head.append(Object.assign(document.createElement("th"), {scope: "col", textContent: text}));
+    }
+    table.append(head);
+    for (const check of clip.check || []) {
+      const tr = document.createElement("tr");
+      const status = {ok: "ok", mismatch: "differs", unknown: "not in the file"}[check.status] || check.status;
+      for (const [text, cls] of [
+        [check.label, ""], [check.expected ?? "", ""], [check.found ?? "", ""], [status, check.status],
+      ]) {
+        tr.append(Object.assign(document.createElement("td"), {textContent: text, className: cls}));
+      }
+      table.append(tr);
+    }
+    body.append(table);
+    details.append(body);
+    box.append(row, details);
+    return box;
+  }));
+}
+
+function renderDrop(f, s) {
+  const disabled = f.busy || f.step !== "drop";
+  if (disabled) dropZone.dataset.disabled = "";
+  else delete dropZone.dataset.disabled;
+  // While a clip is copied or processed, the progress bar takes its place.
+  dropZone.hidden = f.busy;
+  if (f.clips.length) dropZone.dataset.compact = "";
+  else delete dropZone.dataset.compact;
+  setText(dropZoneTitle, f.busy ? "Wait for this clip to finish"
+    : f.clips.length ? "Drop another clip of this camera here" : "Drop the clip from the camera's card here");
+  setText(dropZoneNote, f.clips.length
+    ? "Its views are added to this run and everything is solved again. A clip from another camera starts its own run."
+    : "An .mp4 file (GX01….MP4), or several. A 90 s clip is about 1.4 GB and takes a moment to copy.");
+  renderProgress(f, s);
+  // What went wrong, in the server's words: a refused clip first, then any other problem.
+  const alert = f.refused?.message || (!f.busy && f.error) || "";
+  recAlert.hidden = !alert;
+  setText(recAlertText, alert);
+  const switchNote = s.camera_switch?.message
+    || (s.previous_run_id ? `This run is for another camera than the one before. The previous camera's calibration is in ${s.previous_run_id}.` : "");
+  recSwitchNote.hidden = !switchNote || alert.startsWith(switchNote);
+  setText(recSwitchNote, switchNote);
+  recNotesList.hidden = recNotes.length === 0;
+  const notesSig = recNotes.join("\n");
+  if (recNotesList.dataset.signature !== notesSig) {
+    recNotesList.dataset.signature = notesSig;
+    recNotesList.replaceChildren(...recNotes.map((text) => Object.assign(document.createElement("li"), {textContent: text})));
+  }
+  // The camera this run is for, named from its serial where the clip carries one.
+  const cameraText = s.run_id && s.camera_name
+    ? s.camera_name_note || `Camera: ${s.camera_name}. Its files are named after it.`
+    : "";
+  recCamera.hidden = !cameraText;
+  if (recCamera.dataset.text !== cameraText) {
+    recCamera.dataset.text = cameraText;
+    const name = s.camera_name || "";
+    const at = cameraText.indexOf(name);
+    recCamera.replaceChildren();
+    if (name && at >= 0) {
+      recCamera.append(cameraText.slice(0, at), Object.assign(document.createElement("strong"), {textContent: name}),
+        cameraText.slice(at + name.length));
+    } else {
+      recCamera.textContent = cameraText;
+    }
+  }
+  const hasViews = (s.captures || 0) > 0 || f.clips.length > 0;
+  recStats.hidden = !hasViews || (f.busy && !s.captures);
+  const need = s.min_frames || Number(form.elements["solver.min_frames"].value || 25);
+  setText(document.getElementById("recViews"), String(s.captures || 0));
+  setText(document.getElementById("recViewsNeed"), `· need ${need}`);
+  setText(document.getElementById("recPositions"), `${s.guide?.complete_count || 0} / ${s.guide?.total_count || 0}`);
+  setText(document.getElementById("recSpread"), percent(s.coverage?.overall));
+  setText(document.getElementById("recClipCount"), String(f.clips.length));
+  const counts = countsText(s);
+  recCounts.hidden = !counts || f.busy;
+  setText(recCounts, counts);
+  // The retake list: the positions the next clip must add.
+  const missing = hasViews && !f.busy && !f.passed ? missingPositions(s) : [];
+  recMissing.hidden = missing.length === 0;
+  setText(recMissingHead, `Missing positions (${missing.length} of ${s.guide?.total_count || 0}), `
+    + "numbered as in the animation:");
+  const missingSig = JSON.stringify(missing);
+  if (recMissingList.dataset.signature !== missingSig) {
+    recMissingList.dataset.signature = missingSig;
+    recMissingList.replaceChildren(...missing.map((m) => {
+      const li = Object.assign(document.createElement("li"), {textContent: m.caption, value: m.number});
+      return li;
+    }));
+  }
+  recMapWrap.hidden = !hasViews || f.busy;
+  setText(recMapTodo, f.passed ? "Blue: not covered (not needed, the result passed)" : "Blue: still missing");
+  const signature = JSON.stringify([s.coverage?.points, s.guide?.checkpoints, s.image_size, recMapWrap.hidden, recGuideKey]);
+  if (signature !== mapSignature) {
+    mapSignature = signature;
+    drawRecMap();
+  }
+  renderClips(s);
+}
+
+function renderClipCheck(f, s) {
+  const show = !f.busy && f.clips.length > 0;
+  clipCheck.hidden = !show;
+  if (!show) return;
+  const text = f.warning ? `${f.warning.first} ${f.warning.rest}` : "";
+  clipBanner.hidden = !f.warning;
+  if (clipBanner.dataset.text !== text) {
+    clipBanner.dataset.text = text;
+    clipBanner.replaceChildren();
+    if (f.warning) {
+      clipBanner.append(Object.assign(document.createElement("strong"), {textContent: f.warning.first}),
+        ` ${f.warning.rest}`);
+    }
+  }
+  const advice = clipAdvice(s);
+  clipUnknown.hidden = advice.unknown.length === 0;
+  clipOther.hidden = advice.other.length === 0;
+  for (const [list, lines] of [[clipUnknownList, advice.unknown], [clipOtherList, advice.other]]) {
+    const signature = lines.join("\n");
+    if (list.dataset.signature === signature) continue;
+    list.dataset.signature = signature;
+    list.replaceChildren(...lines.map((line) => Object.assign(document.createElement("li"), {textContent: line})));
+  }
+}
+
+// ---- Render ----
+
+function renderRecording(status) {
+  if (status) recStatus = status;
+  renderRouteChoice();
+  if (calibrationRoute !== "recording") return;
+  const s = recStatus || {};
+  const f = recFacts(s);
+  const states = recStepStates(f);
+  renderSteps(states);
+  presetSelect.classList.toggle("select-primary", states.setup === "current");
+  renderRecButtons(f, states);
+  const view = currentRecView(f);
+  for (const [name, panel] of Object.entries(recPanels)) panel.hidden = name !== view;
+  recBack.hidden = view === (f.step === "setup" ? "settings" : f.step);
+  recBackBtn.textContent = f.step === "drop" ? "Back to Drop clip & solve"
+    : f.step === "record" ? "Back to Record" : "Back";
+  setStatusLine(...recStatusLine(f, s));
+  setText(recPrompt, recPromptText(f, s));
+  renderLabs(f);
+  syncAnimation();
+  renderDrop(f, s);
+  renderClipCheck(f, s);
+  renderRecReadout(s);
+  results.hidden = true;
+  if (f.hasResults) renderResults(f.results, s.coverage, s.acquisition_mode, f);
+  else {
+    resultsPanel.hidden = true;
+    resultsSignature = "";
+  }
+}
+
+// ---- Polling and actions ----
+
+async function recPoll() {
+  try {
+    renderRecording(await api("/api/recording/status"));
+  } catch {
+    if (calibrationRoute === "recording") {
+      setStatusLine("Problem: the server is not reachable. Is it still running?");
+    }
+  }
+  recSyncPolling();
+}
+
+// Poll while the job is working on a clip; nothing changes on the server otherwise.
+function recSyncPolling() {
+  const busy = REC_BUSY.has(recStatus?.state);
+  if (busy && !recPollTimer) recPollTimer = setInterval(recPoll, 400);
+  if (!busy && recPollTimer) {
+    clearInterval(recPollTimer);
+    recPollTimer = null;
+  }
+}
+
+function recWaitIdle() {
+  return new Promise((resolve) => {
+    const check = async () => {
+      await recPoll();
+      if (REC_BUSY.has(recStatus?.state)) setTimeout(check, 400);
+      else resolve(recStatus);
+    };
+    check();
+  });
+}
+
+// The clip is the raw request body (no form encoding): a 1.4 GB file streams to disk.
+function uploadClip(file) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", `/api/recording/clips?name=${encodeURIComponent(file.name)}`);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.upload.onprogress = (event) => {
+      if (!recUpload) return;
+      recUpload.loaded = event.loaded;
+      recUpload.total = event.lengthComputable ? event.total : file.size;
+      renderRecording();
+    };
+    xhr.onload = () => {
+      let body = null;
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        // not JSON: keep the status text
+      }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(body);
+      else {
+        const detail = body?.detail;
+        reject(new Error(typeof detail === "string" ? detail : xhr.statusText || `HTTP ${xhr.status}`));
+      }
+    };
+    xhr.onerror = () => reject(new Error("The upload stopped: the server is not reachable. Drop the clip again."));
+    xhr.send(file);
+  });
+}
+
+async function recAddFiles(fileList) {
+  const files = [...(fileList || [])];
+  if (!files.length) return;
+  const clips = files.filter((file) => /\.mp4$/i.test(file.name));
+  recNotes = files
+    .filter((file) => !clips.includes(file))
+    .map((file) => `${file.name} was left out: only .mp4 files from the camera's card can be used.`);
+  recLocalError = "";
+  recView = null;
+  if (!clips.length) {
+    renderRecording();
+    return;
+  }
+  recQueue.push(...clips);
+  if (!recRunning) await recRunQueue();
+  else renderRecording();
+}
+
+// One clip at a time: the job refuses a clip while it works on the previous one.
+let recRunning = false;
+
+async function recRunQueue() {
+  recRunning = true;
+  if (REC_BUSY.has(recStatus?.state)) await recWaitIdle();
+  while (recQueue.length) {
+    const file = recQueue.shift();
+    try {
+      if (!recStatus?.run_id) {
+        renderRecording(await api("/api/recording/start", {method: "POST", body: JSON.stringify({config: readForm()})}));
+      }
+      recUpload = {name: file.name, loaded: 0, total: file.size, left: recQueue.length};
+      renderRecording();
+      const status = await uploadClip(file);
+      recUpload = null;
+      renderRecording(status);
+      const done = await recWaitIdle();
+      if (recQueue.length && done?.refused_clip) recNotes.push(done.refused_clip.message);
+    } catch (err) {
+      recUpload = null;
+      recLocalError = err.message || String(err);
+      if (recQueue.length) {
+        recNotes.push(`Not copied: ${listText(recQueue.map((f) => f.name))}. Drop ${recQueue.length === 1 ? "it" : "them"} again.`);
+      }
+      recQueue = [];
+      await recPoll();
+    }
+  }
+  recRunning = false;
+  renderRecording();
+}
+
+function recChoose() {
+  recFile.value = "";
+  recFile.click();
+}
+
+recFile.addEventListener("change", () => recAddFiles(recFile.files));
+recChooseBtn.addEventListener("click", recChoose);
+dropZone.addEventListener("click", () => {
+  if (!recChooseBtn.disabled) recChoose();
+});
+dropZone.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  if (dropZone.dataset.disabled == null) dropZone.dataset.over = "";
+});
+dropZone.addEventListener("dragleave", () => delete dropZone.dataset.over);
+dropZone.addEventListener("drop", (event) => {
+  event.preventDefault();
+  delete dropZone.dataset.over;
+  if (dropZone.dataset.disabled != null) return;
+  recAddFiles(event.dataTransfer?.files);
+});
+// A clip dropped next to the drop zone must not make the browser open the video.
+for (const type of ["dragover", "drop"]) {
+  window.addEventListener(type, (event) => {
+    if (calibrationRoute === "recording" && !dropZone.contains(event.target)) event.preventDefault();
+  });
+}
+window.addEventListener("beforeunload", (event) => {
+  if (recUpload) event.preventDefault(); // leaving would cut the copy short
+});
+
+recSettingsBtn.addEventListener("click", () => {
+  recConfirmed.settings = true;
+  recView = null;
+  renderRecording();
+});
+recRecordedBtn.addEventListener("click", () => {
+  recConfirmed.recorded = true;
+  recView = null;
+  renderRecording();
+});
+recShowSettingsBtn.addEventListener("click", () => {
+  recView = "settings";
+  renderRecording();
+});
+recShowRecordBtn.addEventListener("click", () => {
+  recView = "record";
+  renderRecording();
+});
+recBackBtn.addEventListener("click", () => {
+  recView = null;
+  renderRecording();
+});
+
+recNextBtn.addEventListener("click", act("Next camera", async () => {
+  const s = recStatus || {};
+  const f = recFacts(s);
+  if (!f.solved && f.clips.length && !confirm(
+    `This camera's run is not solved yet. Its clips stay in ${s.run_dir || "its run folder"}, `
+    + "but Next camera ends the run, so no more clips can be added to it. Continue?",
+  )) return;
+  recConfirmed.settings = false;
+  recConfirmed.recorded = false;
+  recView = null;
+  recNotes = [];
+  recLocalError = "";
+  renderRecording(await api("/api/recording/new", {method: "POST", body: JSON.stringify({config: readForm()})}));
+}));
+
+function setRoute(value, {remember = true} = {}) {
+  calibrationRoute = value === "recording" ? "recording" : "live";
+  if (remember) saveRoute(calibrationRoute);
+  appEl.dataset.route = calibrationRoute;
+  for (const radio of routeRadios) radio.checked = radio.value === calibrationRoute;
+  // Each route marks only its own steps.
+  const own = calibrationRoute === "recording"
+    ? ["setup", "settings", "record", "drop"] : ["setup", "connect", "capture", "solve"];
+  for (const [name, step] of Object.entries(steps)) {
+    if (!own.includes(name)) {
+      step.removeAttribute("aria-current");
+      step.dataset.stepState = "pending";
+    }
+  }
+  delete cameraReadout.dataset.signature;
+  resultsSignature = "";
+  if (calibrationRoute === "recording") {
+    refreshRecordingConfig();
+    renderRecording();
+    recSyncPolling();
+  } else {
+    syncAnimation();
+    if (lastStatus) updateStatus(lastStatus);
+    else setStatusLine("Ready.");
+    renderRouteChoice();
+  }
+}
+
+for (const radio of routeRadios) {
+  radio.addEventListener("change", () => {
+    if (radio.checked) setRoute(radio.value);
+  });
+}
+
 async function init() {
   defaults = await api("/api/defaults");
   populateForm(defaults.config, defaults.aruco_dictionaries, defaults.gopro_options);
@@ -1668,6 +3008,12 @@ async function init() {
   drawCoverageMap([], null);
   await poll();
   if (lastStatus && isLive(lastStatus)) startPolling();
+  await recPoll();
+  // A session that is already running decides the route, whatever was remembered.
+  let start = calibrationRoute;
+  if (lastStatus && isLive(lastStatus)) start = "live";
+  else if (recFacts(recStatus || {}).busy) start = "recording";
+  setRoute(start, {remember: false});
 }
 
 init().catch((err) => {

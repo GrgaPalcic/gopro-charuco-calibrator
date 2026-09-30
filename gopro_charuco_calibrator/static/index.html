@@ -8,11 +8,11 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <main class="app">
+  <main class="app" id="app" data-route="live">
     <header class="masthead">
       <div class="brand">
         <h1>GoPro ChArUco Calibrator</h1>
-        <div class="stream-status" id="streamStatus" data-state="none" role="status" aria-live="polite">
+        <div class="stream-status live-only" id="streamStatus" data-state="none" role="status" aria-live="polite">
           <span class="dot" aria-hidden="true"></span>
           <span id="streamStatusText">no stream</span>
         </div>
@@ -28,14 +28,34 @@
           <h2 class="step-title" id="stepSetupTitle"><label for="presetSelect">Camera setup</label><span class="sr-only" data-step-note></span></h2>
           <p class="step-desc">Pick the camera and lens you will record with.</p>
           <div class="step-actions">
-            <select id="presetSelect" aria-describedby="presetMsg">
+            <select id="presetSelect" aria-describedby="lensModNote presetMsg">
               <option value="" id="presetCustom" disabled>Custom settings (see Settings)</option>
             </select>
           </div>
+          <p id="lensModNote" class="note step-note">Check the code printed on the lens mod: ADWAL-002 = Max Lens Mod 2.0, AEWAL-001 = Ultra Wide Lens Mod.</p>
           <p id="presetMsg" class="note step-msg" aria-live="polite"></p>
+          <fieldset class="route-choice" id="routeChoice">
+            <legend>How will you calibrate?</legend>
+            <div class="route-options">
+            <label class="route-option" id="routeLiveOption">
+              <input type="radio" name="calibrationRoute" value="live">
+              <span class="route-text">
+                <span class="route-name">Live over USB</span>
+                <span class="route-desc">Calibrates the webcam stream only. Not valid for footage recorded on the camera.</span>
+              </span>
+            </label>
+            <label class="route-option" id="routeRecordingOption">
+              <input type="radio" name="calibrationRoute" value="recording">
+              <span class="route-text">
+                <span class="route-name">From a recording</span>
+                <span class="route-desc">For footage recorded on the camera, like UMI.</span>
+              </span>
+            </label>
+            </div>
+          </fieldset>
         </div>
         </li>
-        <li class="step" id="stepConnect" data-step-state="pending">
+        <li class="step live-only" id="stepConnect" data-step-state="pending">
         <span class="step-num" aria-hidden="true">2</span>
         <div class="step-body">
           <h2 class="step-title" id="stepConnectTitle">Connect<span class="sr-only" data-step-note></span></h2>
@@ -46,7 +66,7 @@
           </div>
         </div>
         </li>
-        <li class="step" id="stepCapture" data-step-state="pending">
+        <li class="step live-only" id="stepCapture" data-step-state="pending">
         <span class="step-num" aria-hidden="true">3</span>
         <div class="step-body">
           <h2 class="step-title" id="stepCaptureTitle">Capture<span class="sr-only" data-step-note></span></h2>
@@ -58,7 +78,7 @@
           </div>
         </div>
         </li>
-        <li class="step" id="stepSolve" data-step-state="pending">
+        <li class="step live-only" id="stepSolve" data-step-state="pending">
         <span class="step-num" aria-hidden="true">4</span>
         <div class="step-body">
           <h2 class="step-title" id="stepSolveTitle">Solve<span class="sr-only" data-step-note></span></h2>
@@ -69,13 +89,46 @@
           </div>
         </div>
         </li>
+        <li class="step rec-only" id="stepSettings" data-step-state="pending">
+        <span class="step-num" aria-hidden="true">2</span>
+        <div class="step-body">
+          <h2 class="step-title" id="stepSettingsTitle">Settings<span class="sr-only" data-step-note></span></h2>
+          <p class="step-desc">Set the camera up for the calibration clip, with the QR code or by hand.</p>
+          <div class="step-actions">
+            <button type="button" id="recSettingsBtn" class="btn">I've set the camera</button>
+            <button type="button" id="recShowSettingsBtn" class="btn btn-quiet" hidden>Show settings</button>
+          </div>
+        </div>
+        </li>
+        <li class="step rec-only" id="stepRecord" data-step-state="pending">
+        <span class="step-num" aria-hidden="true">3</span>
+        <div class="step-body">
+          <h2 class="step-title" id="stepRecordTitle">Record<span class="sr-only" data-step-note></span></h2>
+          <p class="step-desc">Record the clip on the camera, moving the board as the animation shows.</p>
+          <div class="step-actions">
+            <button type="button" id="recRecordedBtn" class="btn">I've recorded the clip</button>
+            <button type="button" id="recShowRecordBtn" class="btn btn-quiet" hidden>Show animation</button>
+          </div>
+        </div>
+        </li>
+        <li class="step rec-only" id="stepDrop" data-step-state="pending">
+        <span class="step-num" aria-hidden="true">4</span>
+        <div class="step-body">
+          <h2 class="step-title" id="stepDropTitle">Drop clip &amp; solve<span class="sr-only" data-step-note></span></h2>
+          <p class="step-desc" id="recDropDesc">Drop the clip here. The app picks the views and solves.</p>
+          <div class="step-actions">
+            <button type="button" id="recChooseBtn" class="btn">Choose clip…</button>
+            <button type="button" id="recNextBtn" class="btn" hidden>Next camera</button>
+          </div>
+        </div>
+        </li>
       </ol>
     </div>
 
     <p id="statusLine" class="status-line"><span id="statusMain">Loading the settings…</span> <span id="statusDetail" class="status-detail"></span></p>
 
     <div class="workspace">
-      <section class="bench" aria-label="Live view and coverage">
+      <section class="bench live-only" aria-label="Live view and coverage">
         <div class="previewWrap">
           <img id="preview" alt="Live camera preview with board detections">
           <canvas id="guideOverlay" width="1280" height="720" aria-hidden="true"></canvas>
@@ -152,6 +205,120 @@
         </div>
       </section>
 
+      <section class="rec-bench rec-only" id="recBench" aria-label="Recording on the camera">
+        <p class="guide-prompt" id="recPrompt"></p>
+        <div class="rec-back" id="recBack" hidden>
+          <button type="button" class="btn btn-quiet" id="recBackBtn">Back</button>
+        </div>
+
+        <div class="rec-panel" id="recSettingsPanel" hidden>
+          <p class="alert-body rec-error" id="labsError" hidden></p>
+          <div class="labs" id="labsBody">
+            <div class="qr-row">
+              <figure class="qr-card">
+                <img id="qrCalibration" width="264" height="264" alt="GoPro Labs QR code for the calibration clip">
+                <figcaption>
+                  <span class="qr-title">1. Scan before the calibration clip</span>
+                  <code id="qrCalibrationCode"></code>
+                </figcaption>
+              </figure>
+              <figure class="qr-card">
+                <img id="qrDataset" width="264" height="264" alt="GoPro Labs QR code that puts the dataset settings back">
+                <figcaption>
+                  <span class="qr-title">2. Scan after, to go back to dataset settings</span>
+                  <code id="qrDatasetCode"></code>
+                </figcaption>
+              </figure>
+            </div>
+            <p class="note">The codes need GoPro Labs firmware on the camera. With the camera's screen on, point the camera at a code on this screen, then check what the camera shows against the list below.</p>
+            <div class="rec-warning" id="shutterWarning">
+              <strong>Switch the shutter back after the calibration clip.</strong>
+              <span id="shutterWarningText"></span>
+            </div>
+            <div class="unverified" id="labsUnverified" hidden>
+              <p class="unverified-head">Some codes are not yet confirmed on a HERO13. Check the camera screen after scanning:</p>
+              <ul id="labsUnverifiedList"></ul>
+            </div>
+            <h3 class="label">Settings to check on the camera</h3>
+            <div class="table-wrap">
+              <table class="checklist">
+                <thead><tr><th scope="col">Setting</th><th scope="col">Set it to</th><th scope="col">How</th></tr></thead>
+                <tbody id="labsChecklist"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="rec-panel" id="recRecordPanel" hidden>
+          <figure class="anim">
+            <div class="anim-wrap">
+              <canvas id="recAnim" width="800" height="600" role="img"
+                      aria-label="The camera's view: a board moving through the positions to record, in order"></canvas>
+            </div>
+            <figcaption class="anim-bar">
+              <button type="button" class="btn" id="animToggle">Pause</button>
+              <span class="anim-caption" id="animCaption"></span>
+            </figcaption>
+          </figure>
+          <ul class="legend" id="animLegend" aria-label="What the marks in the animation mean">
+            <li data-anim-moving><span class="swatch swatch-dot swatch-next-dot" aria-hidden="true"></span>Orange dot: where the board goes now</li>
+            <li data-anim-moving><span class="swatch swatch-dot swatch-done" aria-hidden="true"></span>Green: positions already shown</li>
+            <li><span class="swatch swatch-dot swatch-todo" aria-hidden="true"></span><span id="animTodo">Blue: positions still to come</span></li>
+            <li data-anim-moving><span class="swatch swatch-board" aria-hidden="true"></span>White: the board, as the camera sees it</li>
+            <li data-anim-still><span class="swatch swatch-dot swatch-ring" aria-hidden="true"></span>Ringed: hold the board tilted</li>
+            <li><span class="swatch swatch-target" aria-hidden="true"></span>Dashed line: the board centre must reach it or beyond</li>
+          </ul>
+          <details class="disclosure" id="positionsList">
+            <summary>All positions in order</summary>
+            <div class="disclosure-body"><ol class="positions" id="positionsOl"></ol></div>
+          </details>
+        </div>
+
+        <div class="rec-panel" id="recDropPanel" hidden>
+          <div class="alert" id="recAlert" hidden>
+            <p class="alert-body" id="recAlertText"></p>
+          </div>
+          <div class="dropzone" id="dropZone">
+            <p class="dropzone-title" id="dropZoneTitle">Drop the clip from the camera's card here</p>
+            <p class="note" id="dropZoneNote">An .mp4 file (GX01….MP4), or several. A 90 s clip is about 1.4 GB and takes a moment to copy.</p>
+          </div>
+          <input type="file" id="recFile" accept=".mp4,.MP4,video/mp4" multiple hidden>
+          <div class="rec-progress" id="recProgress" hidden>
+            <div class="progress-head"><span id="recProgressLabel"></span><span id="recProgressPct"></span></div>
+            <div class="progress-track" role="progressbar" id="recProgressBar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="recProgressLabel">
+              <div class="progress-fill" id="recProgressFill"></div>
+            </div>
+            <p class="note" id="recProgressNote"></p>
+          </div>
+          <p class="rec-note" id="recSwitchNote" hidden></p>
+          <ul class="rec-notes" id="recNotes" hidden></ul>
+          <p class="rec-camera" id="recCamera" hidden></p>
+          <dl class="stats" id="recStats" hidden>
+            <div title="Views picked from the clips so far, and how many solving needs"><dt>Views kept</dt><dd><span id="recViews">0</span> <span class="dd-aside" id="recViewsNeed"></span></dd></div>
+            <div title="Board positions covered, out of all the positions the animation shows"><dt>Positions</dt><dd><span id="recPositions">0 / 0</span></dd></div>
+            <div title="How widely the kept views cover the lens: left–right, top–bottom, near–far and tilt range"><dt>Spread</dt><dd id="recSpread">0 %</dd></div>
+            <div title="Clips used in this run"><dt>Clips</dt><dd id="recClipCount">0</dd></div>
+          </dl>
+          <p class="note" id="recCounts" hidden></p>
+          <div class="rec-missing" id="recMissing" hidden>
+            <p class="rec-missing-head" id="recMissingHead"></p>
+            <ol class="positions" id="recMissingList"></ol>
+          </div>
+          <div class="rec-map" id="recMapWrap" hidden>
+            <h2 class="label">Positions covered</h2>
+            <canvas id="recMap" width="640" height="480" role="img"
+                    aria-label="Which board positions the kept views cover"></canvas>
+            <ul class="legend">
+              <li><span class="swatch swatch-dot swatch-done" aria-hidden="true"></span>Green: covered</li>
+              <li><span class="swatch swatch-dot swatch-todo" aria-hidden="true"></span><span id="recMapTodo">Blue: still missing</span></li>
+              <li><span class="swatch swatch-dot swatch-ring" aria-hidden="true"></span>Ringed: a tilted position</li>
+              <li><span class="swatch swatch-used" aria-hidden="true"></span>A kept view (box area ≈ board area)</li>
+            </ul>
+          </div>
+          <div class="rec-clips" id="recClips"></div>
+        </div>
+      </section>
+
       <aside class="setup" aria-labelledby="settingsTitle">
         <form id="configForm">
           <div class="settings-head">
@@ -168,13 +335,14 @@
           <label>Camera name <span class="hint">names the run folder</span>
             <input name="camera.camera_name" autocomplete="off">
           </label>
-          <label class="switch">
+          <p class="note rec-only">From a recording: while this is the camera setup's own name, a clip that carries the camera's serial number names the run gopro13_ and the serial's last 4 characters instead, so each file maps to one camera.</p>
+          <label class="switch live-only">
             <input name="gopro.enabled" type="checkbox">
             <span class="track" aria-hidden="true"></span>
             <span>Set up the GoPro automatically</span>
           </label>
 
-          <div id="goproControls">
+          <div id="goproControls" class="live-only">
             <p class="note">Lens and resolution define the calibrated model. Keep them identical to how your data is recorded.</p>
             <div class="grid2">
               <label>Lens
@@ -186,7 +354,7 @@
             </div>
           </div>
 
-          <details class="disclosure" id="deviceDetails">
+          <details class="disclosure live-only" id="deviceDetails">
             <summary>Frame size and device</summary>
             <div class="disclosure-body">
               <p class="note">Frame size is the size frames are decoded at. Device and pixel format are used only when automatic GoPro setup is off.</p>
@@ -246,7 +414,7 @@
             </div>
           </details>
 
-          <details class="disclosure" id="connectionDetails">
+          <details class="disclosure live-only" id="connectionDetails">
             <summary>Connection</summary>
             <div class="disclosure-body">
               <label>Open GoPro URL <input name="gopro.base_url" placeholder="Auto-detect over USB" autocomplete="off"></label>
@@ -268,7 +436,7 @@
             </div>
           </details>
 
-          <details class="disclosure" id="recordingDetails">
+          <details class="disclosure live-only" id="recordingDetails">
             <summary>Recording settings</summary>
             <div class="disclosure-body">
               <p class="note">Lens mod tells the camera which mod is fitted (the Max Lens Mod preset sets it). Leave it empty to keep the camera's current value; the Mod chip shows it. The rest only affect recording on the camera. The webcam lens is the Lens field above.</p>
@@ -283,6 +451,18 @@
           </details>
         </form>
       </aside>
+    </div>
+
+    <div class="clip-check rec-only" id="clipCheck" hidden>
+      <div class="clip-banner" id="clipBanner" role="alert" hidden></div>
+      <div class="clip-unknown" id="clipUnknown" hidden>
+        <p class="clip-unknown-head">The file cannot confirm these settings. Check them on the camera screen:</p>
+        <ul id="clipUnknownList"></ul>
+      </div>
+      <div class="clip-unknown" id="clipOther" hidden>
+        <p class="clip-unknown-head">Also about this clip:</p>
+        <ul id="clipOtherList"></ul>
+      </div>
     </div>
 
     <section class="results-panel" id="resultsPanel" hidden aria-labelledby="verdictText">
