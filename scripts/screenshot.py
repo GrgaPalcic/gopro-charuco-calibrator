@@ -22,6 +22,17 @@ custom settings, preview, capturing, paused with enough views, every model
 failed, OpenICC models failed, solved after the route completed, a retake after
 Stop, connecting, a stream error with views saved, after Next camera, and 390 px
 mobile) are for review only and go to --review-dir.
+
+The From a recording route's shots (rec-*.png, review only) are served the same
+way: the route's Labs QR codes and guide come from the real app, and only
+/api/recording/status is faked. Its results are the app's own solve of 4:3
+synthetic frames (gopro_charuco_calibrator/synthetic.recording_camera, 1600x1200,
+made-up intrinsics) shown as if they came from a 4000x3000 HERO13 clip, so the
+figures (focal, centre, errors) are those of the synthetic camera. The clip's
+file facts and metadata are made up for the page (no real HERO13 clip has been
+read yet); the clip-check rows are built from them by the app's own
+clipcheck.compare. The QR codes on the settings shot are decoded back from the
+screenshot.
 """
 
 from __future__ import annotations
@@ -43,6 +54,7 @@ import uvicorn
 from gopro_charuco_calibrator import presets
 from gopro_charuco_calibrator.app import app, set_default_config
 from gopro_charuco_calibrator.capture import _discarded_points
+from gopro_charuco_calibrator.clipcheck import compare
 from gopro_charuco_calibrator.coverage import coverage_summary
 from gopro_charuco_calibrator.detection import draw_detection
 from gopro_charuco_calibrator.gopro import (
@@ -52,11 +64,22 @@ from gopro_charuco_calibrator.gopro import (
     describe_acquisition_mode,
 )
 from gopro_charuco_calibrator.guide import guide_status
+from gopro_charuco_calibrator.labs import labs_command
+from gopro_charuco_calibrator.recording import (
+    RecordingJob,
+    camera_name_from_serial,
+    describe_recording_mode,
+    empty_counts,
+    no_results,
+)
 from gopro_charuco_calibrator.solver import solve_from_frames
-from gopro_charuco_calibrator.synthetic import SIZE, Camera, synthetic_views
+from gopro_charuco_calibrator.synthetic import SIZE, Camera, recording_camera, synthetic_views
 
 REPO = Path(__file__).resolve().parent.parent
 PRESET = "gopro13_mlm2_adwal002"
+# A shipped camera setup with no recording section (live route only).
+LIVE_ONLY_PRESET = "gopro13_wide_1080p"
+ROUTE_KEY = "gopro-charuco.route"
 
 
 # ---- session states -----------------------------------------------------
@@ -241,10 +264,219 @@ def build_states(config, workdir, views):
     }
 
 
+# ---- recording-route states -----------------------------------------------
+
+# Made up for the page: a placeholder serial (it names the camera gopro13_1234) and
+# clip facts in the shape clipcheck reads. None of these were read from a camera.
+DEMO_SERIAL = "DEMO00001234"
+CLIP = "GX010042.MP4"
+CLIP_BYTES = 1_402_000_000  # about 90 s at the HERO13's ~120 Mb/s
+# How 90 s at 12 samples a second might split (made up; adds up to 1080).
+DEMO_COUNTS = {"samples": 1080, "no_board": 212, "blurred": 57, "moving": 604, "duplicate": 167}
+
+
+def demo_clip(rec, *, mismatch):
+    """A clip entry as the job lists it, with check rows from the app's own compare."""
+    probe = {
+        "width": rec.width,
+        "height": rec.height,
+        "avg_frame_rate": 29.97 if mismatch else 59.94,
+        "r_frame_rate": 29.97 if mismatch else 59.94,
+        "codec": "hevc",
+        "duration_s": 90.1,
+        "rotation": 0,
+    }
+    meta = {
+        "model": "HERO13 Black",
+        "serial": DEMO_SERIAL,
+        "eise": "Y" if mismatch else "N",
+        "eisa": "HS Boost" if mismatch else "N/A",
+        "vfov": None,  # which letter a lens mod writes is not documented
+        "zfov": None,
+        "shutter_s": None,  # SHUT on a HERO13 is unverified: the row stays unknown
+        "has_imu": True,
+        "gpmf_found": True,
+    }
+    rows = compare(probe, meta, rec)
+    return {
+        "name": CLIP,
+        "size_bytes": CLIP_BYTES,
+        "check": rows,
+        "mismatch_count": sum(row["status"] == "mismatch" for row in rows),
+        "probe": probe,
+        "metadata": meta,
+        "counts": None,
+    }
+
+
+def rec_status(config, state, message, **updates):
+    """The recording job's status, every key present as in RecordingJob.status()."""
+    targets = config.coverage_targets
+    status = {
+        "state": state,
+        "stage": None,
+        "progress": 0.0,
+        "message": message,
+        "upload": None,
+        **no_results(),
+        "route": "recording",
+        "run_id": None,
+        "run_dir": "",
+        "output_dir": "",
+        "camera_name": None,
+        "camera_named_from_serial": False,
+        "camera_name_note": None,
+        "serial": None,
+        "image_size": None,
+        "captures": 0,
+        "coverage": coverage_summary([], targets),
+        "guide": guide_status([], None, targets),
+        "clips": [],
+        "counts": empty_counts(),
+        "mismatch_count": 0,
+        "mismatch_fields": [],
+        "mismatch_clips": [],
+        "refused_clip": None,
+        "previous_run_id": None,
+        "previous_output_dir": None,
+        "camera_switch": None,
+        "min_frames": config.solver.min_frames,
+        "preview_open": False,
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        assert set(status) == set(RecordingJob(runs_dir=Path(tmp)).status())
+    status.update(updates)
+    return status
+
+
+def build_recording_states(config, workdir, views):
+    rec = config.recording
+    targets = config.coverage_targets
+    poses = [detection.pose for _frame, detection in views]
+    size = [rec.width, rec.height]  # shown as the HERO13 clip's size (see the docstring)
+    first_name = config.camera.camera_name
+    run_id = f"{first_name}_20260930_101500"
+    named = camera_name_from_serial(DEMO_SERIAL)
+    named_run = f"{named}_20260930_101500"
+
+    frames_dir = workdir / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    for index, (frame, _detection) in enumerate(views, start=1):
+        cv2.imwrite(
+            str(frames_dir / f"capture_{index:03d}.jpg"), frame, [cv2.IMWRITE_JPEG_QUALITY, 95]
+        )
+    camera = config.camera.model_copy(
+        update={"camera_name": named, "width": views[0][0].shape[1], "height": views[0][0].shape[0]}
+    )
+    summary = solve_from_frames(
+        frames_dir=frames_dir,
+        output_dir=workdir,
+        camera=camera,
+        board_config=config.board,
+        solver=config.solver,
+        coverage_targets=targets,
+    )
+    # The job's own ORB-SLAM3 rewrite, for a clip of the preset's size.
+    summary["image_size"] = size
+    job = RecordingJob(runs_dir=workdir)
+    job.config = config
+    orbslam3 = job._write_orbslam3(summary)
+    shown = f"runs/{named_run}"
+    results = json.loads(json.dumps(summary["results"]).replace(str(workdir), shown))
+    if orbslam3 is not None:
+        orbslam3["path"] = orbslam3["path"].replace(str(workdir), shown)
+
+    base = rec_status(config, "idle", "no recording run yet")
+    run = {
+        "run_id": run_id,
+        "run_dir": f"runs/{run_id}",
+        "output_dir": f"runs/{run_id}",
+        "camera_name": first_name,
+    }
+    uploading = rec_status(
+        config, "uploading", f"Copying {CLIP} into the run folder.",
+        stage="upload", progress=0.43,
+        upload={"name": CLIP, "received_bytes": 602_860_000, "total_bytes": CLIP_BYTES},
+        **run,
+    )
+    analysing = rec_status(
+        config, "analysing", f"Picking views from {CLIP}.",
+        stage="extract", progress=0.37, image_size=size, serial=DEMO_SERIAL,
+        clips=[demo_clip(rec, mismatch=False)], **run,
+    )
+
+    def solved_status(clip, kept_poses, message):
+        counts = {**empty_counts(), **DEMO_COUNTS, "kept": len(kept_poses)}
+        clip = dict(clip, counts=counts, kept=[f"capture_{i:03d}.jpg" for i in range(1, 41)])
+        mismatches = [row["label"] for row in clip["check"] if row["status"] == "mismatch"]
+        mode_camera = camera.model_copy(update={"width": size[0], "height": size[1]})
+        return rec_status(
+            config, "solved", message,
+            stage="done", progress=1.0,
+            run_id=named_run, run_dir=shown, output_dir=shown, camera_name=named,
+            camera_named_from_serial=True,
+            camera_name_note=(
+                f"Named this camera {named} from its serial number, so its files match the "
+                "physical camera."
+            ),
+            serial=DEMO_SERIAL, image_size=size, captures=len(kept_poses),
+            coverage=coverage_summary(kept_poses, targets),
+            guide=guide_status(kept_poses, None, targets),
+            clips=[clip], counts=counts,
+            mismatch_count=len(mismatches), mismatch_fields=mismatches,
+            mismatch_clips=[CLIP] if mismatches else [],
+            results=results,
+            summary_path=f"{shown}/caib_marker_board_calibration_summary.json",
+            acquisition_mode=describe_recording_mode(mode_camera, rec, clip),
+            rejected_points=_discarded_points(summary),
+            orbslam3=orbslam3,
+        )
+
+    solved = solved_status(demo_clip(rec, mismatch=False), poses, "Calibration solved.")
+    mismatch = solved_status(
+        demo_clip(rec, mismatch=True), poses,
+        f"Calibration solved. 2 settings differ from the preset in {CLIP}: "
+        "frame rate, hypersmooth.",
+    )
+    # Too little spread from a first clip: the page asks for another clip.
+    retake = solved_status(demo_clip(rec, mismatch=False), poses[:9], "Calibration solved.")
+    # A second clip in another mode is refused; the run's earlier result stays.
+    refused_message = (
+        "GX010043.MP4 is 1920x1080 but this run's first clip was 4000x3000. The clip was not "
+        "used and was removed from this run's folder. Record every clip of one run in the same "
+        "mode, or start a new run for this one."
+    )
+    refused = dict(
+        solved,
+        state="error",
+        stage="check",
+        message=refused_message,
+        refused_clip={
+            "name": "GX010043.MP4",
+            "reason": "different_size",
+            "serial": DEMO_SERIAL,
+            "run_serial": DEMO_SERIAL,
+            "check": [],
+            "message": refused_message,
+        },
+    )
+    return {
+        "idle": base,
+        "uploading": uploading,
+        "analysing": analysing,
+        "mismatch": mismatch,
+        "retake": retake,
+        "solved": solved,
+        "refused": refused,
+    }
+
+
 # ---- browser ------------------------------------------------------------
 
 LAYOUT_CHECK = """
-({expect, primary, overlayEmpty, mustSay, mustNotSay, absent, steps, setupHighlighted}) => {
+(checks) => {
+  const {expect, primary, overlayEmpty, mustSay, mustNotSay, absent, steps} = checks;
+  const {setupHighlighted, drawn, within} = checks;
   const problems = [];
   const vw = document.documentElement.clientWidth;
   if (document.documentElement.scrollWidth > vw + 1) {
@@ -292,6 +524,25 @@ LAYOUT_CHECK = """
   if (expect.includes("#preview") && !(img.complete && img.naturalWidth > 0)) {
     problems.push("preview image not loaded");
   }
+  for (const el of document.querySelectorAll(".qr-card img")) {
+    if (el.offsetParent && !(el.complete && el.naturalWidth > 0)) {
+      problems.push(`image not loaded: #${el.id}`);
+    }
+  }
+  for (const selector of drawn) {
+    const canvas = document.querySelector(selector);
+    const data = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+    let count = 0;
+    for (let i = 3; i < data.length; i += 4) count += data[i] > 0;
+    if (count < 100) problems.push(`nothing drawn on ${selector}`);
+  }
+  for (const [selector, texts] of Object.entries(within)) {
+    const el = document.querySelector(selector);
+    const text = el ? el.innerText : "";
+    for (const want of texts) {
+      if (!text.includes(want)) problems.push(`${selector} does not say: "${want}"`);
+    }
+  }
   // One obvious next action: the enabled amber buttons are exactly the expected one.
   const shown = (el) => el.offsetParent && el.getBoundingClientRect().width > 0;
   const primaries = [...document.querySelectorAll(".btn-primary")]
@@ -324,8 +575,21 @@ LAYOUT_CHECK = """
     const got = document.getElementById(id).dataset.stepState;
     if (got !== want) problems.push(`step ${id} is ${got}, expected ${want}`);
   }
+  // The step bar shows the chosen route's steps, and only those.
+  if (Object.keys(steps).length) {
+    const visible = [...document.querySelectorAll(".step")]
+      .filter((el) => el.offsetParent)
+      .map((el) => el.id);
+    const want = JSON.stringify(Object.keys(steps));
+    if (JSON.stringify(visible) !== want) {
+      problems.push(`steps shown ${JSON.stringify(visible)}, expected ${want}`);
+    }
+  }
   if (document.querySelectorAll("[aria-current=step]").length > 1) {
     problems.push("more than one step is marked current");
+  }
+  for (const el of document.querySelectorAll("[aria-current=step]")) {
+    if (!el.offsetParent) problems.push(`hidden step #${el.id} is marked current`);
   }
   const setupAmber = document.getElementById("presetSelect").classList.contains("select-primary");
   if (setupAmber !== setupHighlighted) {
@@ -352,11 +616,38 @@ def custom_defaults(route):
     route.fulfill(response=response, json=data)
 
 
-def shoot(browser, base_url, status, jpeg, path, viewport, checks, text_path=None, custom=False):
+def decode_qr(png: bytes) -> str:
+    image = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_GRAYSCALE)
+    text, _points, _straight = cv2.QRCodeDetector().detectAndDecode(image)
+    return text
+
+
+def shoot(
+    browser, base_url, status, jpeg, path, viewport, checks, text_path=None, custom=False,
+    extra=None,
+):
+    """`extra` (recording route): route, rec_status (the faked /api/recording/status),
+    actions (JavaScript run after load, in order), reduced_motion, qr (codes expected)."""
+    extra = extra or {}
     errors = []
-    page = browser.new_page(viewport=viewport, device_scale_factor=1)
+    page = browser.new_page(
+        viewport=viewport,
+        device_scale_factor=1,
+        reduced_motion="reduce" if extra.get("reduced_motion") else "no-preference",
+    )
     page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
     page.on("pageerror", lambda exc: errors.append(str(exc)))
+    if extra.get("route"):
+        page.add_init_script(
+            f"try {{ localStorage.setItem({json.dumps(ROUTE_KEY)}, "
+            f"{json.dumps(extra['route'])}); }} catch {{}}"
+        )
+    if extra.get("rec_status") is not None:
+        rec_body = json.dumps(extra["rec_status"])
+        page.route(
+            "**/api/recording/status",
+            lambda route: route.fulfill(status=200, content_type="application/json", body=rec_body),
+        )
     if custom:
         page.route("**/api/defaults", custom_defaults)
     if status is not None:
@@ -377,7 +668,22 @@ def shoot(browser, base_url, status, jpeg, path, viewport, checks, text_path=Non
     if status is not None:
         page.evaluate("() => updateStatus(lastStatus)")  # redraw once the image has decoded
         page.wait_for_timeout(200)
+    if extra:
+        page.wait_for_function("() => recStatus !== null")
+        for action in extra.get("actions", []):
+            page.evaluate(action)
+            page.wait_for_timeout(300)
+        # The QR codes and the positions load after the route is shown.
+        page.wait_for_function(
+            "() => recGuide !== null && (recLabs !== null || !recordingConfig())"
+        )
+        page.evaluate("() => renderRecording()")
+        page.wait_for_timeout(200)
     problems = page.evaluate(LAYOUT_CHECK, checks) + [f"console: {e}" for e in errors]
+    for selector, want in (extra.get("qr") or {}).items():
+        got = decode_qr(page.locator(selector).screenshot())
+        if got != want:
+            problems.append(f"QR {selector} on screen reads {got!r}, expected {want!r}")
     page.screenshot(path=str(path), full_page=True)
     if text_path is not None:
         steps = page.evaluate(
@@ -420,6 +726,18 @@ def main() -> int:
     for result in states["solved"][0]["results"]:
         state = "ok" if result.get("ok") else f"FAILED: {result.get('error', '')[:120]}"
         print(f"  {result['model']}: rms {result.get('rms')} ({state})")
+    rec_camera = recording_camera(config.board)
+    print(f"rendering {args.views} synthetic 4:3 views for the recording route…", flush=True)
+    # Seed 34 reaches every coverage target with 40 views, so the solved shot passes.
+    rec_views = synthetic_views(rec_camera, args.views, np.random.default_rng(34))
+    with tempfile.TemporaryDirectory() as tmp:
+        print("solving them with the app's solver…", flush=True)
+        rec_states = build_recording_states(config, Path(tmp), rec_views)
+    for result in rec_states["solved"]["results"]:
+        state = "ok" if result.get("ok") else f"FAILED: {result.get('error', '')[:120]}"
+        print(f"  {result['model']}: rms {result.get('rms')} ({state})")
+    calibration_qr = labs_command(config.recording, calibration=True)
+    dataset_qr = labs_command(config.recording, calibration=False)
 
     set_default_config(config)
     port = free_port()
@@ -462,6 +780,40 @@ def main() -> int:
     def step_row(setup, connect, capture, solve):
         names = ("stepSetup", "stepConnect", "stepCapture", "stepSolve")
         return dict(zip(names, (setup, connect, capture, solve), strict=True))
+
+    def rec_row(setup, settings, record, drop):
+        names = ("stepSetup", "stepSettings", "stepRecord", "stepDrop")
+        return dict(zip(names, (setup, settings, record, drop), strict=True))
+
+    rec_common = [".steps", ".setup", "#recBench"]
+
+    def rec_checks(expect, primary, steps, texts=(), absent=(), not_texts=(), drawn=(), within=None,
+                   setup=False):
+        result = checks(expect, primary, texts=texts, absent=absent, steps=steps,
+                        not_texts=not_texts, setup=setup)
+        result["expect"] = rec_common + list(expect)
+        result["drawn"] = list(drawn)
+        result["within"] = within or {}
+        return result
+
+    route_texts = [
+        "How will you calibrate?",
+        "Calibrates the webcam stream only. Not valid for footage recorded on the camera.",
+        "For footage recorded on the camera, like UMI.",
+        "Check the code printed on the lens mod: ADWAL-002 = Max Lens Mod 2.0, "
+        "AEWAL-001 = Ultra Wide Lens Mod.",
+    ]
+    record_text = (
+        "Record 60–90 s. Move slowly and hold each position for about a second. "
+        "Push the board right to the edges of the frame."
+    )
+    banner = (
+        "This clip was not recorded with the preset's settings: Frame rate is 29.97 fps, "
+        "expected 60 fps; HyperSmooth is On (HS Boost), expected Off."
+    )
+    confirm = "() => document.getElementById('recSettingsBtn').click()"
+    recorded = "() => document.getElementById('recRecordedBtn').click()"
+    rec = {"route": "recording", "rec_status": rec_states["idle"]}
 
     review = args.review_dir
     live = ["#preview", "#cameraReadout .chip"]
@@ -670,12 +1022,302 @@ def main() -> int:
             checks(["#preview", "#resultsPanel"], "#nextCameraBtn", texts=solved_texts),
             False,
         ),
+        # ---- From a recording ----
+        (
+            # A first visit: the live route, with the choice of route in step 1. Picking
+            # From a recording switches the step bar and is remembered.
+            "rec-route-choice",
+            None,
+            b"",
+            review / "rec-route-choice.png",
+            desktop,
+            rec_checks(
+                ["#routeChoice", "#recSettingsPanel"],
+                "#recSettingsBtn",
+                rec_row("done", "current", "pending", "pending"),
+                texts=route_texts,
+                absent=["#previewBtn", ".bench", "#stepConnect"],
+            ),
+            False,
+            {
+                "rec_status": rec_states["idle"],
+                "actions": [
+                    "() => document.querySelector('input[value=recording]').click()",
+                    f"() => {{ if (localStorage.getItem({json.dumps(ROUTE_KEY)}) !== 'recording')"
+                    " throw new Error('route not remembered'); }",
+                ],
+            },
+        ),
+        (
+            "rec-settings",
+            None,
+            b"",
+            review / "rec-settings.png",
+            desktop,
+            rec_checks(
+                ["#recSettingsPanel", "#qrCalibration", "#qrDataset", "#labsChecklist tr",
+                 "#shutterWarning", "#labsUnverified"],
+                "#recSettingsBtn",
+                rec_row("done", "current", "pending", "pending"),
+                texts=[
+                    "Scan before the calibration clip",
+                    "Scan after, to go back to dataset settings",
+                    "Check the camera screen after scanning",
+                    "Switch the shutter back after the calibration clip.",
+                    calibration_qr,
+                    dataset_qr,
+                    "4K, aspect ratio 4:3",
+                ],
+                absent=["#resultsPanel", "#clipCheck", "#recShowSettingsBtn"],
+            ),
+            False,
+            {**rec, "qr": {"#qrCalibration": calibration_qr, "#qrDataset": dataset_qr}},
+        ),
+        (
+            "rec-settings-mobile",
+            None,
+            b"",
+            review / "rec-settings-mobile.png",
+            {"width": 390, "height": 844},
+            rec_checks(["#qrCalibration", "#labsChecklist tr"], "#recSettingsBtn",
+                       rec_row("done", "current", "pending", "pending")),
+            False,
+            rec,
+        ),
+        (
+            # Paused at a known moment (position 5, held) so the picture is the same
+            # every run.
+            "rec-record",
+            None,
+            b"",
+            review / "rec-record.png",
+            desktop,
+            rec_checks(
+                ["#recRecordPanel", "#recAnim", "#animToggle", "[data-anim-moving]"],
+                "#recRecordedBtn",
+                rec_row("done", "done", "current", "pending"),
+                texts=[record_text, "Play", "Orange dot: where the board goes now"],
+                not_texts=["Ringed: hold the board tilted"],
+                drawn=["#recAnim"],
+                within={"#animCaption": ["position 5/23 · far · top-right corner"]},
+                absent=["#recSettingsBtn"],
+            ),
+            False,
+            {**rec, "actions": [confirm, "() => seekAnimation(4, 0.9)"]},
+        ),
+        (
+            # Review only: a tilted position, drawn as a trapezoid, mid-move.
+            "rec-record-tilt",
+            None,
+            b"",
+            review / "rec-record-tilt.png",
+            desktop,
+            rec_checks(
+                ["#recAnim"], "#recRecordedBtn", rec_row("done", "done", "current", "pending"),
+                drawn=["#recAnim"],
+                within={"#animCaption": ["position 21/23 · tilted · upper right"]},
+            ),
+            False,
+            {**rec, "actions": [confirm, "() => seekAnimation(20, 0.35)"]},
+        ),
+        (
+            # prefers-reduced-motion: a still, numbered map and the list in order.
+            "rec-record-reduced",
+            None,
+            b"",
+            review / "rec-record-reduced.png",
+            desktop,
+            rec_checks(
+                ["#recAnim", "#positionsOl li"],
+                "#recRecordedBtn",
+                rec_row("done", "done", "current", "pending"),
+                texts=["Hold the board at each numbered position in turn, 1 to 23."],
+                drawn=["#recAnim"],
+                absent=["#animToggle", "[data-anim-moving]"],
+                within={"#animLegend": ["Ringed: hold the board tilted"]},
+            ),
+            False,
+            {**rec, "reduced_motion": True, "actions": [confirm]},
+        ),
+        (
+            "rec-drop",
+            None,
+            b"",
+            review / "rec-drop.png",
+            desktop,
+            rec_checks(
+                ["#recDropPanel", "#dropZone", "#recShowSettingsBtn", "#recShowRecordBtn"],
+                "#recChooseBtn",
+                rec_row("done", "done", "done", "current"),
+                texts=["Choose clip…", "Drop the clip from the camera's card here"],
+                absent=["#recNextBtn", "#recStats", "#resultsPanel"],
+            ),
+            False,
+            {**rec, "actions": [confirm, recorded]},
+        ),
+        (
+            "rec-uploading",
+            None,
+            b"",
+            review / "rec-uploading.png",
+            desktop,
+            rec_checks(
+                ["#recProgress"],
+                None,
+                rec_row("done", "done", "done", "current"),
+                texts=[f"Copying {CLIP} into the run folder", "43 %", "603 MB of 1.40 GB copied"],
+                absent=["#resultsPanel", "#clipCheck"],
+            ),
+            False,
+            {"route": "recording", "rec_status": rec_states["uploading"]},
+        ),
+        (
+            "rec-analysing",
+            None,
+            b"",
+            review / "rec-analysing.png",
+            desktop,
+            rec_checks(
+                ["#recProgress"],
+                None,
+                rec_row("done", "done", "done", "current"),
+                texts=["Picking views from the clip", "37 %"],
+                absent=["#resultsPanel", "#clipCheck", "#recMapWrap"],
+            ),
+            False,
+            {"route": "recording", "rec_status": rec_states["analysing"]},
+        ),
+        (
+            "rec-mismatch-pass",
+            None,
+            b"",
+            review / "rec-mismatch-pass.png",
+            desktop,
+            rec_checks(
+                ["#clipBanner", "#clipUnknown", "#resultsPanel", "#recMapWrap", "#recStats"],
+                "#recNextBtn",
+                rec_row("done", "done", "done", "done"),
+                texts=[
+                    banner,
+                    "Check every setting on the camera again, and record the clip again if any "
+                    "differ. The calibration below is only valid for footage recorded exactly "
+                    "like this clip.",
+                    "PASS",
+                    "The file cannot confirm these settings",
+                    "Named this camera gopro13_1234 from its serial number",
+                ],
+                within={"#verdictText": [
+                    banner, "Calibration passed, but it is only valid for footage recorded "
+                    "exactly like this clip.",
+                ]},
+                drawn=["#recMap"],
+            ),
+            False,
+            {"route": "recording", "rec_status": rec_states["mismatch"]},
+        ),
+        (
+            "rec-mismatch-mobile",
+            None,
+            b"",
+            review / "rec-mismatch-mobile.png",
+            {"width": 390, "height": 844},
+            rec_checks(["#clipBanner", "#resultsPanel"], "#recNextBtn",
+                       rec_row("done", "done", "done", "done"), texts=[banner]),
+            False,
+            {"route": "recording", "rec_status": rec_states["mismatch"]},
+        ),
+        (
+            "rec-retake",
+            None,
+            b"",
+            review / "rec-retake.png",
+            desktop,
+            rec_checks(
+                ["#recMissing", "#recMissingList li", "#resultsPanel", "#recNextBtn"],
+                "#recChooseBtn",
+                rec_row("done", "done", "done", "current"),
+                texts=["RETAKE", "Add another clip", "Missing positions",
+                       "Retake: record another clip that covers the missing positions"],
+                absent=["#clipBanner"],
+                not_texts=["Choose clip…", "Solve again"],
+            ),
+            False,
+            {"route": "recording", "rec_status": rec_states["retake"]},
+        ),
+        (
+            "rec-refused",
+            None,
+            b"",
+            review / "rec-refused.png",
+            desktop,
+            rec_checks(
+                ["#recAlert", "#resultsPanel"],
+                "#recNextBtn",
+                rec_row("done", "done", "done", "current"),
+                texts=[
+                    "GX010043.MP4 is 1920x1080 but this run's first clip was 4000x3000",
+                    "Problem: the last clip was not used.",
+                    "The calibration below still passes",
+                ],
+                absent=["#recMissing"],
+            ),
+            False,
+            {"route": "recording", "rec_status": rec_states["refused"]},
+        ),
+        (
+            "rec-solved",
+            None,
+            b"",
+            review / "rec-solved.png",
+            desktop,
+            rec_checks(
+                ["#resultsPanel", "#clipUnknown", "#recCamera", ".figure"],
+                "#recNextBtn",
+                rec_row("done", "done", "done", "done"),
+                texts=[
+                    "PASS",
+                    "Calibration passed. The files are listed below. Click Next camera",
+                    "Named this camera gopro13_1234 from its serial number",
+                    "Written for 960x720 frames",
+                    "Blue: not covered (not needed, the result passed)",
+                ],
+                absent=["#clipBanner", "#recMissing"],
+            ),
+            False,
+            {"route": "recording", "rec_status": rec_states["solved"]},
+        ),
+        (
+            # A camera setup with no recording section: step 1 is next again.
+            "rec-live-only-preset",
+            None,
+            b"",
+            review / "rec-live-only-preset.png",
+            desktop,
+            rec_checks(
+                ["#labsError"],
+                None,
+                rec_row("current", "pending", "pending", "pending"),
+                texts=["This camera setup has no settings for recording on the camera."],
+                setup=True,
+            ),
+            False,
+            {
+                **rec,
+                "actions": [
+                    f"() => {{ presetSelect.value = {json.dumps(LIVE_ONLY_PRESET)};"
+                    " presetSelect.dispatchEvent(new Event('change')); }",
+                ],
+            },
+        ),
     ]
     failures = 0
     launch = {"executable_path": shutil.which("chromium")} if shutil.which("chromium") else {}
     with sync_playwright() as pw:
         browser = pw.chromium.launch(**launch)
-        for name, status, frame, path, viewport, shot_checks, custom in shots:
+        for name, status, frame, path, viewport, shot_checks, custom, *rest in shots:
+            extra = rest[0] if rest else None
+            shot_checks.setdefault("drawn", [])
+            shot_checks.setdefault("within", {})
             jpeg = (
                 cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 88])[1].tobytes()
                 if len(frame)
@@ -683,7 +1325,8 @@ def main() -> int:
             )
             text_path = args.review_dir / f"{name}.txt"
             problems = shoot(
-                browser, base_url, status, jpeg, path, viewport, shot_checks, text_path, custom
+                browser, base_url, status, jpeg, path, viewport, shot_checks, text_path, custom,
+                extra,
             )
             print(f"{name}: {path}  {'ok' if not problems else 'PROBLEMS'}")
             for problem in problems:
