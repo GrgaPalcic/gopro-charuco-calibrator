@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import anyio
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -15,7 +15,9 @@ from . import presets
 from .bridge import stop_gopro_video_bridge
 from .capture import CaptureSession, default_runs_dir
 from .gopro import gopro_options_for_ui
-from .models import SolveFramesRequest, StartRequest
+from .labs import labs_payload
+from .models import AppConfig, RecordingConfig, SolveFramesRequest, StartRequest
+from .recording import RecordingError, RecordingJob, recording_guide
 from .solver import solve_from_frames
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -57,6 +59,8 @@ app.mount("/static", _RevalidatedStaticFiles(directory=STATIC_DIR), name="static
 
 _session_lock = threading.Lock()
 _session = CaptureSession()
+# The "From a recording" route: its own job, independent of the live session.
+_recording = RecordingJob()
 # Set only on server shutdown; ends the MJPEG generator. NOT the per-session stop
 # (a per-session stop is handled by the browser closing the stream connection),
 # so reopening a preview after Stop/Next Camera still streams.
@@ -297,3 +301,86 @@ def solve_frames(request: SolveFramesRequest):
         board_config=request.board,
         solver=request.solver,
     )
+
+
+# ---------------------------------------------------------------------------
+# From a recording
+# ---------------------------------------------------------------------------
+
+
+class RecordingRequest(StartRequest):
+    config: AppConfig | None = None
+
+
+@app.post("/api/recording/start")
+def recording_start(request: StartRequest):
+    """Open a new recording-route run (runs/<camera>_<timestamp>/) for the next clip."""
+    if request.runs_dir is not None:
+        _recording.runs_dir = request.runs_dir
+    try:
+        return _recording.start(request.config)
+    except RecordingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/recording/new")
+def recording_new(request: RecordingRequest | None = None):
+    """End this camera's run and go back to idle for the next camera."""
+    try:
+        return _recording.new(None if request is None else request.config)
+    except RecordingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/recording/status")
+def recording_status():
+    return _recording.status()
+
+
+@app.put("/api/recording/clips")
+async def recording_upload(request: Request, name: str):
+    """Stream the request body into the run's clips/ folder, then process it.
+
+    The body is the raw file (no multipart), so a 1.4 GB clip never sits in memory.
+    A second upload to the same run adds a retake.
+    """
+    try:
+        total = int(request.headers.get("content-length") or 0) or None
+    except ValueError:
+        total = None
+    try:
+        path = _recording.begin_upload(name, total)
+    except RecordingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    received = 0
+    try:
+        async with await anyio.open_file(path, "wb") as stream:
+            async for chunk in request.stream():
+                if chunk:
+                    await stream.write(chunk)
+                    received += len(chunk)
+                    _recording.upload_progress(received)
+    except BaseException as exc:
+        _recording.upload_failed(path, f"The upload stopped before the end: {exc}")
+        raise
+    if received == 0:
+        _recording.upload_failed(path, "The file was empty.")
+        raise HTTPException(status_code=400, detail="The file was empty.")
+    return _recording.start_processing(path)
+
+
+@app.get("/api/recording/guide")
+def recording_guide_endpoint():
+    """The route's checkpoints in order, with plain words for the recording animation."""
+    config = _recording.config if _recording.output_dir is not None else _session.config
+    return recording_guide(config)
+
+
+@app.post("/api/recording/labs")
+def recording_labs(request: StartRequest):
+    """The GoPro Labs QR codes (calibration clip, then dataset) and the settings checklist."""
+    rec = request.config.recording or RecordingConfig()
+    try:
+        return labs_payload(rec)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
