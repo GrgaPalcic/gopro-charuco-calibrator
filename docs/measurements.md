@@ -166,8 +166,11 @@ synthetic clips (1600×1200, made-up intrinsics). Fill in what was measured, wit
 - **QR codes:** what the camera screen showed after scanning QR code 1 and QR code 2 (lens, lens
   mod, resolution, frame rate, HyperSmooth, shutter). This settles the unverified codes (`fX`,
   `oX10` with `fX`, `S45`).
-- **Clip check:** every row as read (status, found), and which GPMF tags the file carried (`tags`
-  in the summary), in particular `VFOV`, `ZFOV`, `EISE`, `EISA`, `SHUT`, `ACCL`, `GYRO`.
+- **Clip check:** every row as read (status, found), and which GPMF tags the file carried, in
+  particular `VFOV`, `ZFOV`, `EISE`, `EISA`, `SHUT`, `ACCL`, `GYRO`. The summary leaves the tag
+  list out, so read it from the copied clip:
+  `uv run python -c "from gopro_charuco_calibrator.gpmf import read_clip_metadata as r; print(r('runs/<run>/clips/GX01xxxx.MP4'))"`
+  prints every value read and, under `tags`, every tag seen.
 - **Picking views:** frames read, views kept, each drop count, and how long the copy, the analysis
   and the solve took.
 - **Result:** badge, Double Sphere RMS, xi, alpha, views used; Kannala–Brandt RMS and the For UMI

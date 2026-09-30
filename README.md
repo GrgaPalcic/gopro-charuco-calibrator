@@ -76,8 +76,10 @@ picks the views and solves. Details and the evidence behind each setting are in
 ![The Record step of the From a recording route: steps 1 and 2 done, the I've recorded the clip button highlighted, the instruction to record 60 to 90 seconds, and the board animation paused at position 5 of 23, far, top-right corner, with the dots for the positions already shown and still to come](docs/screenshot-recording.png)
 
 **Before you start:** a HERO13 with GoPro Labs firmware, the lens mod fitted, a charged battery,
-a card with room (a 90 s clip is about 1.4 GB), and the 11×8 5X5 board printed flat. The clip is
-copied into the run folder, so the computer needs that much room too.
+a card with room (a 90 s clip is about 1.4 GB), and the ChArUco board printed flat: 11×8 squares
+of 34 mm, 25 mm markers from `DICT_5X5_100`, first marker ID 2 (ours is an A3 print from calib.io;
+see [Presets](#presets)). The clip is copied into the run folder, so the computer needs that much
+room too.
 
 1. **Camera setup.** Pick the camera setup that matches your lens mod. Check the code printed on
    the mod: **ADWAL-002** is the Max Lens Mod 2.0, **AEWAL-001** the Ultra Wide Lens Mod
@@ -107,17 +109,20 @@ copied into the run folder, so the computer needs that much room too.
      others were left out, and the positions covered. Keep the page open while the clip copies.
      A 90 s clip can take a few minutes to analyse (not yet timed on a real clip).
    - Then it solves, and shows the result with the files it wrote and what each one is for. Its
-     badge is **PASS**, **RETAKE**, **INCOMPLETE** or **FAILED**, as on the
-     [USB route](#live-over-usb).
+     badge is **PASS** (coverage met, the recommended model looks sound), **RETAKE** (see
+     [Retake](#retake) below), **INCOMPLETE** (Double Sphere or the UMI file did not solve; the
+     result says how to fix it) or **FAILED** (no model solved; the reasons are listed).
    - If you left **Camera name** as the camera setup filled it in, the run is renamed after the
      camera's serial number in the clip (for example `gopro13_1234`), so each file maps to one
-     camera.
+     camera. If you typed a name yourself, it stays for the next camera too: change it for each
+     camera, or put back the camera setup's name so the serial is used.
 
-**The clip check.** Before it picks views, the app reads the clip's file facts and the GoPro
-metadata inside it, and compares them with the camera setup: camera model, resolution, frame
-rate, HyperSmooth and shutter, plus the length, the motion sensor data and the serial. It never
-blocks the solve, but when a setting differs it shows a red box above the result, and the headline
-repeats it:
+### The clip check
+
+Before it picks views, the app reads the clip's file facts and the GoPro metadata inside it, and
+compares them with the camera setup: camera model, resolution, frame rate, HyperSmooth and
+shutter, plus the length, the motion sensor data and the serial. It never blocks the solve, but
+when a setting differs it shows a red box above the result, and the headline repeats it:
 
 > This clip was not recorded with the preset's settings: Frame rate is 29.97 fps, expected
 > 60 fps. Check every setting on the camera again, and record the clip again if any differ.
@@ -130,16 +135,31 @@ and do steps 2 to 4 with a new clip. Do not add the new clip to the flagged run.
 show the lens or the lens mod, so the page always asks you to check those on the camera screen.
 What each field means is in [docs/recording-route.md](docs/recording-route.md#the-clip-check).
 
-**Retake.** If the result is RETAKE, or there are not yet enough views to solve, the page lists
-the missing positions by their animation numbers and says why most frames were left out (for
-example "the board was moving"). Record another clip that covers them and click **Add another
-clip**. Its views are added to this run and everything is solved again. A clip from another
-camera starts a run of its own; a clip in another mode than the run's first clip is not used.
+### Retake
 
-**Next camera.** When the result passes, scan **QR code 2** (it is shown again next to the
-result) before you record the dataset, so the shutter goes back to Auto. Then click
-**Next camera**. It ends this run, keeps its files, and starts again at step 2 for the next
-GoPro.
+If the result is RETAKE, or there are not yet enough views to solve, the page lists the missing
+positions by their animation numbers and says why most frames were left out (for example "the
+board was moving"). Record another clip that covers them and click **Add another clip**. Its
+views are added to this run and everything is solved again. When the only problem is that the two
+fisheye solves disagree, there is no position to list: add another clip with views near the edge
+of the circle.
+
+What happens to the retake clip:
+- A clip from another camera starts a run of its own, with this run's camera setup (see
+  [Next camera](#next-camera) if your cameras have different lens mods).
+- A clip of another picture size than the run's first clip is not used.
+- A clip at another frame rate or with HyperSmooth on is used, but flagged in red.
+- Another lens cannot be told from the file, so check the camera screen before every retake.
+
+### Next camera
+
+When the result passes, scan **QR code 2** (it is shown again next to the result) before you
+record the dataset, so the shutter goes back to Auto. Then click **Next camera**. It ends this
+run, keeps its files, and starts again at step 2 for the next GoPro, with the same camera setup.
+
+Check the code on the next camera's lens mod. If it differs, pick its camera setup in step 1
+before you scan QR code 1: the two setups have different QR codes, and the clip check cannot see
+which mod was set.
 
 ## Live over USB
 
@@ -216,12 +236,15 @@ Once a camera has scanned the codes and one real clip has been checked, the resu
 ### Checking the result
 
 - **alpha** (Double Sphere) should sit clearly below 1.0. alpha at its limit means the board
-  missed the edge: add a clip (or, on the USB route, Resume) with edge views, and solve again.
+  missed the edge: add views near the edge (a clip on the recording route, **Resume** on the USB
+  route).
 - The **For UMI** row reads "Kannala–Brandt for UMI: matches Double Sphere within X px out to Y°".
   Y is the widest angle the board reached. If the two disagree by more than 1 px (at 1080p; the
-  limit grows with the image height), the result turns RETAKE and lists the gap: solve again
-  first, and add views near the edge only if the gap stays. A warning about the aspect ratio only
-  adds a note under PASS ("See the note on the For UMI row").
+  limit grows with the image height), the result turns RETAKE and lists the gap. On the USB route,
+  click **Solve** again first, and add views near the edge only if the gap stays. On the recording
+  route there is no Solve button: click **Add another clip** and record views near the edge; the
+  run is solved again with them. A warning about the aspect ratio only adds a note under PASS
+  ("See the note on the For UMI row").
 - For scale: on simulated lens-mod views, where the true lens is known, both models landed
   within 0.5 px of it out to the widest angle the board reached
   ([measurements](docs/measurements.md#synthetic-max-lens-mod-through-openicc-2026-09-29)).
@@ -244,6 +267,10 @@ Double Sphere results, project rays through both; the focal lengths alone can di
   UMI's settings file, `gopro10_maxlens_fisheye_setting_v1_720.yaml`; keep its `File.version`,
   `Camera.RGB` and IMU lines. On the recording route the block is written at **960×720**, the
   size UMI's SLAM runs at (4000×3000 × 0.24); on the USB route it stays at 1920×1080.
+- **Several cameras.** UMI reads one `gopro_intrinsics_2_7k.json` per `-c` folder, so make one
+  calibration folder per camera, from that camera's run (`gopro13_<last 4 of the serial>` on the
+  recording route), and run each camera's sessions with its own folder. Whether one UMI session
+  can mix cameras with a file each is not something we have checked (**unverified**).
 - **Before relying on SLAM,** read
   [what we have not checked](docs/umi-and-deployment.md#loading-our-calibration-in-umi):
   UMI's SLAM masks UMI's own gripper, and its IMU settings are not ours.
@@ -264,8 +291,10 @@ webcam maximum.
 | `gopro11_wide_1080p` | HERO11 Wide 1080p (stock lens) | Live over USB | `plumb_bob`, `rational_polynomial`, `fisheye` |
 
 `gopro13_mlm2_adwal002` replaces `gopro13_umi_gripper_fisheye_1080p` ("HERO13 + Max Lens Mod 2.0
-(UMI gripper)"), with the same USB settings. A preset without recording settings offers only the
-USB route.
+(UMI gripper)"), with the same USB settings. Its **Camera name** is still `gopro13_umi_gripper`
+(`gopro13_uwlm_gripper` for the Ultra Wide Lens Mod), so USB-route runs from it are still written
+to `runs/gopro13_umi_gripper_<timestamp>/`; recording-route runs are renamed after the camera's
+serial. A preset without recording settings offers only the USB route.
 
 Pick a preset in step 1, **Camera setup**, where it applies as soon as you choose it, or pass it
 with `serve --config`. In the settings panel, **Save as…** writes the current settings to
@@ -278,7 +307,8 @@ and appear in step 1. **Starting settings** puts back the settings the server st
 |---|---|---|
 | Linear | ~90° | `plumb_bob` / `rational_polynomial` (ROS camera_info) |
 | Wide | ~123–130° | `fisheye` (Kannala–Brandt, ROS `equidistant`) |
-| Ultra Wide with a lens mod (recording), or webcam Wide with a lens mod | 176° diagonal at 4:3 (Ultra Wide); ~167° lens | `double_sphere` (OpenICC), plus `kannala_brandt` (OpenICC `FISHEYE`) for UMI |
+| Ultra Wide 4:3 with a lens mod (recording route) | 145° × 113°, 176° diagonal (GoPro) | `double_sphere` (OpenICC), plus `kannala_brandt` (OpenICC `FISHEYE`) for UMI |
+| Webcam Wide with a lens mod (USB route) | ~167° (the 16:9 Max SuperView figure; [how it relates to 176°](docs/lens-modes-and-models.md#hero13-lens-mods-at-43)) | the same |
 | SuperView, HyperView, Max HyperView | — | none: anamorphic, never calibrate these |
 
 The live stream tops out at 1080p over USB, Wi-Fi and Labs RTMP alike. 4K exists only in
@@ -314,7 +344,7 @@ The recording route adds or changes these:
 | Summary, `recording.clips` | Per clip: every clip-check row (`field`, `label`, `expected`, `found`, `status`, `advice`), the ffprobe facts, the GoPro metadata read, the drop counts and the views kept from it. |
 | Summary, `recording.counts` | Frames read (`samples`), `kept`, and why the rest were left out: `no_board`, `blurred`, `moving`, `duplicate`, `over_cap`. |
 | Summary, `recording.mismatch_*` | The settings that differ from the camera setup, and the clips they are in. |
-| Summary, `recording.serial` | The camera's serial, and whether the run was named from it. |
+| Summary, `recording.serial`, `recording.camera_named_from_serial` | `serial` is the camera's serial; `camera_named_from_serial` says whether the run was named from it. |
 | `<camera>_kannala_brandt_orbslam3.yaml` | Written at **960×720** for a 4:3 clip, the size UMI's SLAM runs at; the json files stay at 4000×3000. `recording.orbslam3` in the summary says so. |
 
 ## CLI

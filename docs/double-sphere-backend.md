@@ -133,7 +133,8 @@ it. Nothing is imported, linked or vendored, and each user builds the image them
     it (fy = fx);
   - above 1 px (at 1080p and below; the limit grows with the image height above 1080 rows), both rows get a warning to
     solve again. Double Sphere is the recommended model, so its warning turns the result RETAKE.
-    Click **Solve** again first; add views near the edge of the circle only if the gap stays.
+    On the USB route, click **Solve** again first; add views near the edge of the circle only if
+    the gap stays. On the recording route, add another clip with views near the edge.
     The reference is Double Sphere as solved, not the true lens, so either one can be the one
     that is off;
   - an `aspect_ratio` more than 0.5 % from 1 gets a note on the For UMI row only,

@@ -30,19 +30,22 @@ The USB route stays, for data that really is the webcam stream.
 
 Decided 2026-09-30: record the dataset as close to UMI as the HERO13 allows, and calibrate in
 exactly that mode. Both lens-mod camera setups (`gopro13_mlm2_adwal002`,
-`gopro13_uwlm_aewal001`) carry these in their `recording:` section.
+`gopro13_uwlm_aewal001`) carry these in their `recording:` section. "GoPro" in the Status column
+means GoPro's own support pages, read 2026-09-30 and listed under [Sources](#sources): the Ultra
+Wide Lens Mod settings page (lens mods, modes, frame rates) and the HERO13 FOV page (fields of
+view).
 
 | Setting | Value | Why | Status |
 |---|---|---|---|
-| Lens mod | Max Lens Mod 2.0 (ADWAL-002), selected by hand; or Ultra Wide Lens Mod (AEWAL-001), detected when fitted | GoPro: the Max Lens Mod 2.0 "has the same settings and features" as the Ultra Wide Lens Mod, "except for auto-detection" | verified (GoPro) |
-| Mode | Video | | |
-| Resolution | 4K, 4:3 (4000×3000) | With a lens mod, 4:3 exists only at 4K. UMI records 4:3 too (`r27T`, 2.7K 4:3, in its QR code). | verified (GoPro) |
-| Frame rate | 60 fps | 4K 4:3 with a lens mod offers 60, 50, 30, 25 and 24 fps; 60 is the fastest. | verified (GoPro) |
-| Lens | Ultra Wide | The widest lens with a mod at 4:3: 145° H × 113° V × 176° D ([lens-modes-and-models.md](lens-modes-and-models.md#hero13-lens-mods-at-43)). | verified (GoPro) |
-| HyperSmooth | Off | Stabilisation warps each frame differently, so no single lens model fits. The field of view is the same on and off. | verified (GoPro, FOV) |
-| Protune | On | Needed to set the shutter and ISO. | |
+| Lens mod | Max Lens Mod 2.0 (ADWAL-002), selected by hand; or Ultra Wide Lens Mod (AEWAL-001), detected when fitted | GoPro: the Max Lens Mod 2.0 "has the same settings and features" as the Ultra Wide Lens Mod, "except for auto-detection" | verified (GoPro, UWLM page) |
+| Mode | Video | The dataset is video. | decided 2026-09-30 (Labs code `mV` verified) |
+| Resolution | 4K, 4:3 (4000×3000) | With a lens mod, 4:3 exists only at 4K. UMI records 4:3 too (`r27T`, 2.7K 4:3, in its QR code). | verified (GoPro, UWLM page) |
+| Frame rate | 60 fps | 4K 4:3 with a lens mod offers 60, 50, 30, 25 and 24 fps; 60 is the fastest. | verified (GoPro, UWLM page) |
+| Lens | Ultra Wide | The widest lens with a mod at 4:3: 145° H × 113° V × 176° D ([lens-modes-and-models.md](lens-modes-and-models.md#hero13-lens-mods-at-43)). | verified (GoPro, UWLM and FOV pages) |
+| HyperSmooth | Off | Stabilisation warps each frame differently, so no single lens model fits. The field of view is the same on and off. | decided 2026-09-30; the FOV is verified (GoPro, FOV page) |
+| Protune | On | Needed to set the shutter and ISO. | decided 2026-09-30 (Labs code `t` verified) |
 | Shutter | 1/480 s for the calibration clip, Auto for the dataset | A fast shutter keeps the moving board sharp (Kalibr's advice: short shutter). 1/480 s at 60 fps is a 45° shutter angle. | decided 2026-09-30 |
-| ISO max | 1600 | The Labs creator's default; the fast shutter needs the light. | |
+| ISO max | 1600 | The Labs creator's default; the fast shutter needs the light. | decided 2026-09-30 (the creator's default) |
 
 **Switch the shutter back after the calibration clip.** The dataset is recorded with the shutter
 on Auto, which is what QR code 2 sets. The page says so in step 2, and shows QR code 2 again next
@@ -50,7 +53,10 @@ to a passed result.
 
 What a HERO13 file is: all HERO13 video is HEVC, at roughly 100–120 Mb/s, so a 90 s clip is about
 1.4 GB in one `GX01xxxx.MP4` chapter. The camera splits a recording into chapters at about 4 GB
-(cards up to 32 GB) or about 12 GB. **verified** (GoPro)
+(cards up to 32 GB) or about 12 GB. **verified** from GoPro: the HERO13 user manual says every
+video is HEVC and the High bit rate goes "up to 120Mbps" at 4K; the ~100 Mb/s figure and the
+chapter sizes are from GoPro support docs read 2026-09-30 whose pages are not saved with the repo.
+The clip size is our arithmetic from those rates, not a measured file.
 
 ## The QR codes
 
@@ -77,7 +83,7 @@ For comparison, UMI's own QR code (HERO9, no lens-mod code) is
 | `r4T` | 4K 4:3 | Labs QR creator ("4k 4:3") | verified |
 | `p60` | 60 fps | Labs settings page | verified |
 | `e0` | HyperSmooth Off | Labs QR creator | verified |
-| `!N` | a short pause the creator puts between HyperSmooth and the lens | Labs QR creator source ("delay") | verified |
+| `!N` | a short pause the creator puts between HyperSmooth and the lens | Labs QR creator source ("delay") | verified that the creator emits it; the meaning is **inferred** from the source comment |
 | `oX2` | Max Lens Mod 2.0 | Labs settings page and release notes | verified |
 | `oX10` | auto-detect lens mods | HERO13 Labs release notes (1.12.70) | verified; how it combines with `fX` is **unverified** |
 | `fX` | the creator's "Enable MSV" (Max SuperView) with `oX2`, for HERO12–13; the settings page calls it "SuperMax Wide (Max Lens Mod)" | Labs QR creator and settings page | **unverified** that it selects Ultra Wide on a HERO13 at 4:3 |
@@ -173,8 +179,11 @@ the wrong ones. To keep the result anyway, click **Next camera**.
   page asks for another clip instead);
 - it is from another camera, and a folder for that camera's run could not be made.
 
-A clip from another camera is otherwise fine: it starts a new run for its camera, and the
-previous run stays as it was.
+A clip from another camera starts a new run for its camera, and the previous run stays as it
+was. The new run takes this run's camera setup, so its `config.json` and the result name this
+run's lens mod. With cameras that carry different mods, click **Next camera** and pick the right
+camera setup in step 1 before scanning QR code 1, rather than dropping the other camera's clip
+here.
 
 ## How views are picked
 
@@ -186,8 +195,8 @@ summary and shown on the page:
 |---|---|---|
 | `no_board` | no board found | fewer than 8 markers (`capture.min_markers`) found on a half-size copy |
 | `moving` | moving too fast | the markers moved more than the motion limit since the frame before, or the frame before had no board to compare with. The limit is the live route's `capture.max_motion_px` scaled to the clip's width and rate: at 4000 px wide and 12 Hz, about 7.8 px between frames. |
-| `blurred` | blurred | sharper frames exist of the same held position, or, over the whole clip, its sharpness is under half (`recording.blur_ratio`) of the clip's 90th percentile |
-| `duplicate` | too like a view already kept | the same held position as a sharper frame, or a pose too close (`capture.min_param_dist`) to a view already kept, from this clip or an earlier one |
+| `blurred` | blurred | under half (`recording.blur_ratio`) the sharpness of the sharpest frame of the same held position; or, when the clip ends, under half the 90th percentile of the clip's held positions and the run's kept views (size-weighted; a first clip needs 3 held positions for this) |
+| `duplicate` | too like a view already kept | the same held position as a sharper frame, and at least half as sharp; or a pose too close (`capture.min_param_dist`) to a view already kept, from this clip or an earlier one |
 | `over_cap` | over the view limit | past 120 views in the run (`recording.max_views`); views that complete a still-missing guide position are always kept |
 
 Frames where the board is still and in the same place form one held position; its sharpest frame
@@ -245,6 +254,16 @@ A run writes `runs/<camera_name>_<timestamp>/`, with everything the USB route wr
 
 ## Sources
 
+- GoPro, HERO13 Black: Ultra Wide Lens Mod settings and modes (the mod equivalence quote, 4:3 only
+  at 4K, the frame rates and lenses at 4:3), read 2026-09-30:
+  https://community.gopro.com/s/article/HERO13-Black-Ultra-Wide-Lens-Mod-Settings-And-Modes
+- GoPro, HERO13 Black: Digital Lenses FOV information (Ultra Wide 4:3 = 145° × 113° × 176° with
+  HyperSmooth AutoBoost, On and Off alike), read 2026-09-30:
+  https://community.gopro.com/s/article/HERO13-Black-Digital-Lenses-FOV-Information
+- GoPro, HERO13 Black user manual (HEVC, bit rate up to 120 Mb/s): https://gopro.com/help/productmanuals
+- GoPro product pages for the two mods (the codes ADWAL-002 and AEWAL-001):
+  https://gopro.com/en/us/shop/mounts-accessories/max-lens-mod-2/ADWAL-002.html and
+  https://gopro.com/en/us/shop/mounts-accessories/ultra-wide-lens-mod/AEWAL-001.html
 - GoPro Labs settings (`mV`, `p60`, `fX`, `oX2`): https://gopro.github.io/labs/control/settings/
 - GoPro Labs QR creator (`r4T`, `e0`, `!N`, `oX2fX` "Enable MSV", `t`, `i16`, `S45`, `S0`): https://gopro.github.io/labs/control/custom/
 - GoPro Labs release notes (HERO13 `oX10`, `oX3`): https://gopro.github.io/labs/control/notes/

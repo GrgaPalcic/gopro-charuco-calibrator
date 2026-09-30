@@ -119,8 +119,10 @@ been solved on real frames yet. So sweep the board right into the edge of the ci
 **The For UMI row** in the result checks each real solve: "Kannala–Brandt for UMI: matches Double
 Sphere within X px out to Y°", where Y is the widest angle the board reached and only rays that
 land on the sensor count. Over 1 px at 1080p, it warns, and because the warning also goes on
-Double Sphere, the recommended model, the result turns RETAKE. Click **Solve** again first, and add
-views near the edge of the circle only if the gap stays. The comparison is with Double Sphere as
+Double Sphere, the recommended model, the result turns RETAKE. On the USB route, click **Solve**
+again first, and add views near the edge of the circle only if the gap stays. On the recording
+route there is no Solve button: click **Add another clip** and record views near the edge; the
+run is solved again with them. The comparison is with Double Sphere as
 solved, not the true lens, so either can be the one that is off. With the old unpatched image the
 row did not always warn (see
 [footguns.md](footguns.md#an-old-openicc-image-is-off-at-a-good-rms)).
@@ -132,22 +134,25 @@ keeps it for its ROS camera_info YAML.
 
 ## Live deployment
 
-**The dataset is recorded on the camera, so no live path shows the policy the same image.** A
-robot needs a live feed, and both options are different images from the recording:
+**The dataset is recorded on the camera, so no live path is known to show the policy the same
+image** (**inferred**). A robot needs a live feed, and there are two options:
 - **The USB webcam** is what the app's USB route captures. It stops at 1080p 16:9 and has no
   lens-mod lens, so it needs its own calibration (the USB route), and a policy trained on 4K 4:3
   recordings would see a different image (**inferred**; not measured). Timestamps come from one
   host clock. The webcam image calibrated at 1.11 px in the app (0.617 px with OpenICC's own
   extractor), both in June with the unpatched solver.
-- **HDMI capture** is UMI's path, below.
+- **HDMI capture** is UMI's path, below. What the GoPro sends over HDMI in the 4K 4:3 mode is not
+  known. UMI records mp4 and deploys over HDMI in the same lens mode, so HDMI is the likeliest
+  match for the recording (**unverified**; not measured).
 
 Which live path comes closest to the recording has not been measured; the pending comparison in
 [measurements.md](measurements.md#pending-video-vs-webcam-comparison) covers the webcam.
 
 **HDMI capture is UMI's path.** It is the robust option for a live feed: a stable latency, and no
-overlays once Labs clean HDMI is on. But it is a **different image** from both the recording and
-the webcam stream. It needs its own calibration and, for a learned policy, training data captured
-the same way. Don't mix them.
+overlays once Labs clean HDMI is on. Whether its image matches the recording (the same size, crop
+and lens) is **unverified**: until a capture through the card has been compared with a clip,
+calibrate through the card as well and check that the two agree before a policy trained on
+recordings is deployed over it.
 
 | Piece | What it does | Without it |
 |---|---|---|
