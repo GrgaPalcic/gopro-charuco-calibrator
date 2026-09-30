@@ -6,7 +6,10 @@ this order: mode, resolution, frame rate, HyperSmooth, "!N", lens, "t" (Protune)
 the Protune fields, with the ISO cap and shutter as ``i<max>S<angle>``.
 
 - ``mV`` video mode; ``r4T`` 4K 4:3; ``p60`` 60 fps; ``e0`` HyperSmooth Off;
-- ``oX2`` Max Lens Mod 2.0; ``oX10`` auto-detect lens mods (Labs 1.12.70);
+- ``oX2`` Max Lens Mod 2.0; ``oX10`` auto-detect lens mods (Labs 1.12.70). The Labs
+  notes also list ``oX3`` for Max Lens Mod 2.5 (HERO13 setting 189 = 3, almost
+  certainly the Ultra Wide Lens Mod), so ``oX3fX`` may be the direct counterpart of
+  ``oX2fX``; ``oX10`` stays the default for AEWAL-001 until a camera has scanned both;
 - ``fX`` is the creator's "Enable MSV" (Max SuperView) with ``oX2``, for HERO12-13.
   On a HERO13 at 4:3 the mod's widest lens is called Ultra Wide; that ``fX`` selects
   it is not documented, so it is marked unverified;
@@ -65,8 +68,9 @@ def unverified_codes(rec: RecordingConfig, *, calibration: bool) -> list[dict[st
     notes = [
         {
             "code": rec.labs_lens_code,
-            "note": f"Should select the {rec.lens} lens: the Labs docs call it Max SuperView "
-            "and do not confirm it on a HERO13. Check the lens on the camera screen.",
+            "note": f"{rec.labs_lens_code} is the Labs code for Max SuperView (listed for "
+            f"HERO12-13). That it gives the {rec.lens} lens at 4K 4:3 on a HERO13 is not "
+            "documented. Check the lens on the camera screen.",
         }
     ]
     if rec.labs_lens_mod_code == "oX10":
@@ -75,6 +79,15 @@ def unverified_codes(rec: RecordingConfig, *, calibration: bool) -> list[dict[st
                 "code": "oX10",
                 "note": "Turns on lens-mod auto detection. How it combines with the lens "
                 "code is not documented. Check the camera shows the lens mod.",
+            }
+        )
+        notes.append(
+            {
+                "code": "oX3",
+                "note": "An alternative, also unverified: the HERO13 Labs notes list oX3 "
+                "for Max Lens Mod 2.5, which is probably this lens mod, so oX3fX may be the "
+                "direct counterpart of the Max Lens Mod 2.0 code oX2fX. This code uses "
+                "oX10 until one of them is scanned on a camera.",
             }
         )
     if calibration:
@@ -124,7 +137,11 @@ def checklist(rec: RecordingConfig) -> list[dict[str, str]]:
             "value": "4K, aspect ratio 4:3",
             "how": "With the lens mod, 4:3 is only available at 4K.",
         },
-        {"setting": "Frame rate", "value": f"{rec.fps:g}", "how": "Frames per second."},
+        {
+            "setting": "Frame rate",
+            "value": f"{rec.fps:g} fps",
+            "how": "Set it in the video preset.",
+        },
         {"setting": "Lens", "value": rec.lens, "how": "The widest lens with the mod at 4:3."},
         {
             "setting": "HyperSmooth",

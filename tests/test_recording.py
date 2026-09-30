@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 import pytest
 import yaml
-from conftest import POSES, build_clip, needs_ffmpeg
+from conftest import POSES, build_clip, needs_ffmpeg, with_contrast
 from fastapi.testclient import TestClient
 
 from gopro_charuco_calibrator import app as app_module
@@ -26,6 +26,7 @@ from gopro_charuco_calibrator.clipcheck import (
     probe_video,
 )
 from gopro_charuco_calibrator.coverage import PoseParams
+from gopro_charuco_calibrator.detection import detect_markers
 from gopro_charuco_calibrator.gopro import camera_state_warnings
 from gopro_charuco_calibrator.guide import default_checkpoints
 from gopro_charuco_calibrator.labs import checklist, labs_command, labs_payload, unverified_codes
@@ -38,19 +39,23 @@ from gopro_charuco_calibrator.models import (
 )
 from gopro_charuco_calibrator.openicc import DEFAULT_DOCKER_IMAGE, orbslam3_kb8_yaml
 from gopro_charuco_calibrator.recording import (
+    TOOLS_MISSING,
     RecordingError,
     RecordingJob,
     _frame_size,
     _Sample,
     _Selector,
     _Staged,
+    board_sharpness,
     camera_name_from_serial,
     extract_views,
+    incomplete_row,
     join_names,
     motion_limit_px,
     recording_guide,
     sanitise_clip_name,
 )
+from gopro_charuco_calibrator.synthetic import recording_camera
 
 # --- config and presets ------------------------------------------------------
 
@@ -162,13 +167,23 @@ def test_labs_unverified_codes_and_checklist():
     mlm2, uwlm = RecordingConfig(), RecordingConfig(lens_mod="AEWAL-001")
     assert [u["code"] for u in unverified_codes(mlm2, calibration=True)] == ["fX", "S45"]
     assert [u["code"] for u in unverified_codes(mlm2, calibration=False)] == ["fX"]
-    assert [u["code"] for u in unverified_codes(uwlm, calibration=True)] == ["fX", "oX10", "S45"]
+    assert [u["code"] for u in unverified_codes(uwlm, calibration=True)] == [
+        "fX", "oX10", "oX3", "S45"
+    ]
+    lens_note = unverified_codes(mlm2, calibration=True)[0]["note"]
+    assert "Max SuperView (listed for HERO12-13)" in lens_note
+    assert "Check the lens on the camera screen." in lens_note
+    alternative = unverified_codes(uwlm, calibration=False)[2]["note"]
+    assert "oX3fX" in alternative and "oX2fX" in alternative and "uses oX10" in alternative
     rows = {row["setting"]: row for row in checklist(mlm2)}
     assert rows["Lens mod"]["value"] == "Max Lens Mod 2.0"
     assert "not detected automatically" in rows["Lens mod"]["how"]
     assert "Detected automatically" in checklist(uwlm)[0]["how"]
     assert rows["HyperSmooth"]["value"] == "Off" and rows["Lens"]["value"] == "Ultra Wide"
     assert "1/480" in rows["Shutter"]["value"] and "Auto" in rows["Shutter"]["value"]
+    assert rows["Frame rate"] == {
+        "setting": "Frame rate", "value": "60 fps", "how": "Set it in the video preset."
+    }
     with pytest.raises(ValueError):
         labs_command(RecordingConfig(width=1920, height=1080), calibration=True)
 
@@ -292,6 +307,13 @@ def test_clip_check_flags_each_wrong_setting():
     assert rows["hypersmooth"]["found"] == "On (HS Boost)"
     assert rows["shutter"]["found"] == "1/60 s"
     assert rows["lens"]["status"] == "unknown"  # never a mismatch
+    assert rows["resolution"]["advice"] == (
+        "Set the resolution to 4K with the aspect ratio 4:3 (4000x3000), then record again."
+    )
+    # The advice names the preset's own size, whatever it is.
+    other = RecordingConfig(width=1600, height=1200, fps=24, calibration_shutter="1/192")
+    rows = _rows(probe, meta, other)
+    assert rows["resolution"]["advice"] == "Set the resolution to 1600x1200, then record again."
 
 
 def test_clip_check_without_gopro_metadata_or_ffprobe():
@@ -495,6 +517,96 @@ def test_most_holds_blurred_still_keeps_only_the_sharp_ones(tmp_path):
     kinds = [clip.label_at(view["time_s"]) for view in result.kept]
     assert sorted(kinds) == [("sharp", 0), ("sharp", 1), ("sharp", 2)], kinds
     assert result.counts["blurred"] >= 4
+
+
+def test_sharpness_does_not_depend_on_contrast():
+    board = AppConfig().board
+    camera = recording_camera(board, (1600, 1200))
+    gray = camera.render_gray(*camera.pose_towards(800, 600, 0.45, (0.0, 0.0, 0.0)))
+    half = cv2.resize(gray, (800, 600), interpolation=cv2.INTER_AREA)
+    detection = detect_markers(half, (800, 600), board)
+    full = board_sharpness(half, detection)
+    for contrast in (0.7, 0.45):
+        assert board_sharpness(with_contrast(half, contrast), detection) == pytest.approx(
+            full, rel=0.05
+        )
+    blurred = cv2.GaussianBlur(half, (0, 0), 0.65)  # sigma 1.3 at full resolution
+    assert board_sharpness(with_contrast(blurred, 0.45), detection) < 0.5 * full
+
+
+@needs_ffmpeg
+def test_sharp_holds_in_low_contrast_are_kept(tmp_path):
+    # A first clip: sharp holds at full, 70 % and 45 % contrast, and a blurred hold at
+    # 45 %. Only the blurred one may go.
+    poses = [
+        (0.35, 0.35, 0.65, (0.0, 0.0, 0.0), "sharp"),
+        (0.65, 0.65, 0.65, (0.0, 0.0, 0.0), "sharp"),
+        (0.30, 0.50, 0.40, (0.0, 0.0, 0.0), "sharp", 0.7),
+        (0.70, 0.50, 0.40, (0.0, 0.0, 0.0), "sharp", 0.45),
+        (0.50, 0.30, 0.28, (0.0, 0.0, 0.0), "sharp", 0.45),
+        (0.50, 0.70, 0.40, (0.0, 0.0, 0.0), "blurred", 0.45),
+    ]
+    clip = build_clip(tmp_path / "shade.mp4", poses=poses)
+    result = _extract(clip, tmp_path / "run")
+    kinds = sorted(clip.label_at(view["time_s"]) for view in result.kept)
+    assert kinds == [("sharp", i) for i in range(5)], kinds
+    assert result.counts["blurred"] >= 1
+
+
+@needs_ffmpeg
+def test_a_retake_in_other_light_keeps_its_sharp_views(synthetic_clip, tmp_path):
+    # The run's reference is the full-contrast first clip; the retake is darker.
+    first = _extract(synthetic_clip, tmp_path / "run")
+    prior_scores = [view["weighted"] for view in first.kept]
+    for contrast in (0.7, 0.45):
+        sharp = build_clip(
+            tmp_path / f"sharp_{contrast}.mp4",
+            poses=[(*e, "sharp", contrast) for e in NEW_POSITIONS],
+        )
+        kept = _extract(
+            sharp, tmp_path / f"run_{contrast}", prior=first.poses, prior_scores=prior_scores
+        )
+        assert kept.counts["kept"] == 2, (contrast, kept.counts)
+    blurred = build_clip(
+        tmp_path / "blurred_dark.mp4", poses=[(*e, "blurred", 0.7) for e in NEW_POSITIONS]
+    )
+    again = _extract(blurred, tmp_path / "run_b", prior=first.poses, prior_scores=prior_scores)
+    assert again.counts["kept"] == 0 and again.counts["blurred"] >= 2
+
+
+def _cut_short(clip_path: Path, out: Path, fraction: float) -> Path:
+    """A copy with the index first (as a camera writes it) and the rest cut off, like a
+    copy from the card that stopped early."""
+    whole = out.with_name(f"whole_{out.name}")
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-i", str(clip_path), "-c", "copy",
+         "-movflags", "+faststart", str(whole)],
+        check=True,
+    )
+    data = whole.read_bytes()
+    out.write_bytes(data[: int(len(data) * fraction)])
+    return out
+
+
+@needs_ffmpeg
+def test_a_clip_cut_short_is_flagged_and_still_used(synthetic_clip, tmp_path):
+    cut = _cut_short(synthetic_clip.path, tmp_path / "cut.mp4", 0.5)
+    probe = probe_video(cut)
+    whole = probe_video(synthetic_clip.path)["duration_s"]
+    assert probe["duration_s"] == pytest.approx(whole, abs=0.1)  # the index says all of it
+    result = _extract(SimpleNamespace(path=cut), tmp_path / "run")
+    assert result.incomplete and 0 < result.read_s < 0.9 * result.duration_s
+    assert 0 < result.counts["kept"] < 15
+    kinds = [synthetic_clip.label_at(view["time_s"]) for view in result.kept]
+    assert all(kind == "sharp" for kind, _pose in kinds), kinds
+    row = incomplete_row(result)
+    assert row["status"] == "mismatch" and row["field"] == "complete"
+    assert row["advice"] == (
+        f"Only the first {result.read_s:.0f} s of {result.duration_s:.0f} s could be read. "
+        "Copy the file from the card again."
+    )
+    # The whole clip is not flagged.
+    assert not _extract(synthetic_clip, tmp_path / "whole").incomplete
 
 
 @needs_ffmpeg
@@ -728,27 +840,40 @@ def test_end_to_end_upload_check_extract_solve_and_retake(
     assert reset["orbslam3"] is None and reset["refused_clip"] is None
 
 
+def _tree(folder: Path) -> dict[str, tuple[int, int]]:
+    """Every file under ``folder``: size and modification time, to show it is untouched."""
+    return {
+        str(path.relative_to(folder)): (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in sorted(folder.rglob("*"))
+        if path.is_file()
+    }
+
+
 @needs_ffmpeg
-def test_retake_adds_views_and_refuses_another_camera(
+def test_retake_adds_views_and_another_camera_gets_its_own_run(
     synthetic_clip, fresh_job, monkeypatch, tmp_path
 ):
     real_check = recording.check_clip
     serials = iter(["C3501234567890", "C3501234567890", "C3509999999999"])
+    inodes = {}
 
     def check_with_serial(path, rec, run_serial=None):
         result = real_check(path, rec, run_serial)
         result["metadata"] = {**result["metadata"], "serial": next(serials)}
+        inodes[path.name] = path.stat().st_ino
         return result
 
     monkeypatch.setattr(recording, "check_clip", check_with_serial)
     client = TestClient(app_module.app)
+    runs = tmp_path / "runs"
     client.post(
         "/api/recording/start",
-        json={"config": _config().model_dump(), "runs_dir": str(tmp_path / "runs")},
+        json={"config": _config().model_dump(), "runs_dir": str(runs)},
     )
     assert _upload(client, synthetic_clip.path, "GX010001.MP4").status_code == 200
     first = _poll(client)
     assert first["state"] == "solved" and first["captures"] == 15
+    assert first["previous_run_id"] is None and first["camera_switch"] is None
 
     retake = build_clip(tmp_path / "GX010002.MP4", poses=[(*e, "sharp") for e in NEW_POSITIONS])
     assert _upload(client, retake.path, "GX010002.MP4").status_code == 200
@@ -763,15 +888,96 @@ def test_retake_adds_views_and_refuses_another_camera(
     assert len(summary["frames"]) == 17  # the solve read both clips' views
     assert {v["clip"] for v in summary["recording"]["views"]} == {"GX010001.MP4", "GX010002.MP4"}
 
-    # A clip from another camera never joins the run.
-    assert _upload(client, retake.path, "GX010003.MP4").status_code == 200
-    refused = _poll(client)
-    assert refused["state"] == "error" and "another camera" in refused["message"]
-    assert refused["refused_clip"]["serial"] == "C3509999999999"
-    assert refused["refused_clip"]["run_serial"] == "C3501234567890"
-    assert [c["name"] for c in refused["clips"]] == ["GX010001.MP4", "GX010002.MP4"]
-    assert refused["captures"] == 17 and refused["results"] == status["results"]
-    assert not (run_dir / "clips" / "GX010003.MP4").exists()
+    # A clip from another camera: the first run stays exactly as it is, and the clip
+    # starts a run of its own, named from its serial, moved there (not copied).
+    before = _tree(run_dir)
+    assert _upload(client, synthetic_clip.path, "GX010003.MP4").status_code == 200
+    other = _poll(client)
+    assert other["state"] == "solved", other["message"]
+    assert _tree(run_dir) == before
+    note = (
+        "This clip is from another camera (serial C3509999999999): started a separate "
+        f"calibration for it. The previous camera's calibration is in {status['run_id']}."
+    )
+    assert other["message"].startswith(note)
+    assert other["camera_switch"]["message"] == note
+    assert other["camera_switch"]["previous_serial"] == "C3501234567890"
+    assert other["previous_run_id"] == status["run_id"]
+    assert other["previous_output_dir"] == str(run_dir)
+    assert other["run_id"] != status["run_id"] and other["run_id"].startswith("gopro13_9999_")
+    assert other["camera_name"] == "gopro13_9999" and other["serial"] == "C3509999999999"
+    assert other["refused_clip"] is None
+    new_dir = Path(other["output_dir"])
+    assert new_dir.parent == runs
+    moved = new_dir / "clips" / "GX010003.MP4"
+    assert moved.stat().st_ino == inodes["GX010003.MP4"]  # the same file, moved
+    assert moved.stat().st_size == synthetic_clip.path.stat().st_size
+    assert len(list(runs.rglob("GX010003.MP4"))) == 1
+    # Its own run: one clip, its own views, and its serial is not a mismatch.
+    assert [c["name"] for c in other["clips"]] == ["GX010003.MP4"]
+    assert other["captures"] == 15 and other["mismatch_count"] == 2
+    rows = {row["field"]: row for row in other["clips"][0]["check"]}
+    assert rows["serial"]["status"] == "ok"
+    new_summary = json.loads(Path(other["summary_path"]).read_text())
+    assert new_summary["recording"]["previous_run_id"] == status["run_id"]
+    assert new_summary["recording"]["serial"] == "C3509999999999"
+    saved = json.loads((new_dir / "config.json").read_text())
+    assert saved["clips"] == ["GX010003.MP4"]
+    assert saved["acquisition_mode"]["camera_name"] == "gopro13_9999"
+
+
+@needs_ffmpeg
+def test_a_clip_cut_short_warns_in_the_job(synthetic_clip, fresh_job, tmp_path):
+    cut = _cut_short(synthetic_clip.path, tmp_path / "GX010001.MP4", 0.75)
+    client = TestClient(app_module.app)
+    client.post(
+        "/api/recording/start",
+        json={"config": _config().model_dump(), "runs_dir": str(tmp_path / "runs")},
+    )
+    assert _upload(client, cut, "GX010001.MP4").status_code == 200
+    status = _poll(client)
+    assert status["state"] == "solved", status["message"]
+    (clip,) = status["clips"]
+    rows = {row["field"]: row for row in clip["check"]}
+    assert rows["complete"]["status"] == "mismatch"
+    assert rows["complete"]["advice"].startswith("Only the first ")
+    assert clip["mismatch_count"] == 3  # resolution, frame rate, cut short
+    assert "Whole clip read" in status["mismatch_fields"]
+    assert status["message"].endswith(
+        "Only part of GX010001.MP4 could be read: copy it from the card again."
+    )
+    assert "2 settings differ" in status["message"]
+    assert 8 <= status["captures"] < 15
+
+
+def test_missing_ffmpeg_never_blames_or_removes_the_clip(tmp_path, fresh_job, monkeypatch):
+    client = TestClient(app_module.app)
+    body = {"config": _config().model_dump(), "runs_dir": str(tmp_path / "runs")}
+    monkeypatch.setattr(recording, "missing_tools", lambda: ["ffmpeg", "ffprobe"])
+    response = client.post("/api/recording/start", json=body)
+    assert response.status_code == 503 and response.json()["detail"] == TOOLS_MISSING
+    assert TOOLS_MISSING.endswith(
+        "Install ffmpeg (it includes ffprobe), then drop the clip again."
+    )
+    monkeypatch.setattr(recording, "missing_tools", lambda: [])
+    run_dir = Path(client.post("/api/recording/start", json=body).json()["run_dir"])
+
+    # Refused before anything is written.
+    monkeypatch.setattr(recording, "missing_tools", lambda: ["ffprobe"])
+    response = client.put("/api/recording/clips?name=GX010001.MP4", content=b"x" * 1000)
+    assert response.status_code == 503 and response.json()["detail"] == TOOLS_MISSING
+    assert list((run_dir / "clips").iterdir()) == []
+    assert client.get("/api/recording/status").json()["message"] == TOOLS_MISSING
+
+    # Gone between the upload and the check: the clip stays where it is.
+    monkeypatch.setattr(recording, "missing_tools", lambda: [])
+    path = fresh_job.begin_upload("GX010001.MP4")
+    path.write_bytes(b"x" * 1000)
+    monkeypatch.setattr(recording, "missing_tools", lambda: ["ffmpeg"])
+    fresh_job.start_processing(path)
+    status = fresh_job.wait(30)
+    assert status["state"] == "error" and status["message"] == TOOLS_MISSING
+    assert path.is_file() and status["clips"] == [] and status["refused_clip"] is None
 
 
 @needs_ffmpeg

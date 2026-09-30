@@ -18,7 +18,13 @@ from .capture import CaptureSession, default_runs_dir
 from .gopro import gopro_options_for_ui
 from .labs import labs_payload
 from .models import AppConfig, SolveFramesRequest, StartRequest
-from .recording import NO_RECORDING_SETTINGS, RecordingError, RecordingJob, recording_guide
+from .recording import (
+    NO_RECORDING_SETTINGS,
+    MissingToolError,
+    RecordingError,
+    RecordingJob,
+    recording_guide,
+)
 from .solver import solve_from_frames
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -317,12 +323,15 @@ class RecordingRequest(StartRequest):
 def recording_start(request: StartRequest):
     """Open a new recording-route run (runs/<camera>_<timestamp>/) for the next clip.
 
-    400 when the preset has no recording section, 409 while a clip is being processed.
+    400 when the preset has no recording section, 409 while a clip is being processed,
+    503 when ffmpeg or ffprobe is not installed.
     """
     try:
         return _recording.start(request.config, request.runs_dir)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except MissingToolError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except RecordingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -346,7 +355,9 @@ async def recording_upload(request: Request, name: str):
     """Stream the request body into the run's clips/ folder, then process it.
 
     The body is the raw file (no multipart), so a 1.4 GB clip never sits in memory.
-    A second upload to the same run adds a retake.
+    A second upload to the same run adds a retake; a clip from another camera starts a
+    new run for that camera. 409 while busy or before a run is started, 503 (nothing
+    written) when ffmpeg or ffprobe is not installed.
     """
     try:
         total = int(request.headers.get("content-length") or 0) or None
@@ -354,6 +365,8 @@ async def recording_upload(request: Request, name: str):
         total = None
     try:
         path = _recording.begin_upload(name, total)
+    except MissingToolError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except RecordingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     received = 0

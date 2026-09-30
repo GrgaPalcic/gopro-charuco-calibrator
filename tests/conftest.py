@@ -30,6 +30,8 @@ BLUR_SIGMA = 1.3
 
 # (u, v as a fraction of the frame, distance m, tilt rotation vector, how the hold looks)
 # "sharp": all sharp; "half": sharp then blurred; "blurred": blurred throughout.
+# An optional sixth value is the hold's contrast: its black-to-white range scaled by that
+# factor around mid grey (a darker, greyer view: shade, fisheye fall-off, other light).
 POSES = [
     (0.50, 0.50, 0.45, (0.0, 0.0, 0.0), "sharp"),
     (0.25, 0.30, 0.60, (0.0, 0.0, 0.0), "half"),
@@ -85,6 +87,17 @@ def write_clip(path: Path, frames, size, fps) -> None:
     assert proc.wait(timeout=120) == 0
 
 
+def contrast_of(entry) -> float:
+    return float(entry[5]) if len(entry) > 5 else 1.0
+
+
+def with_contrast(gray: np.ndarray, contrast: float) -> np.ndarray:
+    if contrast == 1.0:
+        return gray
+    out = 128.0 + contrast * (gray.astype(np.float64) - 128.0)
+    return np.clip(np.round(out), 0, 255).astype(np.uint8)
+
+
 def build_clip(
     path: Path,
     poses=POSES,
@@ -98,7 +111,7 @@ def build_clip(
     labels: list[tuple[str, int]] = []
 
     def pose(entry):
-        u, v, distance, tilt, _kind = entry
+        u, v, distance, tilt = entry[:4]
         return camera.pose_towards(u * width, v * height, distance, tilt)
 
     def frames():
@@ -109,7 +122,7 @@ def build_clip(
             yield empty
         for index, entry in enumerate(poses):
             kind = entry[4]
-            sharp = camera.render_gray(*pose(entry))
+            sharp = with_contrast(camera.render_gray(*pose(entry)), contrast_of(entry))
             blurred = cv2.GaussianBlur(sharp, (0, 0), BLUR_SIGMA)
             for frame_no in range(hold_frames):
                 is_blur = kind == "blurred" or (kind == "half" and frame_no >= hold_frames // 2)
@@ -125,7 +138,7 @@ def build_clip(
                         u * width, v * height, d, ta + w * (tb - ta)
                     )
                     labels.append(("move", index))
-                    yield camera.render_gray(rotation, tvec)
+                    yield with_contrast(camera.render_gray(rotation, tvec), contrast_of(entry))
 
     write_clip(path, frames(), size, CLIP_FPS)
     return SyntheticClip(path=path, size=size, fps=CLIP_FPS, labels=labels, board=board)

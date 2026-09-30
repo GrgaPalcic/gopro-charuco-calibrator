@@ -129,6 +129,15 @@ def _row(field, label, expected, found, status, advice="") -> dict[str, Any]:
     }
 
 
+# GoPro's names for the recording sizes this route supports.
+RESOLUTION_NAMES = {(4000, 3000): "4K with the aspect ratio 4:3"}
+
+
+def _size_text(width: int, height: int) -> str:
+    name = RESOLUTION_NAMES.get((width, height))
+    return f"{name} ({width}x{height})" if name else f"{width}x{height}"
+
+
 def _fps_text(fps: float) -> str:
     return f"{fps:.2f}".rstrip("0").rstrip(".") + " fps"
 
@@ -175,7 +184,7 @@ def compare(
         rows.append(
             _row(
                 "resolution", "Resolution", expected_size, found, "ok" if ok else "mismatch",
-                "" if ok else "Set the resolution to 4K and the aspect ratio to 4:3, "
+                "" if ok else f"Set the resolution to {_size_text(rec.width, rec.height)}, "
                 "then record again.",
             )
         )
@@ -297,8 +306,8 @@ def compare(
         rows.append(
             _row(
                 "serial", "Camera serial", run_serial, serial, "mismatch",
-                f"This clip is from another camera (serial {serial}). Press Next camera "
-                "and start a new run for it.",
+                f"This clip is from another camera (serial {serial}). It gets a "
+                "calibration of its own.",
             )
         )
     else:

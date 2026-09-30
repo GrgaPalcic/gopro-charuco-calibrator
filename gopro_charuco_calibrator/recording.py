@@ -24,15 +24,25 @@ Frame selection, per sample of the clip (``RecordingConfig.sample_hz``, 12 Hz):
    or not, so a retake that repeats positions still counts) plus every view the run
    already kept. A first clip needs 3 held positions before the rule applies (fewer is
    no distribution); a retake always has the run's views, so a short retake that is
-   blurred throughout is still caught. Sharpness is the variance of the Laplacian
-   inside the board's box on the half-size image; a far board has denser edges and so
-   scores higher, which multiplying by the board's apparent size roughly offsets.
+   blurred throughout is still caught. Sharpness (``board_sharpness``) is the variance
+   of the Laplacian inside the board's box on the half-size image, divided by the
+   variance of the pixels in that box: both grow with the square of the contrast, so
+   the ratio does not change when the board is darker or greyer (fisheye edge fall-off,
+   shade, a retake in other light). A far board has denser edges and so scores higher,
+   which multiplying by the board's apparent size (``PoseParams.size``) roughly offsets.
    A high percentile, not the median, so the rule still works when most held positions
    are blurred (a clip recorded before the fast-shutter QR code was scanned): it holds
-   while about one held position in ten is sharp. Measured on synthetic clips
-   (2026-09-30): sharp holds scored at least 0.67x the 90th percentile at every
-   distance, blurred ones (Gaussian sigma 1.3) at most 0.24x. Real HERO13 footage,
-   whose fisheye edges are softer, has not been measured yet.
+   while about one held position in ten is sharp. Measured on 22 synthetic board
+   positions, 0.28 to 0.65 m, flat and tilted (2026-09-30, relative to the 90th
+   percentile of the sharp full-contrast ones): sharp holds scored 0.60 to 1.12x at full,
+   70 % and 45 % contrast alike; blurred holds (Gaussian sigma 1.3) 0.23 to 0.36x. The
+   tests' 16-position clip, encoded and read back through ffmpeg at each contrast, gave
+   the same: sharp 0.60 to 1.12x, blurred 0.25x.
+   Weighting by size^1.5 (the fitted slope) separated them less (sharp from 0.58x,
+   blurred up to 0.40x). The unnormalised score put sharp holds at 70 % contrast at
+   0.36 to 0.50x, so a darker clip lost its sharp views. Real HERO13 footage (softer
+   fisheye edges, sensor noise, which raises the score of a low-contrast view) has not
+   been measured yet.
 6. **Cap**: past ``max_views`` views in the run, a view that completes a guide
    checkpoint the run is still missing is always kept (the sharpest one per
    checkpoint, so a retake can always fix a RETAKE; the run may then pass the cap by
@@ -42,7 +52,13 @@ Frame selection, per sample of the clip (``RecordingConfig.sample_hz``, 12 Hz):
 Winners wait on disk (``_staging_<clip>/``) until the clip ends, so memory holds only a
 couple of frames whatever the clip length. Kept views become ``frames/capture_###.jpg``
 (full resolution, grey) and ``overlays/capture_###.jpg`` so ``solve_from_frames`` works
-unchanged; numbering continues across clips.
+unchanged; numbering continues across clips. A clip that ffmpeg stops reading with an
+error, or reads to under ``INCOMPLETE_READ_FRACTION`` of its probed length (a copy from
+the card that stopped early), gets a "Whole clip read" mismatch row; what was read is
+still used.
+
+One run is one camera: a clip whose serial differs from the run's starts a new run for
+its camera (``RecordingJob._switch_camera``) and leaves the previous run as it was.
 """
 
 from __future__ import annotations
@@ -66,7 +82,7 @@ import numpy as np
 from . import presets
 from .boards import detector_params, resolve_dictionary
 from .capture import _discarded_points, _read_exact, default_runs_dir
-from .clipcheck import check_clip, fallback_check, ffmpeg_error_line
+from .clipcheck import check_clip, compare, fallback_check, ffmpeg_error_line
 from .coverage import PoseParams, coverage_summary, pose_distance
 from .detection import MarkerDetection, detect_markers, draw_detection, marker_motion
 from .guide import default_checkpoints, guide_status, pose_matches_checkpoint
@@ -80,6 +96,9 @@ MOTION_REFERENCE_HZ = 30.0
 MOTION_REFERENCE_WIDTH = 1920.0
 # The clip-level blur rule judges against this percentile of the reference scores.
 BLUR_REFERENCE_PERCENTILE = 90.0
+# A clip decoded to less than this share of its probed length was cut short (a copy
+# from the card that stopped early): it is flagged, and what was read is still used.
+INCOMPLETE_READ_FRACTION = 0.9
 BUSY_STATES = ("uploading", "analysing", "solving")
 BUSY_MESSAGE = "A clip is still being processed; wait for it to finish."
 # A clip name's stem is kept under this many UTF-8 bytes (file names max out at 255).
@@ -95,6 +114,26 @@ NO_RECORDING_SETTINGS = (
 
 class RecordingError(RuntimeError):
     pass
+
+
+class MissingToolError(RecordingError):
+    """ffmpeg or ffprobe is not installed: the clip is fine and is never removed."""
+
+
+TOOLS_MISSING = (
+    "ffmpeg is not installed on this computer. Install ffmpeg (it includes ffprobe), "
+    "then drop the clip again."
+)
+
+
+def missing_tools() -> list[str]:
+    """The video tools this route needs that are not on the PATH."""
+    return [tool for tool in ("ffmpeg", "ffprobe") if shutil.which(tool) is None]
+
+
+def require_tools() -> None:
+    if missing_tools():
+        raise MissingToolError(TOOLS_MISSING)
 
 
 def join_names(names: list[str]) -> str:
@@ -113,7 +152,8 @@ def motion_limit_px(max_motion_px: float, width: int, sample_hz: float) -> float
 
 
 def board_sharpness(gray: np.ndarray, detection: MarkerDetection) -> float:
-    """Variance of the Laplacian inside the board's bounding box."""
+    """Variance of the Laplacian inside the board's bounding box, divided by the
+    variance of the box's pixels, so the score does not depend on the contrast."""
     points = detection.all_points()
     h, w = gray.shape[:2]
     x0, y0 = np.floor(points.min(axis=0)).astype(int)
@@ -121,7 +161,11 @@ def board_sharpness(gray: np.ndarray, detection: MarkerDetection) -> float:
     crop = gray[max(y0, 0) : min(y1 + 1, h), max(x0, 0) : min(x1 + 1, w)]
     if crop.size < 16:
         return 0.0
-    return float(cv2.Laplacian(crop, cv2.CV_64F).var())
+    crop = crop.astype(np.float64)
+    spread = float(crop.var())
+    if spread < 1.0:  # a flat box (under one grey level): nothing to judge
+        return 0.0
+    return float(cv2.Laplacian(crop, cv2.CV_64F).var()) / spread
 
 
 @dataclass(eq=False)
@@ -157,6 +201,17 @@ class ExtractResult:
     first_index: int
     next_index: int = 0
     motion_limit_px: float = 0.0
+    # How much of the clip ffmpeg decoded (samples / sample rate), its probed length,
+    # and ffmpeg's last error line when it stopped with an error.
+    read_s: float = 0.0
+    duration_s: float = 0.0
+    decode_error: str | None = None
+
+    @property
+    def incomplete(self) -> bool:
+        """ffmpeg stopped with an error, or read well short of the probed length."""
+        short = self.duration_s > 0 and self.read_s < INCOMPLETE_READ_FRACTION * self.duration_s
+        return self.decode_error is not None or short
 
 
 @dataclass
@@ -335,7 +390,7 @@ def extract_views(
     """
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
-        raise RecordingError("ffmpeg is not installed; install it and drop the clip again.")
+        raise MissingToolError(TOOLS_MISSING)
     width, height = _frame_size(probe)
     duration = float(probe.get("duration_s") or 0.0)
     prior = list(prior_poses or [])
@@ -434,12 +489,15 @@ def _extract_into(
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-        if proc.returncode not in (0, None) and selector.counts["samples"] == 0:
+        decode_error = None
+        if proc.returncode not in (0, None):
             stderr.seek(0)
             detail = ffmpeg_error_line(stderr.read().decode(errors="replace"), clip)
-            raise RecordingError(
-                "ffmpeg could not decode this clip" + (f": {detail}." if detail else ".")
-            )
+            if selector.counts["samples"] == 0:
+                raise RecordingError(
+                    "ffmpeg could not decode this clip" + (f": {detail}." if detail else ".")
+                )
+            decode_error = detail or f"ffmpeg stopped with exit code {proc.returncode}"
 
     kept_staged = selector.finish()
     first = next_capture_index(frames_dir)
@@ -469,7 +527,7 @@ def _extract_into(
                     "clip": clip.name,
                     "time_s": round(sample.time_s, 3),
                     "markers": sample.detection.marker_count,
-                    "sharpness": round(sample.sharpness, 2),
+                    "sharpness": round(sample.sharpness, 4),
                     "weighted": sample.weighted,
                     "motion_px": round(sample.motion_px, 3),
                     "pose": sample.pose.as_dict(),
@@ -492,7 +550,33 @@ def _extract_into(
         first_index=first,
         next_index=number,
         motion_limit_px=limit,
+        read_s=selector.counts["samples"] / rec.sample_hz,
+        duration_s=duration,
+        decode_error=decode_error,
     )
+
+
+def incomplete_row(result: ExtractResult) -> dict[str, Any]:
+    """A clip-check row for a clip ffmpeg could not read to the end."""
+    read, total = result.read_s, result.duration_s
+    if total > 0 and read < INCOMPLETE_READ_FRACTION * total:
+        advice = (
+            f"Only the first {read:.0f} s of {total:.0f} s could be read. "
+            "Copy the file from the card again."
+        )
+    else:
+        advice = (
+            f"ffmpeg reported an error while reading the clip ({result.decode_error}). "
+            "Copy the file from the card again."
+        )
+    return {
+        "field": "complete",
+        "label": "Whole clip read",
+        "expected": None if total <= 0 else f"{total:.0f} s",
+        "found": f"{read:.0f} s",
+        "status": "mismatch",
+        "advice": advice,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -630,6 +714,7 @@ class RecordingJob:
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._generation = 0
+        self._active_generation = 0
         self._reset_run()
         self._status: dict[str, Any] = {}
         self._set_idle("no recording run yet")
@@ -647,6 +732,10 @@ class RecordingJob:
         self._clips: list[dict[str, Any]] = []
         self._image_size: tuple[int, int] | None = None
         self._refused: dict[str, Any] | None = None
+        # Set when a clip from another camera started this run (see _switch_camera).
+        self.previous_run_id: str | None = None
+        self.previous_output_dir: Path | None = None
+        self._camera_switch: dict[str, Any] | None = None
         self._generation += 1
 
     @property
@@ -669,6 +758,35 @@ class RecordingJob:
             if serial:
                 return serial
         return None
+
+    def _mismatch_sentence(self) -> str:
+        """" 2 settings differ from the preset in A and B: x, y." plus a line for clips
+        that could not be read to the end (not a setting, but as loud)."""
+        settings: list[str] = []
+        setting_clips: list[str] = []
+        cut: list[str] = []
+        for clip in self._clips:
+            rows = [row for row in clip.get("check") or [] if row["status"] == "mismatch"]
+            if any(row["field"] == "complete" for row in rows):
+                cut.append(clip["name"])
+            rows = [row for row in rows if row["field"] != "complete"]
+            if rows:
+                setting_clips.append(clip["name"])
+            for row in rows:
+                if row["label"] not in settings:
+                    settings.append(row["label"])
+        text = ""
+        if settings:
+            text += (
+                f" {len(settings)} setting{'s differ' if len(settings) != 1 else ' differs'} "
+                f"from the preset in {join_names(setting_clips)}: {', '.join(settings).lower()}."
+            )
+        if cut:
+            text += (
+                f" Only part of {join_names(cut)} could be read: copy "
+                f"{'it' if len(cut) == 1 else 'them'} from the card again."
+            )
+        return text
 
     def _mismatches(self) -> tuple[list[str], list[str]]:
         """The distinct settings that differ from the preset, and the clips they are in."""
@@ -715,6 +833,13 @@ class RecordingJob:
             "mismatch_fields": mismatch_fields,
             "mismatch_clips": mismatch_clips,
             "refused_clip": None if self._refused is None else dict(self._refused),
+            # A clip from another camera started this run; the previous camera's run
+            # is left exactly as it was.
+            "previous_run_id": self.previous_run_id,
+            "previous_output_dir": (
+                None if self.previous_output_dir is None else str(self.previous_output_dir)
+            ),
+            "camera_switch": None if self._camera_switch is None else dict(self._camera_switch),
             "min_frames": self.config.solver.min_frames,
             "preview_open": False,
         }
@@ -769,6 +894,7 @@ class RecordingJob:
         (live route only) and ``RecordingError`` while a clip is being processed."""
         if config.recording is None:
             raise ValueError(NO_RECORDING_SETTINGS)
+        require_tools()
         with self._lock:
             if self.busy:
                 raise RecordingError(BUSY_MESSAGE)
@@ -792,9 +918,18 @@ class RecordingJob:
             self._set_idle("Ready for the next camera.")
             return self.status()
 
+    def _unique_run_dir(self, camera_name: str) -> Path:
+        """runs/<camera>_<timestamp>/, with _2, _3... if that folder exists already."""
+        base = self.runs_dir / f"{camera_name}_{self._timestamp}"
+        path, counter = base, 2
+        while path.exists():
+            path = base.with_name(f"{base.name}_{counter}")
+            counter += 1
+        return path
+
     def _make_run_dir(self) -> None:
-        self.run_id = f"{self.camera_name}_{self._timestamp}"
-        self.output_dir = self.runs_dir / self.run_id
+        self.output_dir = self._unique_run_dir(self.camera_name or DEFAULT_CAMERA_NAME)
+        self.run_id = self.output_dir.name
         for sub in ("clips", "frames", "overlays"):
             (self.output_dir / sub).mkdir(parents=True, exist_ok=True)
         self._write_run_config()
@@ -842,11 +977,17 @@ class RecordingJob:
     # -- upload ----------------------------------------------------------
 
     def begin_upload(self, name: str, total_bytes: int | None = None) -> Path:
+        """Refused (and nothing written) while busy, before a run, or without ffmpeg."""
         with self._lock:
             if self.busy:
                 raise RecordingError(BUSY_MESSAGE)
             if self.output_dir is None:
                 raise RecordingError("Start a recording run first.")
+            if missing_tools():
+                self._status.update(
+                    state="error", stage="upload", progress=0.0, message=TOOLS_MISSING
+                )
+                raise MissingToolError(TOOLS_MISSING)
             clips_dir = self.output_dir / "clips"
             clips_dir.mkdir(parents=True, exist_ok=True)
             clean = sanitise_clip_name(name)
@@ -900,14 +1041,19 @@ class RecordingJob:
     # -- processing (background thread) ----------------------------------
 
     def _process(self, clip: Path, generation: int) -> None:
+        # A clip from another camera moves the job to a new run (a new generation).
+        self._active_generation = generation
         try:
             self._process_clip(clip, generation)
+        except MissingToolError as exc:
+            # Not the clip's fault: it stays in clips/, out of the run's list.
+            self._publish(self._active_generation, state="error", stage="check", message=str(exc))
         except Exception as exc:  # noqa: BLE001 - the job must end in a state, never hang
             message = str(exc) or f"{type(exc).__name__} while processing {clip.name}."
             self._publish(
-                generation,
+                self._active_generation,
                 state="error",
-                message=message,
+                message=self._with_switch_note(message),
                 # the solver's own "Need at least N usable frames"
                 needs_more_views=message.startswith("Need at least"),
             )
@@ -920,25 +1066,18 @@ class RecordingJob:
             return fallback_check(clip, self.rec, exc)
 
     def _process_clip(self, clip: Path, generation: int) -> None:
-        """Check, extract and solve. A clip the run cannot use (another camera, not a
-        video, a different size, or reading it failed) never joins the run: its file is
-        deleted and it shows as ``refused_clip``, so it cannot feed the mismatch
-        warnings, the summary or config.json."""
+        """Check, extract and solve. A clip from another camera starts a new run of its
+        own (``_switch_camera``). A clip the run cannot use (not a video, a different
+        size, or reading it failed) never joins the run: its file is deleted and it
+        shows as ``refused_clip``, so it cannot feed the mismatch warnings, the summary
+        or config.json. A missing ffmpeg is never the clip's fault: it stays."""
+        require_tools()
         rec = self.rec
+        with self._lock:
+            self._camera_switch = None  # the note is about the clip that caused it
         run_serial = self._run_serial()
         check = self._check(clip, run_serial)
         serial = check["metadata"].get("serial")
-        if run_serial and serial and serial != run_serial:
-            self._refuse(
-                clip, check, generation, reason="other_camera", serial=serial,
-                run_serial=run_serial,
-                message=(
-                    f"{clip.name} is from another camera (serial {serial}); this run is for "
-                    f"the camera with serial {run_serial}. {NOT_USED} Press Next camera and "
-                    "start a new run for it."
-                ),
-            )
-            return
         size = None
         if "error" not in check["probe"]:
             try:
@@ -955,6 +1094,15 @@ class RecordingJob:
                 ),
             )
             return
+        if run_serial and serial and serial != run_serial:
+            clip, generation = self._switch_camera(clip, serial, run_serial)
+            # In its own run the serial is no longer a mismatch.
+            rows = compare(check["probe"], check["metadata"], rec)
+            check = {
+                **check,
+                "check": rows,
+                "mismatch_count": sum(1 for row in rows if row["status"] == "mismatch"),
+            }
         if self._image_size is not None and size != self._image_size:
             self._refuse(
                 clip, check, generation, reason="different_size",
@@ -981,7 +1129,10 @@ class RecordingJob:
             self._refused = None
             self._clips.append(entry)
         self._publish(
-            generation, stage="extract", progress=0.0, message=f"Picking views from {clip.name}."
+            generation,
+            stage="extract",
+            progress=0.0,
+            message=self._with_switch_note(f"Picking views from {clip.name}."),
         )
         try:
             result = extract_views(
@@ -995,6 +1146,10 @@ class RecordingJob:
                 prior_scores=[view["weighted"] for view in self._kept],
                 progress=lambda fraction: self._set(generation, progress=round(fraction, 4)),
             )
+        except MissingToolError:
+            with self._lock:
+                self._clips.remove(entry)
+            raise
         except Exception as exc:  # noqa: BLE001 - the clip leaves the run, then the job ends
             with self._lock:
                 self._clips.remove(entry)
@@ -1009,6 +1164,11 @@ class RecordingJob:
             entry["counts"] = result.counts
             entry["kept"] = [view["name"] for view in result.kept]
             entry["motion_limit_px"] = round(result.motion_limit_px, 3)
+            entry["read_s"] = round(result.read_s, 3)
+            if result.incomplete:
+                # Cut short (a copy that stopped early): warn, and use what was read.
+                entry["check"] = [*entry["check"], incomplete_row(result)]
+                entry["mismatch_count"] += 1
             self._image_size = tuple(result.image_size)
         # Named after the camera only once the clip is in the run (frames move with it).
         self._maybe_name_from_serial(serial, generation)
@@ -1019,6 +1179,52 @@ class RecordingJob:
         self._publish(generation)
         self._solve(generation)
 
+    def _switch_camera(self, clip: Path, serial: str, run_serial: str) -> tuple[Path, int]:
+        """Leave this run exactly as it is and start a new run, same config, for the
+        camera that recorded ``clip``; the clip is moved (not copied) into it.
+
+        The new run is named from the clip's serial even when the operator named the
+        first camera: that name belongs to the previous camera. Returns the clip's new
+        path and the new run's generation.
+        """
+        with self._lock:
+            previous_id, previous_dir = self.run_id, self.output_dir
+            self._reset_run()
+            self.camera_name = camera_name_from_serial(serial) or self.config.camera.camera_name
+            self.named_from_serial = camera_name_from_serial(serial) is not None
+            self._timestamp = time.strftime("%Y%m%d_%H%M%S")
+            self._make_run_dir()
+            assert self.output_dir is not None
+            target = self.output_dir / "clips" / clip.name
+            try:
+                clip.rename(target)
+            except OSError:
+                shutil.move(str(clip), target)  # another file system: still a move
+            message = (
+                f"This clip is from another camera (serial {serial}): started a separate "
+                f"calibration for it. The previous camera's calibration is in {previous_id}."
+            )
+            self.previous_run_id = previous_id
+            self.previous_output_dir = previous_dir
+            self._camera_switch = {
+                "clip": target.name,
+                "serial": serial,
+                "previous_serial": run_serial,
+                "previous_run_id": previous_id,
+                "message": message,
+            }
+            generation = self._generation
+            self._active_generation = generation
+        self._publish(generation, message=message)
+        return target, generation
+
+    def _with_switch_note(self, message: str) -> str:
+        """Lead with the camera-switch note while the clip that caused it is processed."""
+        switch = self._camera_switch
+        if switch is None or message.startswith(switch["message"]):
+            return message
+        return f"{switch['message']} {message}"
+
     def _refuse(
         self,
         clip: Path,
@@ -1027,8 +1233,6 @@ class RecordingJob:
         *,
         reason: str,
         message: str,
-        serial: str | None = None,
-        run_serial: str | None = None,
     ) -> None:
         """A clip the run cannot use never joins it: one run is one camera in one mode.
         The run's earlier clips, views and results stay in the status."""
@@ -1037,12 +1241,15 @@ class RecordingJob:
             self._refused = {
                 "name": clip.name,
                 "reason": reason,
-                "serial": serial,
-                "run_serial": run_serial,
+                "serial": check["metadata"].get("serial"),
+                "run_serial": self._run_serial(),
                 "check": check["check"],
                 "message": message,
             }
-        self._publish(generation, state="error", stage="check", progress=0.0, message=message)
+        self._publish(
+            generation, state="error", stage="check", progress=0.0,
+            message=self._with_switch_note(message),
+        )
 
     def _maybe_name_from_serial(self, serial: str | None, generation: int) -> None:
         """Name the run after the camera's serial when the name is still a default."""
@@ -1056,9 +1263,7 @@ class RecordingJob:
         ):
             return
         old_dir = self.output_dir
-        new_dir = self.runs_dir / f"{new_name}_{self._timestamp}"
-        if new_dir.exists():
-            return
+        new_dir = self._unique_run_dir(new_name)
         try:
             old_dir.rename(new_dir)
         except OSError:
@@ -1081,7 +1286,7 @@ class RecordingJob:
                 state="error",
                 stage="extract",
                 needs_more_views=True,
-                message=(
+                message=self._with_switch_note(
                     f"Only {len(self._poses)} usable views so far; solving needs {min_frames}. "
                     "Record another clip that holds the board still at more positions, "
                     "and add it to this run."
@@ -1112,6 +1317,7 @@ class RecordingJob:
             "mismatch_clips": run["mismatch_clips"],
             "serial": run["serial"],
             "camera_named_from_serial": self.named_from_serial,
+            "previous_run_id": self.previous_run_id,
             "views": self._kept,
             "orbslam3": orbslam3,
         }
@@ -1121,19 +1327,14 @@ class RecordingJob:
         message = "Calibration solved."
         if failed:
             message = f"Calibration solved; these models failed: {', '.join(failed)}."
-        fields, clips = run["mismatch_fields"], run["mismatch_clips"]
-        if fields:
-            message += (
-                f" {len(fields)} setting{'s differ' if len(fields) != 1 else ' differs'} "
-                f"from the preset in {join_names(clips)}: {', '.join(fields).lower()}."
-            )
+        message += self._mismatch_sentence()
         # One update, state included: the job stays busy until the run is complete.
         self._publish(
             generation,
             state="solved",
             stage="done",
             progress=1.0,
-            message=message,
+            message=self._with_switch_note(message),
             needs_more_views=False,
             results=summary["results"],
             summary_path=str(summary_path),
