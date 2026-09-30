@@ -17,23 +17,24 @@ next action, the step bar agreeing with it, Next camera only after a solve,
 nothing drawn over the idle preview, no discarded or surplus boxes in the
 coverage legend, and no browser console errors. It exits non-zero if any fail.
 
-Output: docs/screenshot.png (solved, desktop). The other shots (idle, idle with
-custom settings, preview, capturing, paused with enough views, every model
-failed, OpenICC models failed, solved after the route completed, a retake after
-Stop, connecting, a stream error with views saved, after Next camera, and 390 px
-mobile) are for review only and go to --review-dir.
+Output, in --out-dir (docs/ by default): screenshot.png, the README hero (the From a
+recording route solved with PASS, desktop), and screenshot-recording.png (its Record
+step with the board animation, desktop). Every other shot is for review only and goes
+to --review-dir: the live route's idle, idle with custom settings, preview,
+capturing, paused with enough views, solved, every model failed, OpenICC models
+failed, solved after the route completed, a retake after Stop, connecting, a stream
+error with views saved, after Next camera, and 390 px mobile; and the other rec-*.png
+states of the recording route.
 
-The From a recording route's shots (rec-*.png, review only) are served the same
-way: the route's Labs QR codes and guide come from the real app, and only
-/api/recording/status is faked. Its results are the app's own solve of 4:3
-synthetic frames (gopro_charuco_calibrator/synthetic.recording_camera, 1600x1200,
-made-up intrinsics) shown as if they came from a 4000x3000 HERO13 clip, so the
-figures (focal, centre, errors) are those of the synthetic camera. The clip's
-file facts and metadata are made up for the page (no real HERO13 clip has been
-read yet); the clip-check rows are built from them by the app's own
-clipcheck.compare. The QR codes on the settings shot are decoded back from the
-screenshot.
-"""
+The From a recording route's shots are served the same way: the route's Labs QR
+codes and guide come from the real app, and only /api/recording/status is faked. Its
+results are the app's own solve of 4:3 synthetic frames
+(gopro_charuco_calibrator/synthetic.recording_camera, 1600x1200, made-up intrinsics)
+shown as if they came from a 4000x3000 HERO13 clip, so the figures (focal, centre,
+errors) are those of the synthetic camera. The clip's file facts and metadata are
+made up for the page (no real HERO13 clip has been read yet); the clip-check rows
+are built from them by the app's own clipcheck.compare. The QR codes on the settings
+shot are decoded back from the screenshot."""
 
 from __future__ import annotations
 
@@ -952,7 +953,7 @@ def main() -> int:
         (
             "solved",
             *states["solved"],
-            args.out_dir / "screenshot.png",
+            review / "solved.png",
             desktop,
             checks(
                 [*live, "#resultsPanel", ".figure"],
@@ -1224,7 +1225,7 @@ def main() -> int:
             "rec-record",
             None,
             b"",
-            review / "rec-record.png",
+            args.out_dir / "screenshot-recording.png",
             desktop,
             rec_checks(
                 ["#recRecordPanel", "#recAnim", "#animToggle", "[data-anim-moving]"],
@@ -1549,7 +1550,7 @@ def main() -> int:
             "rec-solved",
             None,
             b"",
-            review / "rec-solved.png",
+            args.out_dir / "screenshot.png",
             desktop,
             rec_checks(
                 ["#resultsPanel", "#clipUnknown", "#recCamera", ".figure", "#recReminder",
