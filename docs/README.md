@@ -5,15 +5,18 @@ with the doc that answers your question.
 
 | Doc | Answers |
 |---|---|
-| [lens-modes-and-models.md](lens-modes-and-models.md) | Which GoPro modes can be calibrated, which model fits which field of view, which capture paths exist (webcam, recording, HDMI, Wi-Fi, Labs), and their limits. |
+| [recording-route.md](recording-route.md) | How the From a recording route works: the camera settings and why, the two Labs QR codes and which codes are confirmed on a HERO13, how to record, what the clip check reads from the mp4, why frames are left out, what the run writes, and how UMI loads the files. |
+| [lens-modes-and-models.md](lens-modes-and-models.md) | Which GoPro modes can be calibrated, which model fits which field of view, the HERO13 lens mods at 4:3, which capture paths exist (webcam, recording, HDMI, Wi-Fi, Labs), and their limits. |
 | [footguns.md](footguns.md) | Why a calibration can look impossible when it isn't. Each trap as symptom → cause → how to tell → fix, plus the claims we had to retract. |
-| [measurements.md](measurements.md) | Every result we measured, with date, dataset, board, lens mode, solver and error, including the synthetic check of both OpenICC models at 167°. Also the pending video-vs-webcam comparison. |
+| [measurements.md](measurements.md) | Every result we measured, with date, dataset, board, lens mode, solver and error, including the synthetic check of both OpenICC models at 167°. Also the pending video-vs-webcam comparison, and the place for the first real recording-route clip. |
 | [double-sphere-backend.md](double-sphere-backend.md) | How the app drives OpenICC for Double Sphere and Kannala–Brandt, the source patch its image carries, how to read the results, and how to calibrate an on-camera recording. |
 | [umi-and-deployment.md](umi-and-deployment.md) | What UMI does, how to load our Kannala–Brandt files into it, the live paths for a robot, and multi-camera sync. |
 
 Tags used throughout:
 - **verified:** measured by us, or read from the primary source.
 - **inferred:** consistent with the evidence, but not directly demonstrated.
+- **unverified:** documented for another camera or mode, or not documented, and not yet tried on
+  our cameras.
 - **assessed:** established practice, not re-benchmarked here.
 
 These docs replace the June reports (`calibration-report.html` and
@@ -49,7 +52,12 @@ appended; the retracted claims are listed at the end of
   varies with the board's dimensions, and assuming the wrong one ruins the solve.
 - **OpenICC:** OpenImuCameraCalibrator, the external tool that solves Double Sphere and
   Kannala–Brandt for this app, and UMI's own KB calibration.
-- **GPMF:** GoPro's metadata track in the mp4, which carries the IMU (accelerometer and gyro).
+- **GPMF:** GoPro's metadata in the mp4: camera facts (model, serial, lens, stabilisation) and the
+  IMU (accelerometer and gyro). The recording route's clip check reads it.
+- **GoPro Labs:** GoPro's experimental firmware. It lets a camera take its settings from a QR
+  code, which the recording route uses.
+- **Lens mod:** extra glass fitted over the camera's lens to widen it: the Max Lens Mod 2.0
+  (ADWAL-002) or the Ultra Wide Lens Mod (AEWAL-001) on a HERO13.
 - **UVC:** USB Video Class, a standard USB camera. Linux exposes it as `/dev/videoX`.
 - **UMI:** the Universal Manipulation Interface, a robot-learning project that collects GoPro
   demonstrations. It is our reference pipeline.

@@ -148,8 +148,11 @@ it. Nothing is imported, linked or vendored, and each user builds the image them
 
 ## On-camera recordings
 
-The app captures the live webcam stream. For a recording, for example Max SuperView at 4K, there
-are two routes. Calibrate in the mode the data is recorded in either way.
+**Use the app's From a recording route** for a clip recorded on the camera: it checks the clip,
+picks sharp, still, varied views and solves them with the models below
+([recording-route.md](recording-route.md)). The two manual ways here predate it. They are still
+useful for older recordings in another mode or on another board, such as `GX010005.MP4` (4K 16:9
+Max SuperView, 4X4 board). Calibrate in the mode the data is recorded in either way.
 
 ### In-app solver on extracted frames
 
@@ -160,7 +163,7 @@ board the video was shot with.** `GX010005.MP4` used the 10×7 4X4 board, not th
 mkdir -p rec/frames
 ffmpeg -i GX010005.MP4 -vf fps=2 -q:v 2 rec/frames/capture_%04d.jpg
 uv run gopro-charuco solve-frames --frames-dir rec/frames --output-dir rec \
-  --config gopro_charuco_calibrator/presets/gopro13_umi_gripper_fisheye_1080p.yaml \
+  --config gopro_charuco_calibrator/presets/gopro13_mlm2_adwal002.yaml \
   --camera-name gopro13_recording_4k \
   --cols 10 --rows 7 --square-mm 21 --marker-mm 15 \
   --aruco-dict DICT_4X4_50 --start-id 0 --marker-count 35

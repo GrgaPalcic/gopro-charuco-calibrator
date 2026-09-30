@@ -67,10 +67,41 @@ treat that number as consistent with this verdict, not as clean evidence for it 
   Lens Mod 2.0's Max SuperView (167°). Matching 155° is not required: UMI is lens-agnostic once
   you recalibrate (UMI issue #41). **verified**
 
-**The mod in the Open GoPro API.** On the HERO13 the mod is setting **189** (option 2 = Max Lens
-2.0). HERO12 and Mission 1 use it too. Setting 190 ("Max Lens Mod Enable") is HERO12-only, and
-setting 162 ("Max Lens") is for HERO9, 10 and 11. **verified** against the Open GoPro spec v2.0,
-2026-09-29.
+**The mod in the Open GoPro API.** On the HERO13 the mod is setting **189**: option 2 = Max Lens
+2.0, 3 = Max Lens 2.5 (HERO13 only), 100 = Auto Detect. HERO12 and Mission 1 use it too.
+Setting 190 ("Max Lens Mod Enable") is HERO12-only, and setting 162 ("Max Lens") is for HERO9, 10
+and 11. **verified** against the Open GoPro spec v2.0, 2026-09-29 (options 3 and 100 on
+2026-09-30). That option 3 is the Ultra Wide Lens Mod is **unverified**.
+
+## HERO13 lens mods at 4:3
+
+The dataset mode from 2026-09-30 (4K 4:3, 60 fps, Ultra Wide, HyperSmooth Off) and the
+[From a recording](recording-route.md) route rest on these. **verified** from GoPro's HERO13
+lens-mod documentation, read 2026-09-30, unless marked.
+
+| | Max Lens Mod 2.0 | Ultra Wide Lens Mod |
+|---|---|---|
+| Code printed on the mod | ADWAL-002 | AEWAL-001 |
+| Detected by the camera | no: select it on the camera (Labs `oX2`, setting 189 = 2) | yes, when fitted (Labs `oX10` auto-detect, setting 189 = 100) |
+| Settings and features | the same as the Ultra Wide Lens Mod, "except for auto-detection" (GoPro) | the same |
+| Setting 189 | 2 = Max Lens 2.0 | 3 = Max Lens 2.5 is HERO13-only and almost certainly this mod (**unverified**); the app uses 100 = Auto Detect |
+
+With either mod on a HERO13:
+- **4:3 exists only at 4K** (4000×3000), at 60, 50, 30, 25 or 24 fps, with the lenses
+  **Ultra Wide**, Wide or Linear.
+- **Ultra Wide at 4:3 is 145° horizontal × 113° vertical × 176° diagonal.** These are the same
+  numbers GoPro gives for the HERO12 with the Max Lens Mod 2.0 in "Max SuperView".
+- **HyperSmooth On and Off give the same field of view,** so turning it off costs no crop. The app
+  still requires Off: stabilisation warps each frame differently.
+- **The 167° and 176° figures.** The 167° used elsewhere in these docs for Max SuperView comes
+  from a GoPro engineer's lens breakdown of the 16:9 mode; GoPro's 176° is the diagonal of the
+  4:3 Ultra Wide frame. We have not reconciled the two (which axis and aspect each one means),
+  and no real 4:3 clip has been measured yet.
+- **All HERO13 video is HEVC**, at about 100–120 Mb/s: a 90 s clip is about 1.4 GB, in one
+  `GX01xxxx.MP4` chapter. Chapters split at about 4 GB on cards up to 32 GB, or about 12 GB.
+- **HyperSmooth Off, Ultra Wide and the lens mod** are set by the Labs QR codes in step 2 of the
+  recording route; which of those codes are confirmed on a HERO13 is listed in
+  [recording-route.md](recording-route.md#the-qr-codes).
 
 ## Field of view → model
 
@@ -126,9 +157,9 @@ in that same path. The same optics come out differently over each one.
 
 | Path | Resolution | Lens control | Verdict |
 |---|---|---|---|
-| **USB webcam** | **1080p max** (res 4 / 7 / 12) | Wide, Narrow, SuperView, Linear; no "Max" modes | What this app uses, and how the Ludis dataset was recorded. With the mod fitted, Wide gives a circular fisheye with black corners. Double Sphere fits it: 1.11 px in the app, 0.617 px with OpenICC's own extractor (June, unpatched solver). It is also a live deploy path: the policy sees the same image it was trained on. |
+| **USB webcam** | **1080p max** (res 4 / 7 / 12) | Wide, Narrow, SuperView, Linear; no "Max" modes | The app's **Live over USB** route. Valid only for data that is the webcam stream itself: not for on-camera recordings. With the mod fitted, Wide gives a circular fisheye with black corners. Double Sphere fits it: 1.11 px in the app, 0.617 px with OpenICC's own extractor (June, unpatched solver). It is also a live deploy path, but its image is not that of an on-camera recording. |
 | Webcam over Wi-Fi | 1080p max | same as USB | The spec marks Wi-Fi webcam as not supported on HERO9, 10, 11 and 11 Mini. Same modes, so nothing is gained for calibration. The app drives USB only. |
-| On-camera recording (mp4) | 4K to 5.3K | all modes, incl. Max SuperView (setting 121 = 7), Max HyperView (11), Ultra HyperView (104) | Offline only, with the GPMF IMU in the file. Calibrated at 0.82 px (1080p coordinates; Max SuperView, 4K). |
+| On-camera recording (mp4) | 4K to 5.3K; with a lens mod at 4:3, 4K (4000×3000) only | all modes, incl. Max SuperView (setting 121 = 7), Max HyperView (11), Ultra HyperView (104); with a lens mod at 4:3, Ultra Wide, Wide, Linear | How the Ludis dataset is recorded, and the app's **From a recording** route ([recording-route.md](recording-route.md)). Offline only, with the GPMF IMU in the file. Calibrated at 0.82 px by hand in June (1080p coordinates; Max SuperView, 4K 16:9). |
 | HDMI via Media Mod → capture card | not verified for the GoPro; UMI's code requests 3840×2160@30 from a Cam Link 4K, otherwise 1920×1080@60 | the camera's current mode | UMI's live deployment path. It is a different image from the webcam stream, so it needs its own calibration and its own training data. See [umi-and-deployment.md](umi-and-deployment.md). |
 | Wi-Fi preview stream (`/gopro/camera/stream/start`) | not selectable | none | Monitoring only. Not for calibration or a policy. |
 | Labs RTMP live stream | 480p, 720p, 1080p | via video settings | Compressed, with latency. Not for robotics. |

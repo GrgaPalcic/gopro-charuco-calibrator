@@ -29,10 +29,14 @@ identical capture settings for training and deployment, not UMI's exact 155°.
 
 ## Loading our calibration in UMI
 
-The Ludis dataset was recorded from the **HERO13 USB webcam stream: 1080p, Wide, with the Max Lens
-Mod 2.0 fitted**. That gives a circular fisheye with black corners. It is nominally the 167° lens;
-the webcam image's exact field of view has not been measured. The app's reference model for it is
-**Double Sphere**, the only one that is valid over the whole circle.
+The Ludis dataset is **recorded on the camera to mp4**, as UMI's is. From 2026-09-30 it is
+recorded in **4K 4:3 (4000×3000), 60 fps, lens Ultra Wide, HyperSmooth Off, with the lens mod
+set**, and calibrated from a clip recorded in that mode on the app's
+[From a recording](recording-route.md) route. (Earlier versions of these docs said the dataset
+came from the USB webcam stream; that was wrong.) A calibration made on the USB route is not
+valid for it ([why](footguns.md#a-webcam-calibration-is-not-valid-for-on-camera-recordings)). The
+app's reference model for the lens mod is **Double Sphere**, the only one that is valid over the
+whole image.
 
 **UMI loads Kannala–Brandt only.** **verified** 2026-09-29:
 - UMI's loader `parse_fisheye_intrinsics` in `umi/common/cv_util.py` asserts
@@ -42,7 +46,7 @@ the webcam image's exact field of view has not been measured. The app's referenc
   runs it with a fixed settings YAML baked into its Docker image; nothing generates that file from
   the json.
 
-So the Max Lens Mod preset also solves **`kannala_brandt`** with OpenICC `FISHEYE` on the same
+So the lens-mod camera setups also solve **`kannala_brandt`** with OpenICC `FISHEYE` on the same
 detections as Double Sphere, and writes two files for UMI:
 
 - **`<camera>_kannala_brandt.json` drops straight into `parse_fisheye_intrinsics`.** It is
@@ -66,8 +70,9 @@ detections as Double Sphere, and writes two files for UMI:
   than 0.5 % from 1.
 - **Calibrate at the resolution you record.** UMI's `convert_fisheye_intrinsics_resolution`
   rescales the intrinsics by image height and assumes the width is only cropped or padded
-  symmetrically. Calibrating the exact stream you record (here 1920×1080 webcam) keeps that
-  conversion a no-op.
+  symmetrically. The recording route writes the json at the clip's own size (4000×3000), so for
+  4000×3000 footage that conversion is a no-op, and for UMI's 960×720 SLAM frames it is an exact
+  scale by 0.24 (same 4:3 shape).
 - **`<camera>_kannala_brandt_orbslam3.yaml` is only the camera block.** It holds
   `Camera.type: "KannalaBrandt8"`, `Camera1.fx/fy/cx/cy`, `Camera1.k1`–`k4`, width, height and fps,
   with fx = fy, in the same key names UMI's file uses. What UMI's SLAM needs around it, **verified**
@@ -81,21 +86,26 @@ detections as Double Sphere, and writes two files for UMI:
     `File.version`, `Camera.RGB` (ORB-SLAM3 refuses to start without it) and IMU lines. Then mount
     the edited file into the container and change the path in those two scripts.
   - **The block's size sets SLAM's frame size.** UMI's `gopro_slam.cc` resizes every frame to
-    `Camera.width` × `Camera.height`. UMI's file is 960×720; our block is 1920×1080, so SLAM
-    runs on full-size frames. To keep a smaller size, scale fx, fy, cx and cy by the same factor
-    as the width and height; k1–k4 stay as they are.
-  - **The IMU block is not ours.** The file's comments say its `IMU.T_b_c1` and noise values were
-    calibrated with OpenICC; the file is named for a HERO10 (`gopro10_…`), while the paper's rig is
-    a HERO9. Whether they fit a HERO13 is not known (**inferred** that they need their own
-    calibration), and this app does not calibrate them.
+    `Camera.width` × `Camera.height`. UMI's file is 960×720. The recording route writes our block
+    at 960×720 too (4000×3000 × 0.24 exactly: fx, fy, cx and cy scaled, k1–k4 as they are); the
+    USB route's block stays at 1920×1080, so SLAM would run on full-size frames.
+  - **The IMU block is not ours.** The file's comments say its `IMU.T_b_c1` (the IMU-to-camera
+    transform) and noise values were calibrated with OpenICC; the file is named for a HERO10
+    (`gopro10_…`), while the paper's rig is a HERO9. Whether they fit a HERO13 with a lens mod is
+    not known (**inferred** that they need their own calibration), and this app does not
+    calibrate them.
   - **The SLAM mask is UMI's gripper.** `02_create_map.py` and `03_batch_slam.py` draw UMI's
     mirror and finger mask (`draw_predefined_mask`) on a 2704×2028 (4:3) canvas, and
-    `gopro_slam.cc` resizes it to `Camera.width` × `Camera.height`. With our 1920×1080 block the
-    mask is stretched to 16:9 and blacks out areas laid out for UMI's HERO9 and Mod 1.0 gripper,
-    not ours. `03_batch_slam.py` always applies it; only `02_create_map.py` can skip it (`-nm`).
+    `gopro_slam.cc` resizes it to `Camera.width` × `Camera.height`. With the recording route's
+    960×720 block the mask keeps its 4:3 shape, but it still blacks out areas laid out for UMI's
+    HERO9 and Mod 1.0 gripper, not ours; with the USB route's 1920×1080 block it is also stretched
+    to 16:9. `03_batch_slam.py` always applies it; only `02_create_map.py` can skip it (`-nm`).
     Redraw the mask for our frame and gripper before relying on SLAM (not checked).
   - **The IMU track.** UMI's SLAM is inertial and reads the IMU from the GPMF track of on-camera
-    mp4 recordings. Whether a webcam-stream recording can supply it has not been checked.
+    mp4 recordings. On-camera clips carry it (the GPMF `ACCL` and `GYRO` streams; the recording
+    route's clip check reports "Motion sensor data: present" when it finds them), so what is left
+    open is the IMU-to-camera calibration and UMI's IMU settings above, not the data. Whether a
+    HERO13's IMU streams have the shape UMI's SLAM expects has not been checked on a real clip.
 
   We have not run UMI's SLAM with our files yet.
 
@@ -122,16 +132,22 @@ keeps it for its ROS camera_info YAML.
 
 ## Live deployment
 
-**Our live path is the USB webcam.** It is what the app captures and what the Ludis dataset was
-recorded from, so a robot reading the same webcam stream sees the same image the policy was
-trained on, with the same intrinsics. Timestamps come from one host clock. The webcam image
-calibrated at 1.11 px in the app (0.617 px with OpenICC's own extractor), both in June with the
-unpatched solver.
+**The dataset is recorded on the camera, so no live path shows the policy the same image.** A
+robot needs a live feed, and both options are different images from the recording:
+- **The USB webcam** is what the app's USB route captures. It stops at 1080p 16:9 and has no
+  lens-mod lens, so it needs its own calibration (the USB route), and a policy trained on 4K 4:3
+  recordings would see a different image (**inferred**; not measured). Timestamps come from one
+  host clock. The webcam image calibrated at 1.11 px in the app (0.617 px with OpenICC's own
+  extractor), both in June with the unpatched solver.
+- **HDMI capture** is UMI's path, below.
+
+Which live path comes closest to the recording has not been measured; the pending comparison in
+[measurements.md](measurements.md#pending-video-vs-webcam-comparison) covers the webcam.
 
 **HDMI capture is UMI's path.** It is the robust option for a live feed: a stable latency, and no
-overlays once Labs clean HDMI is on. But it is a **different image** from the webcam stream. It
-needs its own calibration and, for a learned policy, training data captured the same way. Don't
-mix the two.
+overlays once Labs clean HDMI is on. But it is a **different image** from both the recording and
+the webcam stream. It needs its own calibration and, for a learned policy, training data captured
+the same way. Don't mix them.
 
 | Piece | What it does | Without it |
 |---|---|---|

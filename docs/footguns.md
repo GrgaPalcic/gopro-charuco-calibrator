@@ -45,9 +45,11 @@ exactly like "this lens cannot be calibrated", and most of them are not. Terms a
   Wide image is a circle with black corners.
 
 ### Setting 189 tells the camera the mod is fitted
-- **Symptom:** the **Mod** chip shows something other than Max Lens 2.0 (2), or a **Check** chip
-  appears next to it.
-- **Cause:** the Max Lens Mod preset sets setting 189 = 2 (Max Lens 2.0). The app writes 189 only
+- **Symptom:** on the USB route, the **Mod** chip shows something other than what the camera
+  setup asks for, or a **Check** chip appears next to it.
+- **Cause:** the Max Lens Mod 2.0 (ADWAL-002) camera setup sets setting 189 = 2 (Max Lens 2.0);
+  the Ultra Wide Lens Mod (AEWAL-001) one sets 100 (Auto Detect), because the camera detects that
+  mod by itself. The app writes 189 only
   when a preset or **Recording settings → Lens mod** asks for a value; otherwise it leaves the
   camera's value alone. The camera most likely keeps the value across power cycles, as it does
   other settings (**inferred**, not tested for 189).
@@ -62,8 +64,35 @@ exactly like "this lens cannot be calibrated", and most of them are not. Terms a
 - **Symptom:** a solve that is unstable, or worse than it should be.
 - **Cause:** HyperSmooth and horizon lock warp each frame non-rigidly, so the lens model changes
   from frame to frame.
-- **Fix:** turn both off. The read-back records `hypersmooth` (setting 135). Treat that as the video
-  preset's value; its effect on the webcam stream is unverified.
+- **Fix:** turn both off. On the recording route the clip check reads the clip's own `EISE` and
+  `EISA` tags and flags HyperSmooth On in red. On the USB route the read-back records
+  `hypersmooth` (setting 135); treat that as the video preset's value, as its effect on the
+  webcam stream is unverified.
+
+### A webcam calibration is not valid for on-camera recordings
+- **Symptom:** a calibration made on the **Live over USB** route looks fine, but the footage it is
+  used on was recorded on the camera to its card. Nothing warns you: the numbers just belong to
+  another image.
+- **Cause:** the webcam stream and a recording are different images of the same optics.
+  **verified** from GoPro's docs and the Open GoPro spec (2026-09-30):
+  - the webcam stops at 1080p 16:9, while a lens-mod recording at 4:3 is 4K (4000×3000);
+  - the webcam's lens menu (Wide, Narrow, SuperView, Linear) has no lens-mod lens such as Ultra
+    Wide;
+  - the webcam handles stabilisation its own way, so the recording's HyperSmooth setting says
+    nothing about it.
+
+  No source shows that the webcam geometry matches any recording mode, and we have not measured
+  it (the pending comparison in
+  [measurements.md](measurements.md#pending-video-vs-webcam-comparison)). **inferred** that the
+  intrinsics differ.
+- **How to tell:** in the run's `config.json`, a recording-route run has
+  `acquisition_mode.route: "recording"`; a USB run has `acquisition_mode.source: "gopro_webcam"`,
+  the webcam's `frame_size` (1920x1080) and `reported_*` fields. The USB result's Captured in row
+  also says "Valid for the webcam stream in exactly this mode, not for footage recorded on the
+  camera".
+- **Fix:** for footage recorded on the camera, always use **From a recording**
+  ([recording-route.md](recording-route.md)), with a clip recorded in exactly the dataset's mode.
+  Keep the USB route for data that is the webcam stream itself.
 
 ### Intrinsics belong to one path, one mode, one resolution
 - **Symptom:** a calibration that was fine suddenly does not fit the data.
@@ -71,11 +100,13 @@ exactly like "this lens cannot be calibrated", and most of them are not. Terms a
   mode or resolution changes the model.
 - **Fix:** calibrate exactly the stream the data came from, and deploy in that stream too. Do it
   per camera and mod pair. Recalibrating after refitting a mod is a precaution: that a refit moves
-  the model has not been measured. The Ludis dataset is webcam Wide at 1080p with the mod fitted.
+  the model has not been measured. The Ludis dataset is recorded on the camera: from 2026-09-30 in
+  4K 4:3, 60 fps, lens Ultra Wide, HyperSmooth Off, with the lens mod set.
 
 ### Capture quality
 - **Advice:** 20–40 or more good views. Large, crisp markers (a bigger board, or closer). A fast
-  shutter (the Labs Max Shutter Angle helps). Good, even light and a matte print.
+  shutter: the recording route's QR code 1 locks 1/480 s for the calibration clip (on the USB
+  route, the Labs Max Shutter Angle helps). Good, even light and a matte print.
 - **Sweep the whole field:** edges, corners, near and far, and plenty of tilt. Board size and view
   count help, but never fix a wrong mode or model.
 
@@ -262,6 +293,7 @@ Kept so the same mistakes are not made twice.
 | "UMI calibrates with Double Sphere" | wrong | UMI's committed intrinsics are OpenICC `FISHEYE` (KB). OpenICC merely offers DS and EUCM. |
 | "Drop our intrinsics into UMI's .json and ORB-SLAM3 .yaml" (by 06-16) | wrong for Double Sphere | UMI and the fork accept KB only (see above). The app now writes a KB file for each. |
 | "The image is unpatched, which is correct for the app" (2026-09-29) | wrong | The stock final adjustment leaves the distortion fitted around the image centre. The app now builds a patched image. |
+| "The Ludis dataset was recorded from the USB webcam stream" (these docs, until 2026-09-30) | wrong | It is recorded on the camera to mp4. A webcam calibration is not valid for it (see above); the recording route calibrates it. |
 | "The lens is 177°" | wrong | The usable clean mode is 167°. 177° is Max HyperView, which is anamorphic. |
 | "Pinhole is 30–40% worse, 0.150–0.235 px" | unsupported | Attributed to the Double Sphere paper's Table 1, which has no pinhole baseline. The paper only says pinhole is suboptimal above 120°. |
 | "Gyroflow says SuperView calibration fails unless reversed" | overstated | Gyroflow only says the modes are not recommended and not exactly mapped. The strong claim is Joshi's (ICRA 2022). |

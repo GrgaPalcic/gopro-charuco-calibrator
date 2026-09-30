@@ -41,7 +41,7 @@ Software:
 
 ## Results
 
-### HERO13 + Max Lens Mod 2.0, USB webcam Wide 1080p (the Ludis dataset path)
+### HERO13 + Max Lens Mod 2.0, USB webcam Wide 1080p
 
 | Date | Solver | Error | Views used | Double Sphere params | Notes |
 |---|---|---|---|---|---|
@@ -155,10 +155,35 @@ against each other, and OpenICC's view selection is not deterministic. **Compare
 calibrations by projecting rays, never by focal length** (see
 [footguns.md](footguns.md#double-sphere-parameters-are-not-unique)).
 
+## Recording route, first real clip
+
+Empty until the first real HERO13 clip goes through the **From a recording** route
+([recording-route.md](recording-route.md)). No numbers here yet: the route has only run on
+synthetic clips (1600×1200, made-up intrinsics). Fill in what was measured, with the date:
+
+- **Camera and clip:** camera setup (ADWAL-002 or AEWAL-001), serial, firmware, clip name, length,
+  size on disk.
+- **QR codes:** what the camera screen showed after scanning QR code 1 and QR code 2 (lens, lens
+  mod, resolution, frame rate, HyperSmooth, shutter). This settles the unverified codes (`fX`,
+  `oX10` with `fX`, `S45`).
+- **Clip check:** every row as read (status, found), and which GPMF tags the file carried (`tags`
+  in the summary), in particular `VFOV`, `ZFOV`, `EISE`, `EISA`, `SHUT`, `ACCL`, `GYRO`.
+- **Picking views:** frames read, views kept, each drop count, and how long the copy, the analysis
+  and the solve took.
+- **Result:** badge, Double Sphere RMS, xi, alpha, views used; Kannala–Brandt RMS and the For UMI
+  match; the ORB-SLAM3 block's size and values.
+
+| Date | Camera setup | Clip | Clip check | Views kept / dropped | Result |
+|---|---|---|---|---|---|
+| | | | | | |
+
 ## Pending: video vs webcam comparison
 
 The protocol was agreed in June; the results are still to be captured on the HERO13 with the Max
-Lens Mod 2.0.
+Lens Mod 2.0. Since 2026-09-30 the dataset is recorded in 4K 4:3, 60 fps, Ultra Wide, and
+calibrated on the recording route, so this comparison no longer decides how to calibrate. It
+would still show how far a webcam calibration is from a recording one, and a recording in the
+dataset mode would be the fairer video side.
 - **Board:** the 5X5 board for both captures.
 - **Setup:** the same scene and lighting, a tripod where possible.
 - **Record** what the camera itself shows for every setting, including ISO, shutter and white
@@ -166,7 +191,7 @@ Lens Mod 2.0.
 
 | | Recording | Webcam |
 |---|---|---|
-| Lens | Max SuperView | Wide (preset `gopro13_umi_gripper_fisheye_1080p`) |
+| Lens | Max SuperView | Wide (preset `gopro13_mlm2_adwal002`, which replaced `gopro13_umi_gripper_fisheye_1080p`) |
 | Resolution / fps | 4K 16:9 @ 24 | 1080p @ 30 |
 | Stabilisation | HyperSmooth **off**, horizon lock **off** | not applicable; check the stream is unwarped |
 | Setting 189 | Max Lens 2.0; note what the camera shows | set by the preset; confirm the **Mod** chip reads Max Lens 2.0 (2) |
