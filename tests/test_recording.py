@@ -1153,6 +1153,11 @@ def test_clips_the_run_cannot_use_leave_no_trace(synthetic_clip, fresh_job, tmp_
     refused = _poll(client)
     assert refused["state"] == "error" and refused["refused_clip"]["reason"] == "different_size"
     assert "1200x900" in refused["message"] and "not used" in refused["message"]
+    # Not the camera setup's mode: record again with step 2's settings, not a new run.
+    assert refused["refused_clip"]["matches_setup"] is False
+    assert refused["refused_clip"]["size"] == [1200, 900]
+    assert "not in the camera setup's mode (1600x1200)" in refused["message"]
+    assert "Start this camera again" not in refused["message"]
     assert not (run_dir / "clips" / "GX010002.MP4").exists()
 
     junk = tmp_path / "junk.mp4"

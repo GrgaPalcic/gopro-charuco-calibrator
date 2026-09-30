@@ -225,15 +225,21 @@
                   <code id="qrCalibrationCode"></code>
                 </figcaption>
               </figure>
-              <figure class="qr-card">
-                <img id="qrDataset" width="264" height="264" alt="GoPro Labs QR code that puts the dataset settings back">
-                <figcaption>
-                  <span class="qr-title">2. Scan after, to go back to dataset settings</span>
-                  <code id="qrDatasetCode"></code>
-                </figcaption>
-              </figure>
+              <details class="disclosure qr-later" id="qrLater">
+                <summary>Show QR code 2 (for after the calibration clip)</summary>
+                <div class="disclosure-body">
+                  <p class="note">Fold it away again before you scan QR code 1: the camera sees the whole screen and may read this code instead.</p>
+                  <figure class="qr-card">
+                    <img id="qrDataset" width="264" height="264" alt="GoPro Labs QR code that puts the dataset settings back">
+                    <figcaption>
+                      <span class="qr-title">2. Scan after, to go back to dataset settings</span>
+                      <code id="qrDatasetCode"></code>
+                    </figcaption>
+                  </figure>
+                </div>
+              </details>
             </div>
-            <p class="note">The codes need GoPro Labs firmware on the camera. With the camera's screen on, point the camera at a code on this screen, then check what the camera shows against the list below.</p>
+            <p class="note">The codes need GoPro Labs firmware on the camera. With the camera's screen on, point the camera at QR code 1 on this screen, then check what the camera shows against the list below. Keep QR code 2 folded away while you scan: the camera sees the whole screen.</p>
             <div class="rec-warning" id="shutterWarning">
               <strong>Switch the shutter back after the calibration clip.</strong>
               <span id="shutterWarningText"></span>

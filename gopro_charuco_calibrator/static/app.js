@@ -120,6 +120,9 @@ let lastStatus = null;
 // Shipped and saved camera setups, name -> config, so the dropdown can show which
 // one the form holds. presetChoice is the name shown ("" = custom settings).
 let presetConfigs = {};
+// Camera names the recording job replaces with one from the serial: the model's default
+// (CameraConfig.camera_name) and the shipped setups' names, as recording.py counts them.
+let shippedCameraNames = new Set(["gopro_camera"]);
 let presetChoice = "";
 // Whether the operator has made a settings choice on purpose (picked a setup,
 // edited a field, saved or reset). Custom settings chosen that way finish step 1.
@@ -922,6 +925,14 @@ function coverageReasons(cov) {
 function modeSummary(mode) {
   if (!mode) return "";
   const parts = [];
+  if (mode.route === "recording") {
+    // The file carries the size and frame rate, not the lens or the mod.
+    const set = [mode.lens_fov && `lens ${mode.lens_fov}`, mode.max_lens_mod].filter(Boolean);
+    if (set.length) parts.push(`${set.join(" and ")} as set on the camera (not in the file)`);
+    if (mode.frame_size) parts.push(mode.frame_size);
+    if (mode.fps) parts.push(`${mode.fps} fps`);
+    return parts.join(", ");
+  }
   // What the camera reported beats what was requested.
   const lens = mode.reported_webcam_digital_lens || mode.lens_fov;
   const mod = mode.reported_max_lens_mod || mode.max_lens_mod;
@@ -1437,6 +1448,10 @@ async function loadPresetList() {
         .then((data) => [preset.name, data.config])
         .catch(() => [preset.name, null])));
     presetConfigs = Object.fromEntries(configs);
+    shippedCameraNames = new Set(["gopro_camera", ...list
+      .filter((preset) => preset.source === "shipped")
+      .map((preset) => presetConfigs[preset.name]?.camera?.camera_name)
+      .filter(Boolean)]);
   } catch {
     // Presets endpoint unavailable; the dropdown keeps only "Custom settings".
   }
@@ -1980,8 +1995,9 @@ function recFacts(status) {
     settingsDiffer: Boolean(warning?.settings),
     finishedClips,
     missingPositions: missingPositions(s),
-    refused: s.refused_clip || null,
-    needsMore: Boolean(s.needs_more_views),
+    // The server clears both only once the next clip gets that far: stale while busy.
+    refused: busy ? null : s.refused_clip || null,
+    needsMore: !busy && Boolean(s.needs_more_views),
     error: recLocalError || (state === "error" ? s.message || "" : ""),
   };
   // The result on show passed. A clip refused after it (or a failed retake) leaves it
@@ -1991,8 +2007,11 @@ function recFacts(status) {
   f.done = f.passed && !f.refused && !f.error && !f.warning;
   // Record this camera again in a fresh run: offered when a clip's settings differ or
   // a clip was refused, and the next action when the clip check found a problem.
+  // A clip refused for its size gets a run of its own only when it is the one in the
+  // camera setup's mode; one in another mode is recorded again (the refusal says so).
   f.canRedo = !busy && hasRun
-    && (Boolean(f.warning) || f.refused?.reason === "different_size");
+    && (Boolean(f.warning)
+      || (f.refused?.reason === "different_size" && f.refused.matches_setup !== false));
   return f;
 }
 
@@ -2085,19 +2104,37 @@ function missingPositions(s) {
   return missing;
 }
 
+// How to record the next clip when one reason left out most of the frames.
+const DROP_ADVICE = {
+  moving: "Most frames were left out because the board was moving: hold it still for about "
+    + "a second at each position.",
+  no_board: "Most frames were left out because no board was found: keep the whole board in "
+    + "view.",
+  blurred: "Most frames were left out because they were blurred: move slowly, and keep the "
+    + "board lit and in focus.",
+};
+
+function dropAdvice(s) {
+  const counts = s.counts || {};
+  const left = Object.keys(DROP_WORDS).reduce((sum, key) => sum + (counts[key] || 0), 0);
+  const top = Object.keys(DROP_ADVICE).find((key) => (counts[key] || 0) * 2 > left);
+  return top && counts.samples ? ` ${DROP_ADVICE[top]}` : "";
+}
+
 // What the next clip must fix: the missing positions when some are listed, else the
 // reasons in the result (a solved RETAKE with every position covered), or more views.
-function retakeText(f) {
+function retakeText(f, s) {
   const count = f.missingPositions.length;
   const then = "then click Add another clip. Its views are added to this run.";
+  const advice = dropAdvice(s);
   if (count) {
     return `Retake: record another clip that covers the ${plural(count, "missing position")} `
-      + `listed below, ${then}`;
+      + `listed below, ${then}${advice}`;
   }
   if (f.needsMore) {
-    return `Retake: record another clip that holds the board still at more positions, ${then}`;
+    return `Retake: record another clip that holds the board still at more positions, ${then}${advice}`;
   }
-  return `Retake: record another clip that fixes the reasons in the result below, ${then}`;
+  return `Retake: record another clip that fixes the reasons in the result below, ${then}${advice}`;
 }
 
 // A clip whose settings differ (or that was read short) is recorded again in a fresh
@@ -2142,6 +2179,11 @@ function recPromptText(f, s) {
     return "Working on the clip. A 90 s clip can take a few minutes.";
   }
   const standing = "The calibration below still passes: click Next camera when this camera is done";
+  // The clip check's problem comes first: Start this camera again is the next action,
+  // even when a later clip was refused as well.
+  if (f.warning && f.canRedo) {
+    return `${f.refused ? "The last clip was not used either; read why below. " : ""}${redoText(f, s)}`;
+  }
   if (f.refused) {
     // The reason below names Start this camera again where it applies.
     return f.passed
@@ -2151,8 +2193,7 @@ function recPromptText(f, s) {
   if (f.error && f.passed) {
     return `The last clip could not be used; the problem is below. ${standing}, or drop the clip again.`;
   }
-  if (f.warning && f.canRedo) return redoText(f, s);
-  if (f.needsMore) return retakeText(f);
+  if (f.needsMore) return retakeText(f, s);
   if (f.error) {
     return f.hasRun
       ? "Fix the problem on the status line, then drop the clip again."
@@ -2164,7 +2205,7 @@ function recPromptText(f, s) {
   }
   if (f.incomplete) return fixMissing(f);
   if (f.solveFirst) return REC_SOLVE_FIRST;
-  if (f.solved && !f.pass) return retakeText(f);
+  if (f.solved && !f.pass) return retakeText(f, s);
   if (f.done) {
     return "Solved. Before you record the dataset, scan QR code 2 below to put the shutter back "
       + "on Auto. Then click Next camera for the next GoPro.";
@@ -2328,6 +2369,12 @@ async function loadRecordingConfig() {
   const config = readForm();
   const labsKey = stableJson(config.recording || null);
   if (labsKey !== recLabsKey) {
+    // Another camera setup before any clip is in: its codes differ, so step 2 again.
+    if (recLabsKey !== null && !recStatus?.run_id && !recUpload) {
+      recConfirmed.settings = false;
+      recConfirmed.recorded = false;
+      recView = null;
+    }
     recLabsKey = labsKey;
     recLabs = null;
     recLabsError = "";
@@ -2366,8 +2413,9 @@ async function loadRecordingConfig() {
 
 // ---- Animation: the camera's-eye view of the board positions ----
 
-const ANIM_MOVE_MS = 1100;
-const ANIM_HOLD_MS = 900;
+// About 64 s for the 23 positions: the pace the clip should be recorded at.
+const ANIM_MOVE_MS = 1600;
+const ANIM_HOLD_MS = 1200;
 const ANIM_STEP_MS = ANIM_MOVE_MS + ANIM_HOLD_MS;
 const anim = {playing: true, t: 0, last: 0, raf: 0, listOpened: false};
 const reducedMotion = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
@@ -2501,11 +2549,29 @@ function drawFrame(canvas, aspect = 4 / 3) {
   return {ctx, frame};
 }
 
-function dotAt(ctx, frame, point, color, radius) {
+function dotAt(ctx, frame, point, color, radius, dx = 0) {
   ctx.fillStyle = color;
   ctx.beginPath();
-  ctx.arc(frame.x + point.x * frame.w, frame.y + point.y * frame.h, radius, 0, Math.PI * 2);
+  ctx.arc(frame.x + point.x * frame.w + dx, frame.y + point.y * frame.h, radius, 0, Math.PI * 2);
   ctx.fill();
+}
+
+// Positions that share a spot (the centre is visited three times) sit side by side:
+// each position's place in its row, in dot spacings from the spot (0 when alone).
+function spotOffsets(cps) {
+  const groups = new Map();
+  cps.forEach((cp, i) => {
+    const key = `${cp.x.toFixed(3)},${cp.y.toFixed(3)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(i);
+  });
+  const offsets = cps.map(() => 0);
+  for (const indices of groups.values()) {
+    indices.forEach((i, k) => {
+      offsets[i] = k - (indices.length - 1) / 2;
+    });
+  }
+  return offsets;
 }
 
 function drawAnimation() {
@@ -2522,55 +2588,47 @@ function drawAnimation() {
     return;
   }
   const {index, pose} = animAt(anim.t);
-  // Positions that share a spot (the centre is visited three times): a position
-  // already shown is drawn over one still to come, so it stays green.
+  // Shared spots side by side, as on the numbered map, so a position still to come
+  // is never hidden under one already shown.
+  const offsets = spotOffsets(cps);
+  const spacing = 18;
   cps.forEach((cp, i) => {
-    if (i > index) dotAt(ctx, frame, cp, COLOR.target, 6);
-  });
-  cps.forEach((cp, i) => {
-    if (i < index) dotAt(ctx, frame, cp, COLOR.pass, 6);
+    if (i !== index) {
+      dotAt(ctx, frame, cp, i < index ? COLOR.pass : COLOR.target, 6, offsets[i] * spacing);
+    }
   });
   drawBoard(ctx, pose, frame, boardShape());
-  dotAt(ctx, frame, cps[index], COLOR.signal, 10);
+  dotAt(ctx, frame, cps[index], COLOR.signal, 10, offsets[index] * spacing);
   setText(animCaption, `position ${index + 1}/${cps.length} · ${cps[index].caption}`);
 }
 
 // Numbered positions (reduced motion, and the drop step's coverage map). Positions
 // that share a spot (the centre is visited three times) sit side by side.
 function drawNumbered(ctx, frame, cps, complete) {
-  const groups = new Map();
-  cps.forEach((cp, i) => {
-    const key = `${cp.x.toFixed(3)},${cp.y.toFixed(3)}`;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(i);
-  });
+  const offsets = spotOffsets(cps);
   const radius = Math.max(9, Math.min(13, frame.w / 50));
   ctx.font = `600 ${Math.round(radius * 1.05)}px ${getComputedStyle(document.body).fontFamily}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  for (const indices of groups.values()) {
-    indices.forEach((i, k) => {
-      const cp = cps[i];
-      const dx = (k - (indices.length - 1) / 2) * (radius * 2 + 9);
-      const cx = frame.x + cp.x * frame.w + dx;
-      const cy = frame.y + cp.y * frame.h;
-      const done = complete ? complete[i] : false;
-      ctx.fillStyle = done ? COLOR.pass : COLOR.target;
+  cps.forEach((cp, i) => {
+    const cx = frame.x + cp.x * frame.w + offsets[i] * (radius * 2 + 9);
+    const cy = frame.y + cp.y * frame.h;
+    const done = complete ? complete[i] : false;
+    ctx.fillStyle = done ? COLOR.pass : COLOR.target;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fill();
+    if (cp.tilted ?? cp.skew > 0) {
+      // A tilted position: a ring around the number.
+      ctx.strokeStyle = ctx.fillStyle;
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-      ctx.fill();
-      if (cp.tilted ?? cp.skew > 0) {
-        // A tilted position: a ring around the number.
-        ctx.strokeStyle = ctx.fillStyle;
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.arc(cx, cy, radius + 3.5, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-      ctx.fillStyle = COLOR.field;
-      ctx.fillText(String(i + 1), cx, cy + 0.5);
-    });
-  }
+      ctx.arc(cx, cy, radius + 3.5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.fillStyle = COLOR.field;
+    ctx.fillText(String(i + 1), cx, cy + 0.5);
+  });
 }
 
 function setText(el, text) {
@@ -2772,9 +2830,11 @@ function renderDrop(f, s) {
   dropZone.hidden = f.busy;
   if (f.clips.length) dropZone.dataset.compact = "";
   else delete dropZone.dataset.compact;
+  const redo = f.warning && f.canRedo;
   setText(dropZoneTitle, f.busy ? "Wait for this clip to finish"
-    : f.clips.length ? "Drop another clip of this camera here" : "Drop the clip from the camera's card here");
-  setText(dropZoneNote, f.warning && f.canRedo
+    : redo ? "Add a clip to this run (not a re-recorded one)"
+      : f.clips.length ? "Drop another clip of this camera here" : "Drop the clip from the camera's card here");
+  setText(dropZoneNote, redo
     ? "A clip dropped here is solved together with the one above. For a clip recorded with the settings fixed, click Start this camera again first."
     : f.clips.length
     ? "Its views are added to this run and everything is solved again. A clip from another camera starts its own run."
@@ -2800,9 +2860,16 @@ function renderDrop(f, s) {
     recNotesList.replaceChildren(...recNotes.map((text) => Object.assign(document.createElement("li"), {textContent: text})));
   }
   // The camera this run is for, named from its serial where the clip carries one.
-  const cameraText = s.run_id && s.camera_name
-    ? s.camera_name_note || `Camera: ${s.camera_name}. Its files are named after it.`
-    : "";
+  // Before the first clip is read, a default name is only a placeholder.
+  const renamed = !f.clips.length && !s.serial && !s.camera_named_from_serial
+    && shippedCameraNames.has(s.camera_name);
+  let cameraText = "";
+  if (s.run_id && s.camera_name) {
+    cameraText = s.camera_name_note || (renamed
+      ? `Camera: ${s.camera_name} for now. The run is named after the camera's serial number `
+        + "once the clip is read."
+      : `Camera: ${s.camera_name}. Its files are named after it.`);
+  }
   recCamera.hidden = !cameraText;
   if (recCamera.dataset.text !== cameraText) {
     recCamera.dataset.text = cameraText;
@@ -2853,17 +2920,20 @@ function renderDrop(f, s) {
 function renderClipCheck(f, s) {
   const show = !f.busy && f.clips.length > 0;
   clipCheck.hidden = !show;
-  if (!show) return;
-  const text = f.warning ? `${f.warning.first} ${f.warning.rest}` : "";
-  clipBanner.hidden = !f.warning;
+  // The banner sits in the drop step, outside #clipCheck: it is cleared here too, so a
+  // fresh run (or a retake in work) never shows the last one's warning.
+  const warning = show ? f.warning : null;
+  const text = warning ? `${warning.first} ${warning.rest}` : "";
+  clipBanner.hidden = !warning;
   if (clipBanner.dataset.text !== text) {
     clipBanner.dataset.text = text;
     clipBanner.replaceChildren();
-    if (f.warning) {
-      clipBanner.append(Object.assign(document.createElement("strong"), {textContent: f.warning.first}),
-        ` ${f.warning.rest}`);
+    if (warning) {
+      clipBanner.append(Object.assign(document.createElement("strong"), {textContent: warning.first}),
+        ` ${warning.rest}`);
     }
   }
+  if (!show) return;
   const advice = clipAdvice(s);
   clipUnknown.hidden = advice.unknown.length === 0;
   clipOther.hidden = advice.other.length === 0;
@@ -2932,8 +3002,11 @@ async function recPoll() {
 }
 
 // Poll while the job is working on a clip; nothing changes on the server otherwise.
+// While recWaitIdle polls for this client's own clip, the interval stands down.
+let recWaiting = false;
+
 function recSyncPolling() {
-  const busy = REC_BUSY.has(recStatus?.state);
+  const busy = !recWaiting && REC_BUSY.has(recStatus?.state);
   if (busy && !recPollTimer) recPollTimer = setInterval(recPoll, 400);
   if (!busy && recPollTimer) {
     clearInterval(recPollTimer);
@@ -2942,11 +3015,18 @@ function recSyncPolling() {
 }
 
 function recWaitIdle() {
+  recWaiting = true;
+  recSyncPolling();
   return new Promise((resolve) => {
     const check = async () => {
       await recPoll();
-      if (REC_BUSY.has(recStatus?.state)) setTimeout(check, 400);
-      else resolve(recStatus);
+      if (REC_BUSY.has(recStatus?.state)) {
+        setTimeout(check, 400);
+        return;
+      }
+      recWaiting = false;
+      recSyncPolling();
+      resolve(recStatus);
     };
     check();
   });
@@ -2997,6 +3077,22 @@ async function recAddFiles(fileList) {
     renderRecording();
     return;
   }
+  // The banner asks for the clip to be recorded again in a fresh run: adding the new
+  // clip here would solve it together with the flagged one.
+  const f = recFacts(recStatus || {});
+  if (f.warning && f.canRedo) {
+    const why = f.settingsDiffer
+      ? "A clip in this run was not recorded with the preset's settings."
+      : "A clip in this run could not be read cleanly.";
+    const add = clips.length === 1 ? "this clip" : "these clips";
+    if (!confirm(`${why} Add ${add} to the run anyway? To solve a re-recorded clip on its own, `
+      + "click Cancel, then Start this camera again.")) {
+      recHintText = `Not added: ${listText(clips.map((file) => file.name))}. To solve a `
+        + "re-recorded clip on its own, click Start this camera again, then drop it in step 4.";
+      renderRecording();
+      return;
+    }
+  }
   recQueue.push(...clips);
   if (!recRunning) await recRunQueue();
   else renderRecording();
@@ -3007,6 +3103,9 @@ let recRunning = false;
 
 async function recRunQueue() {
   recRunning = true;
+  // Nothing polls while idle: a server restart or another client's Next camera may have
+  // ended the run this page last saw.
+  await recPoll();
   if (REC_BUSY.has(recStatus?.state)) await recWaitIdle();
   while (recQueue.length) {
     const file = recQueue.shift();
@@ -3158,8 +3257,9 @@ function setRoute(value, {remember = true} = {}) {
     recSyncPolling();
   } else {
     syncAnimation();
+    // No live status yet means the last poll failed: ask again, and let it say so.
     if (lastStatus) updateStatus(lastStatus);
-    else setStatusLine("Ready.");
+    else poll();
     renderRouteChoice();
   }
 }

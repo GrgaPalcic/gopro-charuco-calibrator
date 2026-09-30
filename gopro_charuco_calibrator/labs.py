@@ -70,8 +70,9 @@ def unverified_codes(rec: RecordingConfig, *, calibration: bool) -> list[dict[st
     notes = [
         {
             "code": rec.labs_lens_code,
-            "note": f"Should select the {rec.lens} lens. GoPro documents this code only as "
-            "Max SuperView (listed for HERO12-13), so check the lens on the camera screen. "
+            "note": f"The QR code should select the {rec.lens} lens. GoPro documents this code "
+            "only as Max SuperView (listed for HERO12-13), so check the lens on the camera "
+            "screen. "
             f"If it shows another lens, set Lens to {rec.lens} by hand.",
         }
     ]
@@ -79,8 +80,8 @@ def unverified_codes(rec: RecordingConfig, *, calibration: bool) -> list[dict[st
         notes.append(
             {
                 "code": "oX10",
-                "note": "Should turn on lens-mod detection; how it combines with the lens "
-                f"code is not documented. Check the camera screen shows the "
+                "note": "The QR code should turn on lens-mod detection; how it combines with "
+                "the lens code is not documented. Check the camera screen shows the "
                 f"{rec.lens_mod_name}. If it does not, check the mod is fitted properly and "
                 "scan the code again.",
             }
@@ -90,8 +91,8 @@ def unverified_codes(rec: RecordingConfig, *, calibration: bool) -> list[dict[st
         notes.append(
             {
                 "code": f"S{round(rec.shutter_angle_deg)}",
-                "note": f"Should lock the shutter at {shutter} s. Check the shutter shows "
-                f"{shutter}. If it does not, set Shutter to {shutter} in Protune by hand.",
+                "note": f"QR code 1 should lock the shutter at {shutter} s. Check the shutter "
+                f"shows {shutter}. If it does not, set Shutter to {shutter} in Protune by hand.",
             }
         )
     return notes

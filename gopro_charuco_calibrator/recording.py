@@ -1197,14 +1197,30 @@ class RecordingJob:
                 "mismatch_count": sum(1 for row in rows if row["status"] == "mismatch"),
             }
         if self._image_size is not None and size != self._image_size:
+            # Only a clip in the camera setup's own mode is worth a run of its own; one in
+            # another mode is recorded again with the settings of step 2.
+            setup = (rec.width, rec.height)
+            matches_setup = size == setup
+            if matches_setup:
+                advice = (
+                    "This clip is in the camera setup's mode and the first one was not. To "
+                    "give this clip a run of its own, click Start this camera again, then "
+                    "drop it."
+                )
+            else:
+                advice = (
+                    f"This clip is not in the camera setup's mode ({setup[0]}x{setup[1]}): "
+                    "set the camera up again as in step 2, record the clip again, then drop "
+                    "the new clip."
+                )
             self._refuse(
                 clip, check, generation, reason="different_size",
                 message=(
                     f"{clip.name} is {size[0]}x{size[1]} but this run's first clip was "
                     f"{self._image_size[0]}x{self._image_size[1]}. {NOT_USED} Record every "
-                    "clip of one run in the same mode. To give this clip a run of its own, "
-                    "click Start this camera again, then drop it."
+                    f"clip of one run in the same mode. {advice}"
                 ),
+                extra={"size": list(size), "matches_setup": matches_setup},
             )
             return
         if self.output_dir is None:
@@ -1368,9 +1384,12 @@ class RecordingJob:
         *,
         reason: str,
         message: str,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         """A clip the run cannot use never joins it: one run is one camera in one mode.
-        The run's earlier clips, views and results stay in the status."""
+        The run's earlier clips, views and results stay in the status. ``extra`` adds
+        reason-specific fields (``different_size``: the clip's ``size`` and whether it
+        ``matches_setup``, the camera setup's width and height)."""
         clip.unlink(missing_ok=True)
         with self._lock:
             self._refused = {
@@ -1380,6 +1399,7 @@ class RecordingJob:
                 "run_serial": self._run_serial(),
                 "check": check["check"],
                 "message": message,
+                **(extra or {}),
             }
         self._publish(
             generation, state="error", stage="check", progress=0.0,

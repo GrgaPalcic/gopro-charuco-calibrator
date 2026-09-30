@@ -471,25 +471,37 @@ def build_recording_states(config, workdir, views):
     covered = needs_more([
         PoseParams(cp.x, cp.y, cp.size, cp.skew) for cp in default_checkpoints(targets)
     ])
-    # A second clip in another mode is refused; the run's earlier result stays.
+    # A second clip in another mode is refused; the run's earlier result stays. The
+    # clip is not in the camera setup's mode, so the job asks for it to be recorded again.
     refused_message = (
         "GX010043.MP4 is 1920x1080 but this run's first clip was 4000x3000. The clip was not "
         "used and was removed from this run's folder. Record every clip of one run in the same "
-        "mode. To give this clip a run of its own, click Start this camera again, then drop it."
+        "mode. This clip is not in the camera setup's mode (4000x3000): set the camera up again "
+        "as in step 2, record the clip again, then drop the new clip."
     )
+    refused_clip = {
+        "name": "GX010043.MP4",
+        "reason": "different_size",
+        "serial": DEMO_SERIAL,
+        "run_serial": DEMO_SERIAL,
+        "check": [],
+        "message": refused_message,
+        "size": [1920, 1080],
+        "matches_setup": False,
+    }
     refused = dict(
-        solved,
-        state="error",
-        stage="check",
-        message=refused_message,
-        refused_clip={
-            "name": "GX010043.MP4",
-            "reason": "different_size",
-            "serial": DEMO_SERIAL,
-            "run_serial": DEMO_SERIAL,
-            "check": [],
-            "message": refused_message,
-        },
+        solved, state="error", stage="check", message=refused_message, refused_clip=refused_clip,
+    )
+    # The clip check's problem stands and a later clip is refused as well.
+    mismatch_refused = dict(
+        mismatch, state="error", stage="check", message=refused_message,
+        refused_clip=refused_clip,
+    )
+    # A retake being solved after a too-few-views result and a refused clip: the server
+    # clears needs_more_views and refused_clip only once the next clip gets that far.
+    retake_solving = dict(
+        retake, state="solving", stage="solve", progress=0.0, message="Solving.",
+        refused_clip=refused_clip,
     )
     return {
         "idle": base,
@@ -500,6 +512,8 @@ def build_recording_states(config, workdir, views):
         "covered": covered,
         "solved": solved,
         "refused": refused,
+        "mismatch_refused": mismatch_refused,
+        "retake_solving": retake_solving,
     }
 
 
@@ -609,7 +623,10 @@ LAYOUT_CHECK = """
   }
   for (const selector of absent) {
     const el = document.querySelector(selector);
-    if (el && el.offsetParent) problems.push(`should not be shown: ${selector}`);
+    // Inside a closed disclosure an element keeps its offsetParent, but is not on show.
+    if (el && el.offsetParent && !el.closest("details:not([open])")) {
+      problems.push(`should not be shown: ${selector}`);
+    }
   }
   for (const [id, want] of Object.entries(steps)) {
     const got = document.getElementById(id).dataset.stepState;
@@ -1097,27 +1114,48 @@ def main() -> int:
             review / "rec-settings.png",
             desktop,
             rec_checks(
-                ["#recSettingsPanel", "#qrCalibration", "#qrDataset", "#labsChecklist tr",
+                ["#recSettingsPanel", "#qrCalibration", "#qrLater", "#labsChecklist tr",
                  "#shutterWarning", "#labsUnverified"],
                 "#recSettingsBtn",
                 rec_row("done", "current", "pending", "pending"),
                 texts=[
                     "Scan before the calibration clip",
-                    "Scan after, to go back to dataset settings",
+                    "Show QR code 2 (for after the calibration clip)",
+                    "Keep QR code 2 folded away while you scan",
                     "Check the camera screen after scanning",
                     "Switch the shutter back after the calibration clip.",
                     calibration_qr,
-                    dataset_qr,
                     "4K, aspect ratio 4:3",
+                    "The QR code should select the Ultra Wide lens.",
                     "If it shows another lens, set Lens to Ultra Wide by hand.",
                     "set Shutter to 1/480 in Protune by hand.",
                 ],
-                not_texts=["oX3"],
-                absent=["#resultsPanel", "#clipCheck", "#recShowSettingsBtn", "#labsAlternatives"],
+                # QR code 2 is folded away: the camera sees the whole screen.
+                not_texts=["oX3", dataset_qr, "Scan after, to go back to dataset settings"],
+                absent=["#resultsPanel", "#clipCheck", "#recShowSettingsBtn", "#labsAlternatives",
+                        "#qrDataset"],
                 within={"#labsBody thead": ["NOTES"]},  # the header is set in capitals
             ),
             False,
-            {**rec, "qr": {"#qrCalibration": calibration_qr, "#qrDataset": dataset_qr}},
+            {**rec, "qr": {"#qrCalibration": calibration_qr}},
+        ),
+        (
+            # Review only: QR code 2 unfolded, for after the calibration clip.
+            "rec-settings-qr2",
+            None,
+            b"",
+            review / "rec-settings-qr2.png",
+            desktop,
+            rec_checks(
+                ["#qrCalibration", "#qrDataset"],
+                "#recSettingsBtn",
+                rec_row("done", "current", "pending", "pending"),
+                texts=["Scan after, to go back to dataset settings", dataset_qr,
+                       "Fold it away again before you scan QR code 1"],
+            ),
+            False,
+            {**rec, "actions": ["() => { document.getElementById('qrLater').open = true; }"],
+             "qr": {"#qrCalibration": calibration_qr, "#qrDataset": dataset_qr}},
         ),
         (
             # Review only: the Ultra Wide Lens Mod setup, with the codes still to try
@@ -1131,13 +1169,39 @@ def main() -> int:
                 ["#labsUnverified", "#labsAlternatives"],
                 "#recSettingsBtn",
                 rec_row("done", "current", "pending", "pending"),
-                texts=["Check the camera screen shows the Ultra Wide Lens Mod."],
+                texts=["Check the camera screen shows the Ultra Wide Lens Mod.",
+                       "The QR code should turn on lens-mod detection;"],
                 not_texts=["oX3fX may be"],
             ),
             False,
             {
                 **rec,
                 "actions": [
+                    f"() => {{ presetSelect.value = {json.dumps(UWLM_PRESET)};"
+                    " presetSelect.dispatchEvent(new Event('change')); }",
+                ],
+            },
+        ),
+        (
+            # Step 2 confirmed, then another lens-mod setup picked before any clip: its
+            # QR code differs, so step 2 is the current step again.
+            "rec-setup-change",
+            None,
+            b"",
+            review / "rec-setup-change.png",
+            desktop,
+            rec_checks(
+                ["#recSettingsPanel", "#qrCalibration"],
+                "#recSettingsBtn",
+                rec_row("done", "current", "pending", "pending"),
+                within={"#qrCalibrationCode": ["oX10"]},
+                absent=["#recRecordPanel"],
+            ),
+            False,
+            {
+                **rec,
+                "actions": [
+                    confirm,
                     f"() => {{ presetSelect.value = {json.dumps(UWLM_PRESET)};"
                     " presetSelect.dispatchEvent(new Event('change')); }",
                 ],
@@ -1249,6 +1313,8 @@ def main() -> int:
                 rec_row("done", "done", "done", "current"),
                 texts=[f"Copying {CLIP} into the run folder", "43 %", "603 MB of 1.40 GB copied"],
                 absent=["#resultsPanel", "#clipCheck"],
+                within={"#recCamera": ["for now. The run is named after the camera's serial "
+                                       "number once the clip is read."]},
             ),
             False,
             {"route": "recording", "rec_status": rec_states["uploading"]},
@@ -1303,11 +1369,80 @@ def main() -> int:
                     "#recPrompt": ["click Start this camera again", "Do not add the new clip"],
                     "#statusLine": ["Calibration done, but the clip was not recorded"],
                     "#recDropDesc": ["see the red box"],
+                    "#dropZoneTitle": ["Add a clip to this run (not a re-recorded one)"],
+                    "#resultGrid": ["lens Ultra Wide and Max Lens Mod 2.0 (ADWAL-002) as set "
+                                    "on the camera (not in the file)"],
                 },
                 drawn=["#recMap"],
             ),
             False,
             {"route": "recording", "rec_status": rec_states["mismatch"]},
+        ),
+        (
+            # A clip dropped onto the flagged run: the page asks first, and the browser's
+            # confirm is dismissed here (Playwright's default), so nothing is copied.
+            "rec-mismatch-drop-cancel",
+            None,
+            b"",
+            review / "rec-mismatch-drop-cancel.png",
+            desktop,
+            rec_checks(
+                ["#clipBanner", "#recHint"],
+                "#recRedoBtn",
+                rec_row("done", "done", "done", "current"),
+                within={"#recHint": ["Not added: GX010044.MP4.",
+                                     "click Start this camera again, then drop it in step 4"]},
+                absent=["#recProgress"],
+            ),
+            False,
+            {"route": "recording", "rec_status": rec_states["mismatch"], "actions": [
+                "() => recDropAnywhere([{name: 'GX010044.MP4'}])",
+                "() => { if (recUpload || recQueue.length || recRunning)"
+                " throw new Error('the clip was queued'); }",
+            ]},
+        ),
+        (
+            # The clip check's problem stands and a later clip was refused: the prompt
+            # names the same action as the amber button.
+            "rec-mismatch-refused",
+            None,
+            b"",
+            review / "rec-mismatch-refused.png",
+            desktop,
+            rec_checks(
+                ["#clipBanner", "#recAlert"],
+                "#recRedoBtn",
+                rec_row("done", "done", "done", "current"),
+                within={"#recPrompt": ["The last clip was not used either",
+                                       "click Start this camera again"]},
+            ),
+            False,
+            {"route": "recording", "rec_status": rec_states["mismatch_refused"]},
+        ),
+        (
+            # Start this camera again after the mismatch, then steps 2 and 3 again: the
+            # fresh run's drop step shows nothing of the last run (no banner, no result).
+            "rec-redo-fresh-run",
+            None,
+            b"",
+            review / "rec-redo-fresh-run.png",
+            desktop,
+            rec_checks(
+                ["#dropZone"],
+                "#recChooseBtn",
+                rec_row("done", "done", "done", "current"),
+                texts=["Choose clip…", "Drop the clip from the camera's card here"],
+                absent=["#clipBanner", "#clipCheck", "#resultsPanel", "#recAlert", "#recStats",
+                        "#recRedoBtn", "#recNextBtn"],
+                not_texts=["This clip was not recorded with the preset's settings"],
+            ),
+            False,
+            {"route": "recording", "rec_status": rec_states["mismatch"], "actions": [
+                "() => document.getElementById('recRedoBtn').click()",
+                "() => { if (recStatus.run_id) throw new Error('the run did not end'); }",
+                confirm,
+                recorded,
+            ]},
         ),
         (
             "rec-mismatch-mobile",
@@ -1336,10 +1471,33 @@ def main() -> int:
                 absent=["#clipBanner", "#resultsPanel", "#recRedoBtn", "#recAlert",
                         "#recReminder"],
                 not_texts=["Choose clip…", "Solve again", "covers the 0 missing"],
-                within={"#recStats": ["9", "need 25"]},
+                within={
+                    "#recStats": ["9", "need 25"],
+                    "#recPrompt": ["Most frames were left out because the board was moving"],
+                },
             ),
             False,
             {"route": "recording", "rec_status": rec_states["retake"]},
+        ),
+        (
+            # That retake being solved: the old too-few-views line and the old refusal
+            # are stale, so the status line and the progress bar agree.
+            "rec-retake-solving",
+            None,
+            b"",
+            review / "rec-retake-solving.png",
+            desktop,
+            rec_checks(
+                ["#recProgress"],
+                None,
+                rec_row("done", "done", "done", "current"),
+                within={"#statusLine": ["Solving… this can take a minute."],
+                        "#recProgressLabel": ["Solving"]},
+                absent=["#recAlert", "#clipBanner", "#resultsPanel", "#recMissing"],
+                not_texts=["Not enough views to solve yet", "the last clip was not used"],
+            ),
+            False,
+            {"route": "recording", "rec_status": rec_states["retake_solving"]},
         ),
         (
             # Every position covered, but too few views to solve: the prompt asks for
@@ -1372,16 +1530,17 @@ def main() -> int:
             review / "rec-refused.png",
             desktop,
             rec_checks(
-                ["#recAlert", "#resultsPanel", "#recRedoBtn"],
+                ["#recAlert", "#resultsPanel"],
                 "#recNextBtn",
                 rec_row("done", "done", "done", "current"),
                 texts=[
                     "GX010043.MP4 is 1920x1080 but this run's first clip was 4000x3000",
-                    "click Start this camera again, then drop it",
+                    "This clip is not in the camera setup's mode (4000x3000)",
                     "Problem: the last clip was not used.",
                     "The calibration below still passes",
                 ],
-                absent=["#recMissing"],
+                # A clip in the wrong mode gets no run of its own.
+                absent=["#recMissing", "#recRedoBtn"],
             ),
             False,
             {"route": "recording", "rec_status": rec_states["refused"]},
@@ -1405,6 +1564,7 @@ def main() -> int:
                     "Named this camera gopro13_1234 from its serial number",
                     "Written for 960x720 frames",
                     "Blue: not covered (not needed, the result passed)",
+                    "as set on the camera (not in the file), 4000x3000",
                 ],
                 absent=["#clipBanner", "#recMissing", "#recRedoBtn"],
             ),
