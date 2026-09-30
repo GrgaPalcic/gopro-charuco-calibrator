@@ -20,7 +20,7 @@ def test_every_shipped_preset_loads(monkeypatch, tmp_path):
     monkeypatch.setattr(presets, "user_presets_dir", lambda: tmp_path)  # shipped only
     entries = presets.list_presets()
     names = [entry["name"] for entry in entries]
-    assert "gopro13_umi_gripper_fisheye_1080p" in names
+    assert "gopro13_mlm2_adwal002" in names
     assert not any(name.startswith("gopro13_central_") for name in names)
     assert not any("error" in entry for entry in entries)
     for name in names:

@@ -56,7 +56,7 @@ from gopro_charuco_calibrator.solver import solve_from_frames
 from gopro_charuco_calibrator.synthetic import SIZE, Camera, synthetic_views
 
 REPO = Path(__file__).resolve().parent.parent
-PRESET = "gopro13_umi_gripper_fisheye_1080p"
+PRESET = "gopro13_mlm2_adwal002"
 
 
 # ---- session states -----------------------------------------------------

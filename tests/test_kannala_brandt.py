@@ -488,7 +488,7 @@ def test_solver_kannala_brandt_alone_and_failures(monkeypatch, tmp_path):
 def test_gripper_preset_solves_all_three_models():
     from gopro_charuco_calibrator import presets
 
-    _title, config = presets.get_preset("gopro13_umi_gripper_fisheye_1080p")
+    _title, config = presets.get_preset("gopro13_mlm2_adwal002")
     assert config.solver.models == ["double_sphere", "kannala_brandt", "fisheye"]
 
 

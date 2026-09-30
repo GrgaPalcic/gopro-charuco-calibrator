@@ -169,6 +169,80 @@ class CoverageTargets(BaseModel):
         return self
 
 
+# GoPro Labs QR codes for the lens mods (Labs QR creator source and HERO13 Labs notes):
+# oX2 selects Max Lens Mod 2.0, which the camera does not detect by itself; oX10 turns
+# on lens-mod auto detection (Labs 1.12.70), which the Ultra Wide Lens Mod needs.
+LENS_MOD_LABS_CODES = {"ADWAL-002": "oX2", "AEWAL-001": "oX10"}
+LENS_MOD_NAMES = {"ADWAL-002": "Max Lens Mod 2.0", "AEWAL-001": "Ultra Wide Lens Mod"}
+ISO_MAX_VALUES = (100, 200, 400, 800, 1600, 3200, 6400)
+
+
+class RecordingConfig(BaseModel):
+    """How the calibration clip is recorded on the camera (the "From a recording" route).
+
+    Defaults are the mode the dataset is recorded in (decided 2026-09-30): HERO13, 4K 4:3,
+    60 fps, lens Ultra Wide, HyperSmooth Off, with the lens mod set. Only the calibration
+    clip locks the shutter (1/480 s = a 45 degree shutter angle at 60 fps); the dataset
+    goes back to Auto.
+    """
+
+    lens_mod: Literal["ADWAL-002", "AEWAL-001"] = "ADWAL-002"
+    camera_model: str = "HERO13 Black"
+    width: int = Field(default=4000, ge=160)
+    height: int = Field(default=3000, ge=120)
+    fps: float = Field(default=60.0, gt=0.0)
+    lens: str = "Ultra Wide"
+    hypersmooth: Literal["off"] = "off"
+    calibration_shutter: str = "1/480"
+    shutter_angle_deg: float = Field(default=45.0, gt=0.0, le=360.0)
+    iso_max: int = 1600
+    # Labs codes; the lens-mod code follows lens_mod when left empty. fX is the Labs
+    # "Enable MSV" (Max SuperView) code; that it gives Ultra Wide on a HERO13 at 4:3 is
+    # unverified until someone scans it on a camera.
+    labs_lens_mod_code: str = ""
+    labs_lens_code: str = "fX"
+    # UMI runs ORB-SLAM3 at 960x720 (its gopro10_maxlens_fisheye_setting_v1_720.yaml);
+    # the KB8 block is written at this size for a 4:3 recording.
+    orbslam3_width: int = Field(default=960, ge=16)
+    orbslam3_height: int = Field(default=720, ge=16)
+    # Frame extraction from the clip.
+    sample_hz: float = Field(default=12.0, gt=0.0, le=120.0)
+    max_views: int = Field(default=120, ge=3, le=2000)
+    blur_ratio: float = Field(default=0.5, gt=0.0, lt=1.0)
+
+    @field_validator("iso_max")
+    @classmethod
+    def check_iso(cls, value: int) -> int:
+        if value not in ISO_MAX_VALUES:
+            raise ValueError(f"iso_max must be one of {ISO_MAX_VALUES}")
+        return value
+
+    @model_validator(mode="after")
+    def fill_codes(self) -> RecordingConfig:
+        if not self.labs_lens_mod_code:
+            self.labs_lens_mod_code = LENS_MOD_LABS_CODES[self.lens_mod]
+        num, _, den = self.calibration_shutter.partition("/")
+        try:
+            shutter_s = float(num) / float(den)
+        except (ValueError, ZeroDivisionError) as exc:
+            raise ValueError("calibration_shutter must look like 1/480") from exc
+        if abs(shutter_s - self.shutter_s) > 0.02 * shutter_s:
+            raise ValueError(
+                f"shutter_angle_deg {self.shutter_angle_deg:g} at {self.fps:g} fps is "
+                f"1/{1 / self.shutter_s:.0f} s, not {self.calibration_shutter}"
+            )
+        return self
+
+    @property
+    def shutter_s(self) -> float:
+        """Exposure time of the calibration clip: angle / 360 / fps."""
+        return self.shutter_angle_deg / 360.0 / self.fps
+
+    @property
+    def lens_mod_name(self) -> str:
+        return LENS_MOD_NAMES[self.lens_mod]
+
+
 class AppConfig(BaseModel):
     camera: CameraConfig = Field(default_factory=CameraConfig)
     gopro: GoProSettingsConfig = Field(default_factory=GoProSettingsConfig)
@@ -176,6 +250,9 @@ class AppConfig(BaseModel):
     capture: CaptureConfig = Field(default_factory=CaptureConfig)
     solver: SolverConfig = Field(default_factory=SolverConfig)
     coverage_targets: CoverageTargets = Field(default_factory=CoverageTargets)
+    # Settings for recording the calibration clip on the camera; presets without it
+    # only support the live USB route.
+    recording: RecordingConfig | None = None
 
 
 class StartRequest(BaseModel):

@@ -479,26 +479,47 @@ def _require_finite(result: Mapping[str, Any], params: Sequence[str] = ("xi", "a
             )
 
 
-def orbslam3_kb8_yaml(raw: Mapping[str, Any]) -> str:
+def orbslam3_kb8_yaml(
+    raw: Mapping[str, Any], target_size: tuple[int, int] | None = None
+) -> str:
     """The camera block of an ORB-SLAM3 KannalaBrandt8 settings file, from OpenICC FISHEYE.
 
     UMI's SLAM settings live in a fixed file inside its Docker image; this block replaces
     its Camera1.* and Camera.* lines. fx = fy = focal_length, as UMI's own loader does.
+
+    ``target_size`` writes the block for frames resized to that size, as UMI's SLAM runs
+    at 960x720 on 4000x3000 recordings: f, cx and cy scale with the width, k1..k4 are
+    angles and do not change. The size must keep the aspect ratio of the calibration.
     """
     intr = raw["intrinsics"]
     k = [float(intr[f"radial_distortion_{i}"]) for i in range(1, 5)]
-    focal = float(intr["focal_length"])
+    native_w, native_h = int(raw["image_width"]), int(raw["image_height"])
+    width, height = target_size or (native_w, native_h)
+    scale = width / native_w
+    if abs(height - native_h * scale) > 0.5:
+        raise ValueError(
+            f"ORB-SLAM3 size {width}x{height} does not keep the {native_w}x{native_h} "
+            "aspect ratio"
+        )
+    focal = float(intr["focal_length"]) * scale
     lines = [
         "# Camera block for an ORB-SLAM3 settings file (File.version 1.0), from OpenICC FISHEYE.",
         "# Merge into your existing settings: the IMU.* block is not calibrated here.",
+    ]
+    if (width, height) != (native_w, native_h):
+        lines.append(
+            f"# Scaled from the {native_w}x{native_h} calibration to {width}x{height} frames "
+            f"(x{scale:g}): fx, fy, cx, cy scaled; k1..k4 unchanged. The json stays native."
+        )
+    lines += [
         'Camera.type: "KannalaBrandt8"',
         f"Camera1.fx: {focal!r}",
         f"Camera1.fy: {focal!r}",
-        f"Camera1.cx: {float(intr['principal_pt_x'])!r}",
-        f"Camera1.cy: {float(intr['principal_pt_y'])!r}",
+        f"Camera1.cx: {float(intr['principal_pt_x']) * scale!r}",
+        f"Camera1.cy: {float(intr['principal_pt_y']) * scale!r}",
         *(f"Camera1.k{i}: {value!r}" for i, value in enumerate(k, start=1)),
-        f"Camera.width: {int(raw['image_width'])}",
-        f"Camera.height: {int(raw['image_height'])}",
+        f"Camera.width: {int(width)}",
+        f"Camera.height: {int(height)}",
     ]
     fps = raw.get("fps")
     if fps:

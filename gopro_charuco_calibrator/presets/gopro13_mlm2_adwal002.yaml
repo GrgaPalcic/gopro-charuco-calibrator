@@ -1,7 +1,14 @@
-title: "HERO13 + Max Lens Mod 2.0 (UMI gripper)"
-# Gripper camera for UMI-style demonstration capture, calibrated exactly as it
-# records: Max Lens Mod 2.0 fitted, USB webcam Wide, 1080p. With the mod on, the
-# webcam image is a ~167 deg circular fisheye with black corners.
+title: "HERO13 + Max Lens Mod 2.0 (ADWAL-002)"
+# HERO13 Black with Max Lens Mod 2.0 fitted (code ADWAL-002 printed on the mod).
+# The camera does not detect this mod by itself: select it on the camera, or let the
+# live route set it (setting 189 = 2) or scan the Labs QR code (oX2).
+#
+# Two routes, one preset:
+# - live over USB: the webcam stream, Wide, 1080p. With the mod on it is a ~167 deg
+#   circular fisheye with black corners. It calibrates the webcam stream only and is
+#   not valid for footage recorded on the camera;
+# - from a recording (the `recording:` section): a clip recorded on the camera in the
+#   dataset's own mode, 4K 4:3 60 fps, lens Ultra Wide, HyperSmooth Off.
 # double_sphere and kannala_brandt are solved by the OpenICC backend (build it once
 # with `gopro-charuco setup-openicc`):
 # - double_sphere is the reference: the only model valid over the whole circle,
@@ -35,3 +42,13 @@ solver:
     - double_sphere
     - kannala_brandt
     - fisheye
+recording:
+  lens_mod: ADWAL-002    # Labs oX2 = Max Lens Mod 2.0
+  width: 4000            # 4K 4:3, the only 4:3 size with the mod
+  height: 3000
+  fps: 60.0
+  lens: Ultra Wide
+  hypersmooth: "off"
+  calibration_shutter: "1/480"  # calibration clip only; the dataset goes back to Auto
+  shutter_angle_deg: 45         # 45 deg at 60 fps = 1/480 s
+  iso_max: 1600

@@ -1,0 +1,47 @@
+title: "HERO13 + Ultra Wide Lens Mod (AEWAL-001)"
+# HERO13 Black with the Ultra Wide Lens Mod fitted (code AEWAL-001 printed on the mod).
+# The camera detects this mod when it is fitted, so setting 189 is Auto Detect (100)
+# and the Labs QR code uses oX10 (auto-detect lens mods). GoPro says it has "the same
+# settings and features" as Max Lens Mod 2.0 except auto-detection.
+#
+# Two routes, one preset:
+# - live over USB: the webcam stream, Wide, 1080p. It calibrates the webcam stream
+#   only and is not valid for footage recorded on the camera;
+# - from a recording (the `recording:` section): a clip recorded on the camera in the
+#   dataset's own mode, 4K 4:3 60 fps, lens Ultra Wide, HyperSmooth Off.
+# See gopro13_mlm2_adwal002.yaml for what each solver model is for.
+camera:
+  camera_name: gopro13_uwlm_gripper
+  width: 1920
+  height: 1080
+  fps: 30.0
+gopro:
+  enabled: true
+  max_lens_mod: 100      # 100 = Auto Detect (setting 189); keep the mod fitted
+  webcam_fov: 0          # 0 = Wide
+  webcam_resolution: 12  # 12 = 1080p, the webcam maximum
+  webcam_port: 8554
+  webcam_protocol: TS
+board:
+  cols: 11
+  rows: 8
+  square_m: 0.034
+  marker_m: 0.025
+  aruco_dict: DICT_5X5_100
+  start_id: 2
+  marker_count: 44
+solver:
+  models:
+    - double_sphere
+    - kannala_brandt
+    - fisheye
+recording:
+  lens_mod: AEWAL-001    # Labs oX10 = auto-detect lens mods
+  width: 4000
+  height: 3000
+  fps: 60.0
+  lens: Ultra Wide
+  hypersmooth: "off"
+  calibration_shutter: "1/480"
+  shutter_angle_deg: 45
+  iso_max: 1600
