@@ -493,6 +493,11 @@ function runFacts(status, minFrames) {
     solved,
     pass: verdict.pass,
     stale,
+    // The only thing wrong is that the two fisheye solves disagree: OpenICC does not
+    // always settle the same way, so the solver's own advice is to solve again first
+    // and add edge views only if the gap stays.
+    solveFirst: solved && !verdict.pass && verdict.reasons.length > 0
+      && verdict.reasons.every((reason) => reason.startsWith(DISAGREE)),
     // Views were added (Resume) since the result shown: it does not include them.
     moreViews: live && results.length > 0 && ["capturing", "paused", "complete"].includes(state),
     // Something solved, but an OpenICC model the run asked for did not: its files
@@ -563,12 +568,12 @@ function stepStates(f) {
       solve = "current";
     } else if (state === "solved") {
       // A failed or incomplete solve is solved again; a retake goes back to capturing.
-      const again = !solved || incomplete;
+      const again = !solved || incomplete || f.solveFirst;
       capture = !again && !pass ? "current" : "done";
       solve = again ? "current" : "done";
     }
   } else {
-    if (state === "solving" || (enough && (!solved || incomplete))) {
+    if (state === "solving" || (enough && (!solved || incomplete || f.solveFirst))) {
       // Stopped (or the stream failed) with enough views: Solve is the next
       // step, not reconnecting. A stopped run cannot be resumed.
       connect = "pending";
@@ -590,13 +595,13 @@ function primaryButton(f, setupCurrent) {
   const {state, live, enough, solved, pass, canResume, incomplete} = f;
   if (setupCurrent) return null;
   if (state === "capturing" || state === "solving" || f.connecting) return null;
-  if (!live) return enough && (!solved || incomplete) ? solveBtn : previewBtn;
+  if (!live) return enough && (!solved || incomplete || f.solveFirst) ? solveBtn : previewBtn;
   if (state === "preview") return startRunBtn;
   if (state === "paused") return enough ? solveBtn : pauseResumeBtn;
   if (state === "complete") return solveBtn;
   if (state === "solved") {
     // Fix the reason on the red rows, then solve again.
-    if (!solved || incomplete) return solveBtn;
+    if (!solved || incomplete || f.solveFirst) return solveBtn;
     if (pass) return nextCameraBtn;
     // Retake: add views to this run, or, at the frame cap, start a fresh one.
     return canResume ? pauseResumeBtn : startRunBtn;
@@ -781,6 +786,8 @@ function drawGuideOverlay(status) {
 }
 
 const IDLE_PROMPT = "Open preview to start.";
+const SOLVE_FIRST = "Retake: the two fisheye solves disagree. Click Solve again; if the gap "
+  + "stays, add views near the edge of the circle.";
 const OTHER_CAMERA = "To do another camera, plug it in, give it its own Camera name in Settings "
   + "(it names the files), then click Open preview.";
 const NEXT_CAMERA_PROMPT = "Plug in the next GoPro, give it its own Camera name in Settings "
@@ -797,6 +804,7 @@ function resultPrompt(f) {
     return "Adding views to this run. Solve again to include the views added since the last solve.";
   }
   if (f.incomplete) return fixMissing(f);
+  if (f.solveFirst) return SOLVE_FIRST;
   if (!f.live) {
     return f.pass
       ? `Solved. Check the result below. ${OTHER_CAMERA}`
@@ -956,6 +964,9 @@ function gridRow(grid, key, value, {cls = "", notes = []} = {}) {
 
 // Plain-language warnings a model row carries: the solver's own, plus the UMI
 // check on the Kannala–Brandt row.
+// The start of the solver's Kannala-Brandt vs Double Sphere warning (solver.umi_check).
+const DISAGREE = "The two fisheye solves disagree";
+
 function resultWarnings(result) {
   const all = [...(result.warnings || []), ...(result.umi_check?.warnings || [])];
   return [...new Set(all)];
@@ -1035,7 +1046,7 @@ function renderResults(modelResults, coverage, mode, f) {
   // Rebuild only on a change: the status polls every 150 ms, and a rebuilt card
   // would drop a text selection (copying a file path) on every poll.
   const signature = JSON.stringify(
-    [modelResults, coverage, mode, f.live, f.canResume, f.missingText, f.moreViews],
+    [modelResults, coverage, mode, f.live, f.canResume, f.missingText, f.moreViews, f.solveFirst],
   );
   if (signature === resultsSignature) return;
   resultsSignature = signature;
@@ -1092,6 +1103,8 @@ function renderResults(modelResults, coverage, mode, f) {
     headline = `${lead} ${fixMissing(f)}`;
   } else if (pass) {
     headline = `Calibration passed. The files are listed below. ${next}`;
+  } else if (f.solveFirst) {
+    headline = SOLVE_FIRST;
   } else if (f.canResume) {
     headline = "Retake: Resume and add the views listed below, then Solve again.";
   } else {
@@ -1300,7 +1313,9 @@ function updateStatus(status) {
     solveLine = `${listText(facts.missing.map((r) => modelName(r.model)))} did not solve. `
       + `Fix the reason on the red ${rows} in the result below, then Solve again.`;
   } else if (solved && !facts.pass) {
-    solveLine = "Solved, but the result below asks for a retake.";
+    solveLine = facts.solveFirst
+      ? "The two fisheye solves disagree. Solve again; add edge views only if the gap stays."
+      : "Solved, but the result below asks for a retake.";
   } else if (solved) {
     solveLine = live
       ? "Done. Next camera ends this run so you can plug in the next GoPro."

@@ -156,7 +156,7 @@ in that same path. The same optics come out differently over each one.
 
 An early report (10 Jun) said webcam mode cannot apply Max Lens Mod processing, and is a dead end.
 The dead-end part is **wrong**: the webcam Wide frames with the mod fitted calibrate at 0.617 px
-with Double Sphere, better than the 167° recording (0.82 px). The failures that led to the belief
+with Double Sphere, better than the 167° recording (0.82 px) (both June, unpatched solver). The failures that led to the belief
 came from OpenCV's solvers and a board-layout bug (see [footguns.md](footguns.md)).
 
 Still **unverified**:

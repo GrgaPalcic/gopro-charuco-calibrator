@@ -131,7 +131,7 @@ it. Nothing is imported, linked or vendored, and each user builds the image them
   - the **match** is the largest pixel distance between the two models over rays out to that
     angle, counting only rays that land on the sensor, with Kannala–Brandt evaluated as UMI loads
     it (fy = fx);
-  - above 1 px (at 1080p; the limit scales with the image height), both rows get a warning to
+  - above 1 px (at 1080p and below; the limit grows with the image height above 1080 rows), both rows get a warning to
     solve again. Double Sphere is the recommended model, so its warning turns the result RETAKE.
     Click **Solve** again first; add views near the edge of the circle only if the gap stays.
     The reference is Double Sphere as solved, not the true lens, so either one can be the one
@@ -141,8 +141,9 @@ it. Nothing is imported, linked or vendored, and each user builds the image them
 
   On synthetic views, the For UMI comparison counted over every ray out to the reach (not only
   the rays on the sensor) was 0.13–0.28 px with the patched solver and 2.5–5.2 px unpatched (rim
-  scene, 5 runs each, 2026-09-29). Without rim views the unpatched gap stayed under 1 px even
-  though both models were off, so no warning does not rule out the old image (see
+  scene, 5 runs each, 2026-09-29). Without rim views the unpatched gap stayed under 1 px in those
+  5 runs even though both models were off (one of 3 reruns on 2026-09-30 reached 2.79 px), so no
+  warning does not rule out the old image (see
   [measurements.md](measurements.md#synthetic-max-lens-mod-through-openicc-2026-09-29)).
 
 ## On-camera recordings
@@ -263,7 +264,7 @@ and check the ray-to-pixel map against that true lens (not f):
 - that the patch applies to the pinned checkout and that `setup-openicc` applies it before
   `docker build` (these need no Docker).
 
-The Docker tests are skipped when the image is not built. The four took 22 s together on a
+The Docker tests are skipped when the image is not built. The four took 22–42 s together on a
 workstation CPU (2026-09-30); OpenICC's own run time varies from run to run.
 
 `tests/test_openicc_integration.py` solves Double Sphere (only) on real frames when `FRAMES_DIR`

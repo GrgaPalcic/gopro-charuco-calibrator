@@ -40,8 +40,9 @@ needs `sudo`, except possibly a one-time [firewall rule](#firewall).
 Calibrating a Max Lens Mod for UMI? Do step 1 of
 [that section](#hero13-with-the-max-lens-mod-20) (`setup-openicc`) first.
 
-Then work through the four steps across the top. The amber button is always the next thing to
-click, and a greyed-out button tells you why when you hover over it.
+Then work through the four steps across the top. When a button is amber, it is the next thing to
+click; while you move the board or a solve runs, none is. A greyed-out button tells you why when
+you hover over it.
 
 1. **Camera setup.** Pick the camera and lens you will record with, for example
    "HERO13 + Max Lens Mod 2.0 (UMI gripper)". The settings on the right fill in at once.
@@ -55,7 +56,8 @@ click, and a greyed-out button tells you why when you hover over it.
    enough views. The result names the recommended model and lists the files it wrote, with what
    each one is for. Its badge says:
    - **PASS:** the coverage targets are met and the recommended model looks sound;
-   - **RETAKE:** click **Resume**, add the views it asks for, and solve again;
+   - **RETAKE:** follow the amber button: usually **Resume**, add the views it asks for, and solve
+     again; when the only problem is that the two fisheye solves disagree, **Solve** again first;
    - **INCOMPLETE:** Double Sphere or the UMI file (Kannala–Brandt) did not solve, for example
      because the OpenICC image is not built; the result says how to fix it;
    - **FAILED:** no model solved; the reasons are listed.
@@ -81,7 +83,7 @@ mod fitted, USB webcam Wide, 1080p.
    ```bash
    uv run gopro-charuco serve --config gopro_charuco_calibrator/presets/gopro13_umi_gripper_fisheye_1080p.yaml
    ```
-   Or pick "HERO13 + Max Lens Mod 2.0 (UMI gripper)" in step 1.
+   Or pick "HERO13 + Max Lens Mod 2.0 (UMI gripper)" under **Camera setup**, the app's first step.
 3. **Before capturing, check:**
    - the preview is a **round image with black corners**. If it isn't, stop and check the Lens and
      Mod chips: the mod may be off or the lens mode wrong;
@@ -93,8 +95,8 @@ mod fitted, USB webcam Wide, 1080p.
      Resume, add edge views, solve again.
    - The **For UMI** row reads "Kannala–Brandt for UMI: matches Double Sphere within X px out to
      Y°". Y is the widest angle the board reached. If the two disagree by more than 1 px (at
-     1080p), the result turns RETAKE and lists the gap: click **Solve** again first, and add views
-     near the edge of the circle only if the gap stays. A warning about the aspect ratio only adds
+     1080p), the result turns RETAKE and lists the gap, and the amber button is **Solve**: solve
+     again first, and add views near the edge of the circle only if the gap stays. A warning about the aspect ratio only adds
      a note under PASS ("See the note on the For UMI row").
    - For scale: on simulated Max Lens Mod views, where the true lens is known, both models landed
      within 0.5 px of it out to the widest angle the board reached
@@ -103,10 +105,12 @@ mod fitted, USB webcam Wide, 1080p.
      with the older unpatched solver.
 6. **Use the files.** For UMI, use `<camera>_kannala_brandt.json`: UMI reads a fixed file name,
    so copy it as `gopro_intrinsics_2_7k.json` into a calibration folder that also holds
-   `aruco_config.yaml`, and run `run_slam_pipeline.py -c <that folder>`. For UMI's ORB-SLAM3,
-   `<camera>_kannala_brandt_orbslam3.yaml` replaces the camera lines of UMI's own settings file,
-   `gopro10_maxlens_fisheye_setting_v1_720.yaml`, which sits inside UMI's SLAM Docker image
-   ([how, and what we have not checked](docs/umi-and-deployment.md#loading-our-calibration-in-umi)).
+   `aruco_config.yaml` (UMI's `example/calibration/aruco_config.yaml`, or your own if your gripper
+   markers differ), and run `python run_slam_pipeline.py -c <that folder> <session_dir>`. For
+   UMI's ORB-SLAM3, `<camera>_kannala_brandt_orbslam3.yaml` replaces the lines with the same keys
+   in UMI's settings file, `gopro10_maxlens_fisheye_setting_v1_720.yaml`; keep its `File.version`,
+   `Camera.RGB` and IMU lines. UMI's SLAM also masks its own gripper, so read
+   [what we have not checked](docs/umi-and-deployment.md#loading-our-calibration-in-umi) first.
    The Double Sphere JSON is the reference fit for tools that take that model.
 
 The Max Lens Mod preset sets setting 189 = Max Lens 2.0, which tells the camera the mod is fitted.

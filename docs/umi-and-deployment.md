@@ -55,7 +55,10 @@ detections as Double Sphere, and writes two files for UMI:
   folder given by `-c` (default `example/calibration`), and passes the json to
   `scripts_slam_pipeline/04_detect_aruco.py` as `--camera_intrinsics`. So copy our file as
   `gopro_intrinsics_2_7k.json` into a calibration folder that also holds your
-  `aruco_config.yaml`, and run `run_slam_pipeline.py -c <that folder>`. Under any other name the
+  `aruco_config.yaml` (UMI's `example/calibration/aruco_config.yaml`, or your own if your gripper
+  markers differ), and run `python run_slam_pipeline.py -c <that folder> <session_dir>`. The
+  session folder is required: `session_dir` is a positional argument the script loops over, so
+  without one it does nothing and exits without an error. Under any other name the
   pipeline stops on a missing file, or, without `-c`, keeps using UMI's HERO9 file. **verified**
   from UMI's code on 2026-09-30, not from a run.
 - **`aspect_ratio` is ignored.** UMI reads `focal_length` for both fx and fy. The app therefore
@@ -69,19 +72,28 @@ detections as Double Sphere, and writes two files for UMI:
   `Camera.type: "KannalaBrandt8"`, `Camera1.fx/fy/cx/cy`, `Camera1.k1`–`k4`, width, height and fps,
   with fx = fy, in the same key names UMI's file uses. What UMI's SLAM needs around it, **verified**
   from UMI's and `cheng-chi/ORB_SLAM3`'s code on 2026-09-30:
-  - **The file to edit.** UMI's only settings file is inside the `chicheng/orb_slam3` Docker image,
-    at `/ORB_SLAM3/Examples/Monocular-Inertial/gopro10_maxlens_fisheye_setting_v1_720.yaml`. Its
-    path is written into `scripts_slam_pipeline/02_create_map.py` and
-    `scripts_slam_pipeline/03_batch_slam.py` as `--setting`. To use our block, put it in place of
-    that file's camera lines, mount the edited file into the container, and change the path in
-    those two scripts.
+  - **The file to edit.** UMI runs SLAM with
+    `/ORB_SLAM3/Examples/Monocular-Inertial/gopro10_maxlens_fisheye_setting_v1_720.yaml` inside the
+    `chicheng/orb_slam3` Docker image; a copy is in `cheng-chi/ORB_SLAM3` under
+    `Examples/Monocular-Inertial/`. Its path is written into
+    `scripts_slam_pipeline/02_create_map.py` and `scripts_slam_pipeline/03_batch_slam.py` as
+    `--setting`. To use our block, replace the lines with the same keys and keep the file's
+    `File.version`, `Camera.RGB` (ORB-SLAM3 refuses to start without it) and IMU lines. Then mount
+    the edited file into the container and change the path in those two scripts.
   - **The block's size sets SLAM's frame size.** UMI's `gopro_slam.cc` resizes every frame to
     `Camera.width` × `Camera.height`. UMI's file is 960×720; our block is 1920×1080, so SLAM
     runs on full-size frames. To keep a smaller size, scale fx, fy, cx and cy by the same factor
     as the width and height; k1–k4 stay as they are.
-  - **The IMU block is not ours.** Its `IMU.T_b_c1` and noise values were calibrated with OpenICC
-    for UMI's HERO10. Whether they fit a HERO13 is not known (**inferred** that they need their own
+  - **The IMU block is not ours.** The file's comments say its `IMU.T_b_c1` and noise values were
+    calibrated with OpenICC; the file is named for a HERO10 (`gopro10_…`), while the paper's rig is
+    a HERO9. Whether they fit a HERO13 is not known (**inferred** that they need their own
     calibration), and this app does not calibrate them.
+  - **The SLAM mask is UMI's gripper.** `02_create_map.py` and `03_batch_slam.py` draw UMI's
+    mirror and finger mask (`draw_predefined_mask`) on a 2704×2028 (4:3) canvas, and
+    `gopro_slam.cc` resizes it to `Camera.width` × `Camera.height`. With our 1920×1080 block the
+    mask is stretched to 16:9 and blacks out areas laid out for UMI's HERO9 and Mod 1.0 gripper,
+    not ours. `03_batch_slam.py` always applies it; only `02_create_map.py` can skip it (`-nm`).
+    Redraw the mask for our frame and gripper before relying on SLAM (not checked).
   - **The IMU track.** UMI's SLAM is inertial and reads the IMU from the GPMF track of on-camera
     mp4 recordings. Whether a webcam-stream recording can supply it has not been checked.
 

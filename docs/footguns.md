@@ -183,10 +183,10 @@ This was the most expensive bug. It made a good lens look impossible for days.
 ### An old OpenICC image is off at a good RMS
 - **Symptom:** with the old `openicc` image (set through `OPENICC_DOCKER_IMAGE`), both fisheye
   solves report a fine RMS, but the **For UMI** row may warn that they disagree, mostly when the
-  board reached the rim of the circle (2.5–5.2 px on synthetic rim views). Without rim views the
-  gap often stays under the 1 px limit, so no warning does not rule out the old image. With the
-  current app and only the old image built, the Double Sphere and Kannala–Brandt rows instead say
-  the image is not built.
+  board reached the rim of the circle (3.0–3.4 px on synthetic rim views, counted as the row counts
+  them). Without rim views the gap often stays under the 1 px limit, so no warning does not rule
+  out the old image. With the current app and only the old image built, the Double Sphere and
+  Kannala–Brandt rows instead say the image is not built.
 - **Cause:** at the pinned commit, OpenICC's final adjustment leaves the Double Sphere and
   Kannala–Brandt distortion fitted around the image centre instead of the real principal point.
   On synthetic Max Lens Mod views that put the unpatched solver 0.6–4.2 px off the true lens, with
@@ -256,7 +256,7 @@ Kept so the same mistakes are not made twice.
 
 | Claim | Status | What is true |
 |---|---|---|
-| "USB webcam can't use the Max Lens Mod; it's a dead end" (06-10) | wrong | The webcam frames calibrate at 0.617 px with Double Sphere. The failures were OpenCV's solvers plus the layout bug. |
+| "USB webcam can't use the Max Lens Mod; it's a dead end" (06-10) | wrong | The webcam frames calibrate at 0.617 px with Double Sphere (June, unpatched solver). The failures were OpenCV's solvers plus the layout bug. |
 | "The board is verified correct" (06-10) | wrong in detail | The geometry was right, but the marker parity was mirrored. |
 | "The user does not own a GoPro 13" (06-10) | wrong | The 06-10 gripper run is HERO13 + Max Lens Mod 2.0. Only the `gopro13_hyperview_*` folders were mislabelled. |
 | "UMI calibrates with Double Sphere" | wrong | UMI's committed intrinsics are OpenICC `FISHEYE` (KB). OpenICC merely offers DS and EUCM. |
